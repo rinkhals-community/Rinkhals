@@ -424,48 +424,94 @@ void discover_offsets() {
     }
     if (s_log) fprintf(stderr, "[zoffset-discover] AcDeviceLeviqGetZoffset @ 0x%x\n", getz_addr);
 
-    // Step 2: scan .text for `bl <getZoffset>`, then the popup-load pattern.
-    uint32_t  text_vma  = text_shdr->sh_addr;
-    uint32_t  text_file = text_shdr->sh_offset;
-    uint32_t  text_size = text_shdr->sh_size;
-    uint32_t* code = reinterpret_cast<uint32_t*>(
-        static_cast<char*>(base) + text_file);
-    int word_count = text_size / 4;
+    // Step 2: Find the dispatcher lambda in AcFilePrintPageUiInit and bound
+    // the scan to inside its body. There are several callers of
+    // AcDeviceLeviqGetZoffset in K3SysUi (8 on KS1 2.7.2.1); only the
+    // dispatcher case 10 has the popup-load pattern we want. Scanning all of
+    // .text would match the first caller, which produces a wrong offset.
+    //
+    // The dispatcher is a lambda taking int inside
+    // MainWindow::AcFilePrintPageUiInit(). Its mangled name has the form:
+    //   _ZZN10MainWindow21AcFilePrintPageUiInitEvENKUliE<N>_clEi
+    // where <N> is a base-36 lambda index that may differ per build. Match the
+    // prefix + suffix and check each candidate for a bl to getZoffset; only
+    // case 10 calls it.
+    const char* lambda_prefix = "_ZZN10MainWindow21AcFilePrintPageUiInitEvENKUli";
+    const char* lambda_suffix = "_clEi";
+    const size_t prefix_len = strlen(lambda_prefix);
+    const size_t suffix_len = strlen(lambda_suffix);
 
-    for (int i = 0; i + 1 < word_count; i++) {
-        uint32_t pc = text_vma + i * 4;
-        uint32_t bl_target = 0;
-        if (!decode_bl_target(code[i], pc, &bl_target)) continue;
-        if (bl_target != getz_addr) continue;
+    const uint32_t text_vma  = text_shdr->sh_addr;
+    const uint32_t text_file = text_shdr->sh_offset;
+    const uint32_t text_size = text_shdr->sh_size;
 
-        // Found bl to getZoffset; scan forward for the popup-load pattern.
-        int scan_end = i + constants::kDiscoveryScanWindow;
-        if (scan_end >= word_count - 1) scan_end = word_count - 2;
-        for (int j = i + 1; j <= scan_end; j++) {
-            uint32_t ldr_inst = code[j];
-            uint32_t mov_inst = code[j + 1];
-            const bool is_ldr_r3_r3_imm =
-                (ldr_inst & constants::kArmLdrR3R3ImmMask) == constants::kArmLdrR3R3Imm;
-            const bool is_mov_r0_r3 = (mov_inst == constants::kArmMovR0R3);
-            if (!is_ldr_r3_r3_imm || !is_mov_r0_r3) continue;
+    for (int i = 0; i < symbol_count; i++) {
+        if (ELF32_ST_TYPE(symtab[i].st_info) != STT_FUNC) continue;
+        const char* sym_name = strtab + symtab[i].st_name;
+        const size_t name_len = strlen(sym_name);
 
-            uint32_t imm = ldr_inst & 0xfff;
-            const bool plausible_member_offset =
-                imm >= static_cast<uint32_t>(constants::kPopupOffsetMin) &&
-                imm <  static_cast<uint32_t>(constants::kPopupOffsetMax);
-            if (!plausible_member_offset) continue;
+        if (name_len <= prefix_len + suffix_len) continue;
+        if (strncmp(sym_name, lambda_prefix, prefix_len) != 0) continue;
+        if (strcmp(sym_name + name_len - suffix_len, lambda_suffix) != 0) continue;
 
-            s_popup_offset = static_cast<int>(imm);
+        // Candidate lambda(int) inside AcFilePrintPageUiInit. Locate its body
+        // in the mapped binary.
+        const uint32_t lambda_addr = symtab[i].st_value;
+        const uint32_t lambda_size = symtab[i].st_size;
+        if (lambda_addr < text_vma) continue;
+        if (lambda_addr + lambda_size > text_vma + text_size) continue;
+        const uint32_t lambda_file = text_file + (lambda_addr - text_vma);
+        uint32_t* lambda_code = reinterpret_cast<uint32_t*>(
+            static_cast<char*>(base) + lambda_file);
+        const int lambda_words = lambda_size / 4;
+
+        // Walk this lambda looking for `bl getZoffset`. If found, this IS the
+        // dispatcher case 10.
+        for (int j = 0; j + 2 < lambda_words; j++) {
+            uint32_t pc = lambda_addr + j * 4;
+            uint32_t bl_target = 0;
+            if (!decode_bl_target(lambda_code[j], pc, &bl_target)) continue;
+            if (bl_target != getz_addr) continue;
+
             if (s_log) fprintf(stderr,
-                "[zoffset-discover] popup offset discovered: 0x%x (at .text+0x%x)\n",
-                imm, static_cast<uint32_t>(j * 4 + text_file));
-            munmap(base, st.st_size);
-            return;
+                "[zoffset-discover] found dispatcher lambda %s @ 0x%x (bl getZoffset @ 0x%x)\n",
+                sym_name, lambda_addr, pc);
+
+            // Scan forward inside this lambda for the popup-load triple:
+            //   ldr r3, [r3, #N]
+            //   mov r0, r3
+            //   bl  <anything> (the QWidget::show call)
+            int scan_end = j + constants::kDiscoveryScanWindow;
+            if (scan_end > lambda_words - 3) scan_end = lambda_words - 3;
+            for (int k = j + 1; k <= scan_end; k++) {
+                uint32_t ldr_inst = lambda_code[k];
+                uint32_t mov_inst = lambda_code[k + 1];
+                uint32_t bl_inst  = lambda_code[k + 2];
+                const bool is_ldr_r3_r3_imm =
+                    (ldr_inst & constants::kArmLdrR3R3ImmMask) == constants::kArmLdrR3R3Imm;
+                const bool is_mov_r0_r3 = (mov_inst == constants::kArmMovR0R3);
+                const bool is_bl =
+                    (bl_inst & constants::kArmBlOpcodeMask) == constants::kArmBlOpcode;
+                if (!is_ldr_r3_r3_imm || !is_mov_r0_r3 || !is_bl) continue;
+
+                uint32_t imm = ldr_inst & 0xfff;
+                const bool plausible_member_offset =
+                    imm >= static_cast<uint32_t>(constants::kPopupOffsetMin) &&
+                    imm <  static_cast<uint32_t>(constants::kPopupOffsetMax);
+                if (!plausible_member_offset) continue;
+
+                s_popup_offset = static_cast<int>(imm);
+                if (s_log) fprintf(stderr,
+                    "[zoffset-discover] popup offset discovered: 0x%x (at .text+0x%x)\n",
+                    imm, static_cast<uint32_t>((j + (k - j)) * 4 + lambda_file));
+                munmap(base, st.st_size);
+                return;
+            }
         }
     }
 
     if (s_log) fprintf(stderr,
-        "[zoffset-discover] pattern not matched; using fallback popup offset 0x%x\n",
+        "[zoffset-discover] dispatcher lambda not found; using fallback popup offset 0x%x\n",
         s_popup_offset);
     munmap(base, st.st_size);
 }
