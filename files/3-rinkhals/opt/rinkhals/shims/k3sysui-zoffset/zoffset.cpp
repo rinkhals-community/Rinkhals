@@ -20,6 +20,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <elf.h>
 
 extern "C" {
 
@@ -91,6 +95,135 @@ static void resolve_qt(void) {
 
 // Forward declaration: event filter defined later, used by inject_new_button.
 bool zoffset_eventFilter(void* this_obj, void* watched, void* event);
+
+// =========================================================================
+// Dynamic offset discovery
+//
+// Reads K3SysUi's own ELF symbol table and disassembles the relevant case 10
+// handler in MainWindow::AcFilePrintPageUiInit's button-clicked dispatcher to
+// extract the popup widget offset from MainWindow (hardcoded as 0x530 on KS1
+// 2.7.2.1, but varies per binary).
+//
+// Approach (no libelf, no capstone - just ELF struct casting and ARM opcode
+// pattern matching):
+//   1. mmap /proc/self/exe (the K3SysUi binary; not stripped, so .symtab is
+//      present).
+//   2. Find MainWindow::AcDeviceLeviqGetZoffset() by mangled name. The case 10
+//      handler is the only place that calls it.
+//   3. Scan all of .text for `bl <getZoffset>`. ARM bl encoding:
+//        0xeb000000 | (signed 24-bit instruction offset)
+//        target = PC + 8 + offset*4
+//   4. After each matching bl, scan forward up to ~50 instructions for the
+//      pattern  `ldr r3, [r3, #N]; mov r0, r3`. The N is the popup widget
+//      offset. (This pair specifically loads the popup pointer right before
+//      `bl QWidget::show()@plt`.)
+//   5. Fall back to the KS1 2.7.2.1 known value of 0x530 if discovery fails.
+// =========================================================================
+
+static int s_popup_offset = 0x530;       // default; replaced by discover_offsets()
+static int s_popup_offset_discovered = 0;
+
+static int decode_bl_target(uint32_t inst, uint32_t pc, uint32_t* out_target) {
+    if ((inst & 0xff000000) != 0xeb000000) return 0;
+    int32_t off = (int32_t)(inst << 8) >> 8; // sign-extend lower 24 bits
+    *out_target = pc + 8 + (uint32_t)(off * 4);
+    return 1;
+}
+
+static void discover_offsets(void) {
+    if (s_popup_offset_discovered) return;
+    s_popup_offset_discovered = 1; // attempt only once
+
+    int fd = open("/proc/self/exe", O_RDONLY);
+    if (fd < 0) { if (s_log) fprintf(stderr, "[zoffset-discover] open /proc/self/exe failed\n"); return; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0x1000) { close(fd); return; }
+
+    void* base = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) { if (s_log) fprintf(stderr, "[zoffset-discover] mmap failed\n"); return; }
+
+    Elf32_Ehdr* eh = (Elf32_Ehdr*)base;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32) {
+        if (s_log) fprintf(stderr, "[zoffset-discover] not a valid 32-bit ELF\n");
+        munmap(base, st.st_size);
+        return;
+    }
+
+    // Section headers
+    Elf32_Shdr* sh = (Elf32_Shdr*)((char*)base + eh->e_shoff);
+    const char* shstrtab = (const char*)base + sh[eh->e_shstrndx].sh_offset;
+    Elf32_Shdr *symtab_sh = 0, *strtab_sh = 0, *text_sh = 0;
+    for (int i = 0; i < eh->e_shnum; i++) {
+        const char* name = shstrtab + sh[i].sh_name;
+        if      (strcmp(name, ".symtab") == 0) symtab_sh = &sh[i];
+        else if (strcmp(name, ".strtab") == 0) strtab_sh = &sh[i];
+        else if (strcmp(name, ".text")   == 0) text_sh   = &sh[i];
+    }
+    if (!symtab_sh || !strtab_sh || !text_sh) {
+        if (s_log) fprintf(stderr, "[zoffset-discover] missing .symtab/.strtab/.text\n");
+        munmap(base, st.st_size);
+        return;
+    }
+
+    Elf32_Sym* syms = (Elf32_Sym*)((char*)base + symtab_sh->sh_offset);
+    const char* strs = (const char*)base + strtab_sh->sh_offset;
+    int nsyms = symtab_sh->sh_size / sizeof(Elf32_Sym);
+
+    // Step 1: find MainWindow::AcDeviceLeviqGetZoffset() address.
+    const char* getz_name = "_ZN10MainWindow23AcDeviceLeviqGetZoffsetEv";
+    uint32_t getz_addr = 0;
+    for (int i = 0; i < nsyms; i++) {
+        if (ELF32_ST_TYPE(syms[i].st_info) != STT_FUNC) continue;
+        const char* nm = strs + syms[i].st_name;
+        if (strcmp(nm, getz_name) == 0) { getz_addr = syms[i].st_value; break; }
+    }
+    if (!getz_addr) {
+        if (s_log) fprintf(stderr, "[zoffset-discover] %s not found in symbols\n", getz_name);
+        munmap(base, st.st_size);
+        return;
+    }
+    if (s_log) fprintf(stderr, "[zoffset-discover] AcDeviceLeviqGetZoffset @ 0x%x\n", getz_addr);
+
+    // Step 2: scan .text for bl <getz> followed by  ldr r3,[r3,#N]; mov r0,r3
+    uint32_t text_vma  = text_sh->sh_addr;
+    uint32_t text_file = text_sh->sh_offset;
+    uint32_t text_size = text_sh->sh_size;
+    uint32_t* code = (uint32_t*)((char*)base + text_file);
+    int nwords = text_size / 4;
+
+    for (int i = 0; i + 1 < nwords; i++) {
+        uint32_t pc = text_vma + i * 4;
+        uint32_t target = 0;
+        if (!decode_bl_target(code[i], pc, &target)) continue;
+        if (target != getz_addr) continue;
+
+        // Found bl to getZoffset. Scan forward for the popup-load pattern.
+        int max_j = i + 50;
+        if (max_j >= nwords - 1) max_j = nwords - 2;
+        for (int j = i + 1; j <= max_j; j++) {
+            uint32_t ldr = code[j];
+            uint32_t mov = code[j + 1];
+            // ldr r3, [r3, #N]   = 0xE5933NNN
+            // mov r0, r3         = 0xE1A00003
+            if ((ldr & 0xfffff000) == 0xe5933000 && mov == 0xe1a00003) {
+                uint32_t n = ldr & 0xfff;
+                // Sanity: popup offset should be a non-trivial MainWindow member
+                if (n >= 0x40 && n < 0x10000) {
+                    s_popup_offset = (int)n;
+                    if (s_log) fprintf(stderr,
+                        "[zoffset-discover] popup offset discovered: 0x%x (at .text+0x%x)\n",
+                        n, (uint32_t)(j * 4 + text_file));
+                    munmap(base, st.st_size);
+                    return;
+                }
+            }
+        }
+    }
+
+    if (s_log) fprintf(stderr, "[zoffset-discover] pattern not matched; using fallback popup offset 0x%x\n", s_popup_offset);
+    munmap(base, st.st_size);
+}
 
 // Registry: each entry maps an ancestor widget pointer to our injected button.
 // When the global event filter sees Show/Hide on any registered ancestor, we
@@ -373,7 +506,7 @@ static void inject_new_button(void* group, void* template_btn) {
         void* popup = 0;
         g_jmp_armed = 1;
         if (sigsetjmp(g_jmp, 1) == 0) {
-            popup = *(void**)((char*)s_mainwindow + 0x530);
+            popup = *(void**)((char*)s_mainwindow + s_popup_offset);
         }
         g_jmp_armed = 0;
         if (s_log) fprintf(stderr, "[zoffset-2b] popup widget = %p\n", popup);
@@ -435,15 +568,15 @@ static void on_sigusr1(int) {
         fprintf(stderr, "[zoffset-2b] SIGUSR1: no MainWindow saved\n");
         return;
     }
-    fprintf(stderr, "[zoffset-2b] SIGUSR1: attempting popup->show() via MainWindow+0x530\n");
+    fprintf(stderr, "[zoffset-2b] SIGUSR1: attempting popup->show() via MainWindow+0x%x\n", s_popup_offset);
     g_jmp_armed = 1;
     if (sigsetjmp(g_jmp, 1) != 0) {
         fprintf(stderr, "[zoffset-2b] SIGUSR1: SEGV reading popup ptr\n");
         g_jmp_armed = 0; return;
     }
-    void* popup = *(void**)((char*)s_mainwindow + 0x530);
+    void* popup = *(void**)((char*)s_mainwindow + s_popup_offset);
     g_jmp_armed = 0;
-    fprintf(stderr, "[zoffset-2b] SIGUSR1: popup_ptr at MainWindow+0x530 = %p\n", popup);
+    fprintf(stderr, "[zoffset-2b] SIGUSR1: popup_ptr at MainWindow+0x%x = %p\n", s_popup_offset, popup);
     if ((uintptr_t)popup < 0x10000) { fprintf(stderr, "[zoffset-2b] SIGUSR1: implausible popup ptr\n"); return; }
 
     resolve_qt();
@@ -563,6 +696,10 @@ static void rinkhals_zoffset_init(void) {
         sigaction(SIGUSR1, &su, 0);
         fprintf(stderr, "[zoffset-2b] loaded pid=%d (log=%d unhide=%d inject=%d) SIGUSR1=popup-show\n",
                 (int)getpid(), s_log, s_unhide, s_inject);
+
+        // Discover Anycubic-specific offsets from the K3SysUi binary now so
+        // subsequent uses pick up the discovered value (or fall back gracefully).
+        discover_offsets();
     }
     memset(s_tracks, 0, sizeof(s_tracks));
     memset(s_id10_buttons, 0, sizeof(s_id10_buttons));
