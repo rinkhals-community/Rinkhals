@@ -190,7 +190,7 @@ RUN GOOS=linux GOARCH=arm go build -ldflags="-s -w" -o /rinkhals-patcher .
 FROM build-base AS prepare-bundle
 
 COPY --from=build-patcher /rinkhals-patcher /bundle/rinkhals/opt/rinkhals/bin/rinkhals-patcher
-COPY --from=buildroot-rebuild /files/1-buildroot/ /bundle/rinkhals/
+COPY --from=buildroot-build /files/1-buildroot/ /bundle/rinkhals/
 COPY --from=build-python-armv7 /files/2-python/ /bundle/rinkhals/
 COPY --from=app-mainsail /files/4-apps/ /bundle/rinkhals/
 COPY --from=app-fluidd /files/4-apps/ /bundle/rinkhals/
