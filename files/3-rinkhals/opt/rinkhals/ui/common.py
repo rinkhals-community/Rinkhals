@@ -1306,17 +1306,21 @@ class BaseApp:
             panel_actions.set_width(lv.pct(100))
             panel_actions.set_flex_flow(lv.FLEX_FLOW.ROW)
             panel_actions.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
-            panel_actions.set_style_pad_column(lv.dpx(15), lv.STATE.DEFAULT)
+            panel_actions.set_style_pad_column(lv.dpx(10), lv.STATE.DEFAULT)
             panel_actions.set_style_pad_all(0, lv.STATE.DEFAULT)
             panel_actions.set_style_pad_top(lvr.get_global_margin(), lv.STATE.DEFAULT)
 
             self.modal_ota_firmware.button_cancel = lvr.button(panel_actions)
-            self.modal_ota_firmware.button_cancel.set_width(lv.pct(45))
+            self.modal_ota_firmware.button_cancel.set_width(lv.pct(30))
             self.modal_ota_firmware.button_cancel.set_text('Cancel')
             self.modal_ota_firmware.button_cancel.add_event_cb(lambda e: self.hide_modal(), lv.EVENT_CODE.CLICKED, None)
             
+            self.modal_ota_firmware.button_usb = lvr.button(panel_actions)
+            self.modal_ota_firmware.button_usb.set_width(lv.pct(30))
+            self.modal_ota_firmware.button_usb.set_text('To USB')
+
             self.modal_ota_firmware.button_action = lvr.button(panel_actions)
-            self.modal_ota_firmware.button_action.set_width(lv.pct(45))
+            self.modal_ota_firmware.button_action.set_width(lv.pct(30))
             self.modal_ota_firmware.button_action.set_text('Download')
 
     def show_ota(self, force=False):
@@ -1776,25 +1780,40 @@ class BaseApp:
         else:
             self.modal_ota_firmware.label_warning.add_flag(lv.OBJ_FLAG.HIDDEN)
 
-        def download_version():
+        def download_version(target='local'):
             lv.lock()
             self.modal_ota_firmware.button_action.set_state(lv.STATE.DISABLED, True)
+            self.modal_ota_firmware.button_usb.set_state(lv.STATE.DISABLED, True)
             self.modal_ota_firmware.panel_progress.remove_flag(lv.OBJ_FLAG.HIDDEN)
             self.modal_ota_firmware.obj_progress_bar.set_style_bg_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
             self.modal_ota_firmware.obj_progress_bar.set_width(lv.pct(0))
             self.modal_ota_firmware.label_progress_text.set_text('Starting...')
             lv.unlock()
 
-            target_directory = f'{RINKHALS_BASE}/tmp'
-            os.makedirs(target_directory, exist_ok=True)
-            target_path = f'{target_directory}/update-download.swu' if USING_SIMULATOR else '/useremain/update.swu'
+            printer_info = PrinterInfo.get()
+
+            if target == 'usb':
+                model = printer_info.model_code or 'UNKNOWN'
+                target_directory = '/mnt/udisk'
+                if not os.path.exists(target_directory) and not USING_SIMULATOR:
+                    lv.lock()
+                    self.modal_ota_firmware.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                    self.modal_ota_firmware.label_progress_text.set_text('No USB Drive attached')
+                    self.modal_ota_firmware.button_action.set_state(lv.STATE.DISABLED, False)
+                    self.modal_ota_firmware.button_usb.set_state(lv.STATE.DISABLED, False)
+                    lv.unlock()
+                    return
+                target_path = f'{target_directory}/{model}_{version.version}.swu' if not USING_SIMULATOR else f'{RINKHALS_BASE}/tmp/{model}_{version.version}.swu'
+            else:
+                target_directory = f'{RINKHALS_BASE}/tmp'
+                os.makedirs(target_directory, exist_ok=True)
+                target_path = f'{target_directory}/update-download.swu' if USING_SIMULATOR else '/useremain/update.swu'
 
             try:
-                logging.info(f'Downloading Rinkhals {version.version} from {version.url}...')
+                logging.info(f'Downloading Firmware {version.version} from {version.url}...')
 
                 import requests
 
-                printer_info = PrinterInfo.get()
                 current_version = Rinkhals.get_current_version()
 
                 headers = {
@@ -1845,20 +1864,31 @@ class BaseApp:
 
                 logging.info('Download completed.')
 
-                lv.lock()
-                self.modal_ota_firmware.obj_progress_bar.set_width(lv.pct(100))
-                self.modal_ota_firmware.label_progress_text.set_text('Ready to install')
-                self.modal_ota_firmware.button_action.set_text('Install')
-                self.modal_ota_firmware.button_action.set_style_text_color(lvr.COLOR_DANGER if warning_test else lvr.COLOR_TEXT, lv.STATE.DEFAULT)
-                self.modal_ota_firmware.button_action.clear_event_cb()
-                self.modal_ota_firmware.button_action.add_event_cb(lambda e: run_async(install_version), lv.EVENT_CODE.CLICKED, None)
-                lv.unlock()
+                if target == 'usb':
+                    system('sync')
+                    lv.lock()
+                    self.modal_ota_firmware.obj_progress_bar.set_width(lv.pct(100))
+                    self.modal_ota_firmware.label_progress_text.set_text('Saved to USB')
+                    self.modal_ota_firmware.button_usb.set_state(lv.STATE.DISABLED, False)
+                    self.modal_ota_firmware.button_action.set_state(lv.STATE.DISABLED, False)
+                    lv.unlock()
+                else:
+                    lv.lock()
+                    self.modal_ota_firmware.obj_progress_bar.set_width(lv.pct(100))
+                    self.modal_ota_firmware.label_progress_text.set_text('Ready to install')
+                    self.modal_ota_firmware.button_action.set_text('Install')
+                    self.modal_ota_firmware.button_action.set_style_text_color(lvr.COLOR_DANGER if warning_test else lvr.COLOR_TEXT, lv.STATE.DEFAULT)
+                    self.modal_ota_firmware.button_action.clear_event_cb()
+                    self.modal_ota_firmware.button_action.add_event_cb(lambda e: run_async(install_version), lv.EVENT_CODE.CLICKED, None)
+                    lv.unlock()
             except Exception as e:
                 logging.info(f'Download failed. {e}')
 
                 lv.lock()
                 self.modal_ota_firmware.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
                 self.modal_ota_firmware.label_progress_text.set_text('Failed')
+                self.modal_ota_firmware.button_action.set_state(lv.STATE.DISABLED, False)
+                self.modal_ota_firmware.button_usb.set_state(lv.STATE.DISABLED, False)
                 lv.unlock()
                 
             lv.lock()
@@ -1904,10 +1934,15 @@ class BaseApp:
         self.modal_ota_firmware.button_action.set_style_text_color(lvr.COLOR_TEXT, lv.STATE.DEFAULT)
         self.modal_ota_firmware.panel_progress.add_flag(lv.OBJ_FLAG.HIDDEN)
         self.modal_ota_firmware.button_cancel.set_state(lv.STATE.DISABLED, False)
+        
+        self.modal_ota_firmware.button_usb.set_state(lv.STATE.DISABLED, False)
+        self.modal_ota_firmware.button_usb.clear_event_cb()
+        self.modal_ota_firmware.button_usb.add_event_cb(lambda e: run_async(lambda: download_version('usb')), lv.EVENT_CODE.CLICKED, None)
+
         self.modal_ota_firmware.button_action.set_text('Download')
         self.modal_ota_firmware.button_action.set_state(lv.STATE.DISABLED, False)
         self.modal_ota_firmware.button_action.clear_event_cb()
-        self.modal_ota_firmware.button_action.add_event_cb(lambda e: run_async(download_version), lv.EVENT_CODE.CLICKED, None)
+        self.modal_ota_firmware.button_action.add_event_cb(lambda e: run_async(lambda: download_version('local')), lv.EVENT_CODE.CLICKED, None)
 
         self.show_modal(self.modal_ota_firmware)
 

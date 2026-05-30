@@ -4,8 +4,10 @@
 
 set -e
 
-mkdir -p /files/2-python/usr
-cd /files/2-python/usr
+FILES_DIR="${FILES_DIR:-/files}"
+
+mkdir -p $FILES_DIR/2-python/usr
+cd $FILES_DIR/2-python/usr
 
 echo "Removing old packages..."
 rm -rf lib

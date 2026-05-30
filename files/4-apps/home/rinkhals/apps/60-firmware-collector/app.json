@@ -1,0 +1,26 @@
+{
+    "$version": "1",
+
+    "name": "Firmware Collector (opt-in)",
+    "description": "Periodically asks Anycubic if new firmware is available for this printer model using the printer's own device certificate. If a new version is found, sends only the download URL and version metadata to the Rinkhals community archive (rinkhals.firmwareforge.org) so we can produce Rinkhals patches sooner. Does not transmit certificates, account info, or any personal data. Disabled by default.",
+    "version": "1.0",
+
+    "properties": {
+        "ingest_endpoint": {
+            "display": "Ingest endpoint URL",
+            "type": "text",
+            "default": "https://ingest.firmwareforge.org/v1/notify"
+        },
+        "check_interval_hours": {
+            "display": "Check interval (hours)",
+            "type": "text",
+            "default": "24"
+        },
+        "dry_run": {
+            "display": "Dry run (log only, no upload)",
+            "type": "enum",
+            "options": ["False", "True"],
+            "default": "False"
+        }
+    }
+}

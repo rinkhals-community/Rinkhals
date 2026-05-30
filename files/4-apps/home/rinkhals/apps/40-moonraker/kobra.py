@@ -1055,9 +1055,9 @@ class Kobra:
     def patch_mqtt_print(self):
         async def handle_gcode_print_file(args: dict, delegate_run_gcode):
             logging.info(f'[Kobra] Print file: {args}')
+            filename = args["FILENAME"] if "FILENAME" in args else None
             if self.is_goklipper_running():
                 self._total_layer = 0
-                filename = args["FILENAME"] if "FILENAME" in args else None
                 logging.info(f'[Kobra] Print file: {filename}')
                 
                 if filename and self.is_using_mqtt():
@@ -1283,7 +1283,6 @@ class Kobra:
                     logging.info('[Kobra] Injected objects list')
                     
                     objects = [
-                        "motion_report",
                         "gcode_macro t0",
                         "gcode_macro t1",
                         "gcode_macro t2",
@@ -1292,7 +1291,7 @@ class Kobra:
                         "heaters",
                         "respond",
                         "display_status",
-                            "exclude_object",
+                        "exclude_object",
                         "extruder",
                         "fan",
                         "gcode_move",
@@ -1313,6 +1312,12 @@ class Kobra:
                         "bed_mesh \"default\"",
                         "idle_timeout"
                     ]
+
+                    # For KS1M: Do not expose motion_report to avoid GoKlipper panic:
+                    # "interface conversion: interface {} is chelper._Ctype_struct_pull_move, not *chelper._Ctype_struct_pull_movegoroutine"
+                    # For other models, insert motion_report at same position as before to avoid any regression
+                    if self.KOBRA_MODEL_CODE != 'KS1M':
+                        objects.insert(0, "motion_report")
                     
                     web_request.endpoint = 'gcode/help'
                     result = await original_request(me, web_request)
@@ -1339,11 +1344,37 @@ class Kobra:
         def wrap__request_standard(original__request_standard):
             async def _request_standard(me, web_request, timeout = None):
                 result = await original__request_standard(me, web_request, timeout)
-                if self.is_goklipper_running() and 'status' in result and 'configfile' in result['status'] and 'config' in result['status']['configfile']:
-                    logging.info('[Kobra] Injected Mainsail macros')
-                    result['status']['configfile']['config']['gcode_macro pause'] = {}
-                    result['status']['configfile']['config']['gcode_macro resume'] = {}
-                    result['status']['configfile']['config']['gcode_macro cancel_print'] = {}
+                if self.is_goklipper_running() and 'status' in result and 'configfile' in result['status']:
+                    configfile = result['status']['configfile']
+
+                    # Inject the pause/resume/cancel_print macros into configfile.config
+                    # so Mainsail's Print Status panel renders the corresponding buttons.
+                    if 'config' in configfile:
+                        logging.info('[Kobra] Injected Mainsail macros')
+                        configfile['config']['gcode_macro pause'] = {}
+                        configfile['config']['gcode_macro resume'] = {}
+                        configfile['config']['gcode_macro cancel_print'] = {}
+
+                    # Inject stepper_z.endstop_pin into configfile.settings so the
+                    # Mainsail Z-offset control renders during a print. GoKlipper's
+                    # configfile.settings.stepper_z does not include endstop_pin;
+                    # Mainsail's ZoffsetMixin.isEndstopProbe calls
+                    #   this.endstop_pin.replaceAll(' ', '')
+                    # which throws TypeError on null. Vue silently drops the entire
+                    # ZoffsetControl when the throw happens, so the Z-offset section
+                    # disappears the moment z_gcode_offset becomes non-zero (which
+                    # happens after LeviQ3 leveling completes).
+                    # Declaring "probe:z_virtual_endstop" makes Mainsail use the
+                    # Z_OFFSET_APPLY_PROBE save path, which GoKlipper does expose.
+                    settings = configfile.get('settings')
+                    if isinstance(settings, dict):
+                        stepper_z = settings.get('stepper_z')
+                        if isinstance(stepper_z, dict) and not stepper_z.get('endstop_pin'):
+                            stepper_z['endstop_pin'] = 'probe:z_virtual_endstop'
+                            logging.info(
+                                '[Kobra] Injected stepper_z.endstop_pin for Mainsail '
+                                'Z-offset control'
+                            )
                 return result
             return _request_standard
 

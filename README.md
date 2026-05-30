@@ -1,4 +1,4 @@
-[![Discord](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2F3mrANjpNJC%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&logo=discord&logoColor=white&label=Discord&suffix=%20members&color=%235865F2)](https://discord.gg/3mrANjpNJC) [![Downloads](https://img.shields.io/github/downloads/rinkhals-community/Rinkhals/total?label=Downloads&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPCEtLSBMaWNlbnNlOiBQRC4gTWFkZSBieSBzdGVwaGVuaHV0Y2hpbmdzOiBodHRwczovL2dpdGh1Yi5jb20vc3RlcGhlbmh1dGNoaW5ncy9taWNyb25zIC0tPgo8c3ZnIGZpbGw9IiNmZmZmZmYiIHdpZHRoPSI4MDBweCIgaGVpZ2h0PSI4MDBweCIgdmlld0JveD0iMCAwIDUxMiA1MTIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgPjx0aXRsZT5kb3dubG9hZDwvdGl0bGU%2BPHBhdGggZD0iTTIzMiA2NEwyODAgNjQgMjgwIDIxNCAyNzcgMjcwIDMwMCAyNDIgMzU2IDE4OSAzODggMjIxIDI1NiAzNTMgMTI0IDIyMSAxNTYgMTg5IDIxMiAyNDIgMjM1IDI3MCAyMzIgMjE0IDIzMiA2NFpNNjQgNDAwTDQ0OCA0MDAgNDQ4IDQ0OCA2NCA0NDggNjQgNDAwWiIgLz48L3N2Zz4%3D)](https://github.com/rinkhals-community/Rinkhals/releases) [![Firmwares](https://img.shields.io/badge/Stock%20firmwares-blue?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPCEtLSBMaWNlbnNlOiBQRC4gTWFkZSBieSBzdGVwaGVuaHV0Y2hpbmdzOiBodHRwczovL2dpdGh1Yi5jb20vc3RlcGhlbmh1dGNoaW5ncy9taWNyb25zIC0tPgo8c3ZnIGZpbGw9IiNmZmZmZmYiIHdpZHRoPSI4MDBweCIgaGVpZ2h0PSI4MDBweCIgdmlld0JveD0iMCAwIDUxMiA1MTIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgPjx0aXRsZT5kb3dubG9hZDwvdGl0bGU%2BPHBhdGggZD0iTTIzMiA2NEwyODAgNjQgMjgwIDIxNCAyNzcgMjcwIDMwMCAyNDIgMzU2IDE4OSAzODggMjIxIDI1NiAzNTMgMTI0IDIyMSAxNTYgMTg5IDIxMiAyNDIgMjM1IDI3MCAyMzIgMjE0IDIzMiA2NFpNNjQgNDAwTDQ0OCA0MDAgNDQ4IDQ0OCA2NCA0NDggNjQgNDAwWiIgLz48L3N2Zz4%3D)](https://rinkhals.firmwareforge.org) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rinkhals-community/Rinkhals)
+[![Discord](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2FbQcrsteFGU%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&logo=discord&logoColor=white&label=Discord&suffix=%20members&color=%235865F2)](https://discord.gg/bQcrsteFGU) [![Downloads](https://img.shields.io/github/downloads/rinkhals-community/Rinkhals/total?label=Downloads&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPCEtLSBMaWNlbnNlOiBQRC4gTWFkZSBieSBzdGVwaGVuaHV0Y2hpbmdzOiBodHRwczovL2dpdGh1Yi5jb20vc3RlcGhlbmh1dGNoaW5ncy9taWNyb25zIC0tPgo8c3ZnIGZpbGw9IiNmZmZmZmYiIHdpZHRoPSI4MDBweCIgaGVpZ2h0PSI4MDBweCIgdmlld0JveD0iMCAwIDUxMiA1MTIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgPjx0aXRsZT5kb3dubG9hZDwvdGl0bGU%2BPHBhdGggZD0iTTIzMiA2NEwyODAgNjQgMjgwIDIxNCAyNzcgMjcwIDMwMCAyNDIgMzU2IDE4OSAzODggMjIxIDI1NiAzNTMgMTI0IDIyMSAxNTYgMTg5IDIxMiAyNDIgMjM1IDI3MCAyMzIgMjE0IDIzMiA2NFpNNjQgNDAwTDQ0OCA0MDAgNDQ4IDQ0OCA2NCA0NDggNjQgNDAwWiIgLz48L3N2Zz4%3D)](https://github.com/rinkhals-community/Rinkhals/releases) [![Firmwares](https://img.shields.io/badge/Stock%20firmwares-blue?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPCEtLSBMaWNlbnNlOiBQRC4gTWFkZSBieSBzdGVwaGVuaHV0Y2hpbmdzOiBodHRwczovL2dpdGh1Yi5jb20vc3RlcGhlbmh1dGNoaW5ncy9taWNyb25zIC0tPgo8c3ZnIGZpbGw9IiNmZmZmZmYiIHdpZHRoPSI4MDBweCIgaGVpZ2h0PSI4MDBweCIgdmlld0JveD0iMCAwIDUxMiA1MTIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgPjx0aXRsZT5kb3dubG9hZDwvdGl0bGU%2BPHBhdGggZD0iTTIzMiA2NEwyODAgNjQgMjgwIDIxNCAyNzcgMjcwIDMwMCAyNDIgMzU2IDE4OSAzODggMjIxIDI1NiAzNTMgMTI0IDIyMSAxNTYgMTg5IDIxMiAyNDIgMjM1IDI3MCAyMzIgMjE0IDIzMiA2NFpNNjQgNDAwTDQ0OCA0MDAgNDQ4IDQ0OCA2NCA0NDggNjQgNDAwWiIgLz48L3N2Zz4%3D)](https://rinkhals.firmwareforge.org) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rinkhals-community/Rinkhals)
 
 
 # Rinkhals
@@ -6,7 +6,7 @@
 Rinkhals is a custom firmware for some Anycubic Kobra 3D printers (specifically the ones running Kobra OS, see below for the details).
 
 The goal of this project is to expand existing Anycubic features with better compatibility, apps and more.
-I will likely not support all use cases, like running vanilla Klipper or your specific feature / plugin.
+This project will likely not support every use case, such as running vanilla Klipper or a specific feature / plugin.
 
 By using Rinkhals, you will keep all stock Anycubic features (print screen, Anycubic tools, calibration, ...) and get even more, like:
 - Mainsail, Fluidd (with Moonraker)
@@ -22,12 +22,10 @@ Here are the supported GoKlipper / K3-family printers and firmwares with the lat
 | -- | -- | -- |
 | Kobra 3 (+ combo) | `2.4.5` `2.4.6.7` |
 | Kobra 2 Pro | `3.1.2.3` `3.1.4` | Only with mainboard [Trigorilla Spe **B** v1.0.x](https://1coderookie.github.io/Kobra2ProInsights/hardware/mainboard/#trigorilla_spe_b_v10x-stock-new-revision). `3.1.4` seems to be buggy for some people |
-| Kobra S1 (+ combo) | `2.6.0.0` `2.7.0.9` |
+| Kobra S1 (+ combo) | `2.7.0.9` `2.7.2.1` |
 | Kobra 3 Max (+ combo) | `2.5.1.7` `2.5.2.8` |
 | Kobra 3 V2 (+ combo) | `1.1.0.4` `1.1.2.8` |
 | Kobra S1 Max (+ combo) | `2.6.6` `2.6.9.3` |
-
-🔴 - in testing, not yet ready
 
 The K4-family currently has a separate status:
 
@@ -47,9 +45,9 @@ In addition, the SWU update flow requires a trusted certificate for package acce
 
 In case you're wondering this project is named after rinkhals, a sub-species of Cobras ... Kobra ... Rinkhals 👏
 
-You can join the Rinkhals community on Discord: https://discord.gg/3mrANjpNJC
+You can join the Rinkhals community on Discord: https://discord.gg/bQcrsteFGU
 
-Since people have been asking, I accept donations but please remember that I work on Rinkhals for fun and not for the money. I will not accept donations to work on specific bugs or features. Donation link is the Sponsor button at the top of the page.
+Since people have been asking, donations are accepted, but please remember this project is built for fun and not for the money. Donations will not be accepted to work on specific bugs or features. The donation link is the Sponsor button at the top of the page.
 
 
 <p align="center">
@@ -60,10 +58,10 @@ Since people have been asking, I accept donations but please remember that I wor
 ## Rinkhals installation
 
 > [!WARNING]
-> **Make sure you're confident tweaking your printer and you understand what you're doing. I'm not responsible if you brick your printer (even if there's some [documentation](https://rinkhals-community.github.io/Rinkhals/printers/recover-boot-issues/)) about that)**
+> **Make sure you're confident tweaking your printer and you understand what you're doing. We're not responsible if you brick your printer (even if there's some [documentation](https://rinkhals-community.github.io/Rinkhals/printers/recover-boot-issues/)) about that)**
 
 > [!CAUTION]
-> Many users want to change their Klipper printer configuration (the printer.cfg file). I strongly advise not modifying the stock printer configuration. Rinkhals offers additional protection you don't have while modifying directly your printer configuration. **I won't offer any support** and **your printer might not work properly or not boot anymore**. Check the documentation for more information: [Printer configuration](https://rinkhals-community.github.io/Rinkhals/about/printer-configuration/)
+> Many users want to change their Klipper printer configuration (the printer.cfg file). We strongly advise against modifying the stock printer configuration. Rinkhals offers additional protection you don't have while modifying directly your printer configuration. **We won't offer any support** and **your printer might not work properly or not boot anymore**. Check the documentation for more information: [Printer configuration](https://rinkhals-community.github.io/Rinkhals/about/printer-configuration/)
 
 A [quick start guide](https://rinkhals-community.github.io/Rinkhals/guides/rinkhals-quick-start/) is available to get Rinkhals up and running on your printer.
 
@@ -129,7 +127,7 @@ Instructions on how to install or develop apps are on the other repo as well.
 ## Contributing
 
 > [!NOTE]
-> If you develop on Windows like me, don't forget to disable Git's autocrlf function, as this repo contains Linux scripts running on Linux machines.<br />
+> If you develop on Windows, don't forget to disable Git's autocrlf function, as this repo contains Linux scripts running on Linux machines.<br />
 > Run `git config core.autocrlf false` **BEFORE** cloning the repo
 
 More and more contributors help this project move faster. Thank you everyone!
@@ -144,6 +142,7 @@ Current maintainers:
 - **jbatonnet**
 - **martinbogo**
 - **antirad**
+- **basvd**
   
 Special thanks to those people for providing the base research and helping support for more printers:
 - **utkabobr** (https://github.com/utkabobr/DuckPro-Kobra3)

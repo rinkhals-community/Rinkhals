@@ -210,6 +210,42 @@ else
     log "Rinkhals loader was detected, skipping installation"
 fi
 
+# Prune older Rinkhals installs, keep current + previous as backup
+progress 0.95
+
+log "Pruning older Rinkhals installs (keeping current + previous)..."
+
+KEEP_CURRENT="$TARGET_PATH"
+KEEP_PREVIOUS=""
+if [ "$CURRENT_RINKHALS_PATH" != "" ] && [ "$CURRENT_RINKHALS_PATH" != "$TARGET_PATH" ] && [ -d "$CURRENT_RINKHALS_PATH" ]; then
+    KEEP_PREVIOUS="$CURRENT_RINKHALS_PATH"
+fi
+
+log "  Current:  $(basename $KEEP_CURRENT)"
+if [ "$KEEP_PREVIOUS" != "" ]; then
+    log "  Previous: $(basename $KEEP_PREVIOUS)"
+fi
+
+for DIR in /useremain/rinkhals/*; do
+    [ -d "$DIR" ] || continue
+    [ -L "$DIR" ] && continue
+    BASENAME=$(basename "$DIR")
+
+    # Only consider directories matching the YYYYMMDD_NN[_test][-N] version pattern.
+    # Unknown directories (e.g. 'dev', 'tmp', user files) are left untouched.
+    if ! echo "$BASENAME" | grep -qE '^20[0-9]{6}_[0-9]+(_test)?(-[0-9]+)?$'; then
+        continue
+    fi
+
+    if [ "$DIR" = "$KEEP_CURRENT" ] || [ "$DIR" = "$KEEP_PREVIOUS" ]; then
+        continue
+    fi
+
+    log "  Removing $BASENAME"
+    rm -rf "$DIR"
+done
+
+
 log "Removing update files"
 
 rm -rf $SOURCE_PATH

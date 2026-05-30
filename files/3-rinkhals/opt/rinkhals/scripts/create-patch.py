@@ -9,6 +9,7 @@ import re
 import sys
 
 from pwn import context, ELF, asm, p32, util, enhex, u32
+context.arch = "arm"
 
 
 def read32(binary, address):
@@ -201,6 +202,11 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         # The switch break target (cleanup/epilog) is at 0x14f674.
         patchJumpAddress = 0x14f5b0
         patchReturnAddress = 0x14f674
+        s1CaseAlreadySelected = True
+    elif modelCode == 'KS1' and version == '2.7.2.1':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        patchJumpAddress = 0x150b38
+        patchReturnAddress = 0x150bfc
         s1CaseAlreadySelected = True
 
     elif modelCode == 'KS1M' and version == '2.1.6':

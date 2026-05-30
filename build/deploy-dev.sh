@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# docker run --rm -it -e KOBRA_IP=x.x.x.x --mount type=bind,ro,source=./build,target=/build rclone/rclone:1.69.1 /build/deploy-dev.sh
+# docker run --rm -it -e KOBRA_IP=x.x.x.x --mount type=bind,ro,source=./build,target=/build --entrypoint /bin/sh rclone/rclone:1.69.1 /build/deploy-dev.sh
 
 set -e
 

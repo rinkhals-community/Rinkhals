@@ -31,9 +31,9 @@ jobs:
           cache: 'pip'
       - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
       - run: pip install -r ./docs/requirements.txt
-      - name: MkDocs Build
+      - name: ProperDocs Build
         working-directory: ./docs
-        run: mkdocs build
+        run: properdocs build
       - name: Upload static files
         id: deployment
         uses: actions/upload-pages-artifact@v5 # or specific "vX.X.X" version tag for this action

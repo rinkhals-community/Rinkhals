@@ -4,8 +4,10 @@
 
 set -e
 
-mkdir -p /files/4-apps/home/rinkhals/apps/40-moonraker
-cd /files/4-apps/home/rinkhals/apps/40-moonraker
+FILES_DIR="${FILES_DIR:-/files}"
+
+mkdir -p $FILES_DIR/4-apps/home/rinkhals/apps/40-moonraker
+cd $FILES_DIR/4-apps/home/rinkhals/apps/40-moonraker
 
 echo "Removing old packages..."
 rm -rf lib

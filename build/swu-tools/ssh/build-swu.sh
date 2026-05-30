@@ -13,35 +13,36 @@ set -e
 BUILD_ROOT=$(dirname $(realpath $0))
 . $BUILD_ROOT/../../tools.sh
 
+FILES_DIR="${FILES_DIR:-/files}"
 
 # Prepare update
-mkdir -p /tmp/update_swu
-rm -rf /tmp/update_swu/*
+WORK=$(mktemp -d)
+trap "rm -rf $WORK" EXIT
 
-cp /build/swu-tools/ssh/update.sh /tmp/update_swu/update.sh
-cp /files/3-rinkhals/usr/local/etc/dropbear/dropbear_rsa_host_key /tmp/update_swu/dropbear_rsa_host_key
-cp /files/1-buildroot/usr/lib/libcrypto.so.1.1 /tmp/update_swu/libcrypto.so.1.1
-cp /files/1-buildroot/usr/lib/libssl.so.1.1 /tmp/update_swu/libssl.so.1.1
-cp /files/1-buildroot/lib/libatomic.so.1 /tmp/update_swu/libatomic.so.1
-cp /files/1-buildroot/lib/libc.so.0 /tmp/update_swu/libc.so.0
-cp /files/1-buildroot/lib/ld-uClibc.so.0 /tmp/update_swu/ld-uClibc
+cp "$BUILD_ROOT"/update.sh "$WORK"/update.sh
+cp $FILES_DIR/3-rinkhals/usr/local/etc/dropbear/dropbear_rsa_host_key "$WORK"/dropbear_rsa_host_key
+cp $FILES_DIR/1-buildroot/usr/lib/libcrypto.so.1.1 "$WORK"/libcrypto.so.1.1
+cp $FILES_DIR/1-buildroot/usr/lib/libssl.so.1.1 "$WORK"/libssl.so.1.1
+cp $FILES_DIR/1-buildroot/lib/libatomic.so.1 "$WORK"/libatomic.so.1
+cp $FILES_DIR/1-buildroot/lib/libc.so.0 "$WORK"/libc.so.0
+cp $FILES_DIR/1-buildroot/lib/ld-uClibc.so.0 "$WORK"/ld-uClibc
 
 
 # Patch dropbear to run sftp-server locally
-cat /files/1-buildroot/usr/sbin/dropbear |
+cat $FILES_DIR/1-buildroot/usr/sbin/dropbear |
     sed "s/\/lib\/ld-uClibc.so.0/\/tmp\/ssh\/\/ld-uClibc/g" |
     sed "s/\/usr\/libexec\/sftp-server/\/tmp\/ssh\/sftp-server    /g" \
-    > /tmp/update_swu/dropbear
+    > "$WORK"/dropbear
 
-cat /files/1-buildroot/usr/libexec/sftp-server |
+cat $FILES_DIR/1-buildroot/usr/libexec/sftp-server |
     sed "s/\/lib\/ld-uClibc.so.0/\/tmp\/ssh\/\/ld-uClibc/g" \
-    > /tmp/update_swu/sftp-server
+    > "$WORK"/sftp-server
 
 
 # Create the update.swu
 echo "Building update package..."
 
 SWU_PATH=${1:-/build/dist/update.swu}
-build_swu $KOBRA_MODEL_CODE /tmp/update_swu $SWU_PATH
+build_swu $KOBRA_MODEL_CODE "$WORK" $SWU_PATH
 
 echo "Done, your update package is ready: $SWU_PATH"

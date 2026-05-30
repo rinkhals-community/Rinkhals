@@ -23,3 +23,10 @@ files/4-apps/home/rinkhals/apps/40-moonraker/bin
 # Local agent customizations
 .github/agents/
 .claude/
+
+# Docs
+docs/site/
+docs/build_site/
+
+# Sync and temp artifacts
+.!*
