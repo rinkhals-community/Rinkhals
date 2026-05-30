@@ -643,7 +643,10 @@ void _ZN12QButtonGroup9addButtonEP15QAbstractButtoni(void* self, void* button, i
 
     s_real_addButton(self, button, id);
 
-    if (!s_log && !s_unhide) return;
+    // Tracking is required by both unhide and inject paths (both depend on
+    // detecting the print-page group via its 0..9 id sequence). Only skip
+    // entirely when no mode is active.
+    if (!s_log && !s_unhide && !s_inject) return;
 
     s_call_count++;
     if (s_log) fprintf(stderr, "[zoffset-2b] #%d addButton(group=%p, btn=%p, id=%d)\n",
