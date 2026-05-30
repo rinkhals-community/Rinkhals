@@ -39,10 +39,11 @@ beep() {
     echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
 }
 log() {
-    echo "${*}"
+    TS=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$TS]: ${*}"
 
     mkdir -p $RINKHALS_LOGS
-    echo "$(date): ${*}" >> $RINKHALS_LOGS/rinkhals.log
+    echo "[$TS]: ${*}" >> $RINKHALS_LOGS/rinkhals.log
 }
 quit() {
     exit 1
