@@ -35,7 +35,7 @@ resolve_hostname() {
 }
 
 status() {
-    PIDS=$(get_by_name mdns_responder.py; get_by_name dhcp_watchdog.sh)
+    PIDS="$(get_by_name mdns_responder.py) $(get_by_name dhcp_watchdog.sh)"
 
     if [ "$PIDS" = "" ]; then
         report_status $APP_STATUS_STOPPED

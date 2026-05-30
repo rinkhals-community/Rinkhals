@@ -16,8 +16,6 @@ fi
 log "dhcp_watchdog: started, monitoring for hostname '$HOSTNAME'"
 
 while true; do
-    sleep $CHECK_INTERVAL
-
     REPLACED_IFACES=""
     for UDHCPC_PID in $(get_by_name udhcpc); do
         CMDLINE=$(cat "/proc/$UDHCPC_PID/cmdline" 2>/dev/null | tr '\0' ' ')
@@ -49,4 +47,6 @@ while true; do
                 ;;
         esac
     done
+
+    sleep $CHECK_INTERVAL
 done
