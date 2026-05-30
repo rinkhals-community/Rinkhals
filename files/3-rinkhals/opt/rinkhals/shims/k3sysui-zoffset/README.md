@@ -46,16 +46,28 @@ Working end-to-end on KS1 firmware 2.7.2.1 with Rinkhals develop. Tap the
 button on the active print page and the Z-offset popup opens; navigating to
 other pages auto-hides the button.
 
-Known follow-ups to integrate this into the Rinkhals startup pipeline:
+Integrated into the Rinkhals build pipeline:
 
-- On-printer build during install (printer ships native `g++`, so this works
-  in place) or cross-compile in CI and ship the `.so` directly
-- Hook `LD_PRELOAD` into Rinkhals' K3SysUi launcher path, not the user shell
-- Add an opt-in app or settings toggle if we want this behavior gated
-- Verify on the other supported printer models (K3, K3V2, K3M, KS1M, K2P) -
-  symbol offsets and Qt version may differ
-- Detect Qt version / model code and bail gracefully when assumptions don't
-  hold
+- Cross-compiled in CI via the `build-shim-zoffset` stage in the root
+  `Dockerfile` (uses the same `ghcr.io/jbatonnet/armv7-uclibc:rinkhals` image
+  as Moonraker's ARMv7 build). Output is `libzoffset.so` in this directory of
+  the SWU bundle.
+- Loaded by `files/3-rinkhals/start.sh` via `LD_PRELOAD` when K3SysUi is
+  launched, after any binary patches have run on the K3SysUi binary. On by
+  default; opt-out by removing the `.so`.
+- The shim is inert unless `RINKHALS_ZOFFSET_INJECT=1` is set in the
+  environment at K3SysUi launch; `start.sh` sets this for the default-on
+  behavior.
+
+Known follow-ups:
+
+- Verify on the other supported printer models (K3, K3V2, K3M, KS1M, K2P).
+  The popup widget offset is now discovered dynamically (see "Dynamic offset
+  discovery" in `zoffset.cpp`); the assumption that case 10 in lambda(int)#12
+  is Z-offset and the icon resource path are still binary-bound and worth
+  spot-checking per model.
+- The dynamic discovery falls back to KS1 2.7.2.1's known offset (0x530) on
+  mismatch, so even when the auto-detect doesn't apply, KS1 keeps working.
 
 ## Environment variables
 

@@ -285,7 +285,17 @@ chrt -p 89 $(get_by_name ksoftirqd/0)
 sleep 2
 
 ./gkapi >> $RINKHALS_LOGS/gkapi.log 2>&1 &
-./K3SysUi >> $RINKHALS_LOGS/K3SysUi.log 2>&1 &
+
+# K3SysUi Z-offset button shim: restores the live Z-offset button on the print
+# page that Anycubic shipped hidden. LD_PRELOAD'd onto K3SysUi here, after any
+# binary patches have been applied (patches at line ~262 above), so the shim
+# observes the running patched binary.
+ZOFFSET_SHIM=$RINKHALS_ROOT/opt/rinkhals/shims/k3sysui-zoffset/libzoffset.so
+if [ -f "$ZOFFSET_SHIM" ]; then
+    RINKHALS_ZOFFSET_INJECT=1 LD_PRELOAD=$ZOFFSET_SHIM ./K3SysUi >> $RINKHALS_LOGS/K3SysUi.log 2>&1 &
+else
+    ./K3SysUi >> $RINKHALS_LOGS/K3SysUi.log 2>&1 &
+fi
 
 # On the kobra 2 pro this sleep causes that filement extrude does not work and auto leveling crashes. (https://github.com/rinkhals-community/Rinkhals/issues/155)
 if [ "$KOBRA_MODEL_CODE" != "K2P" ]; then

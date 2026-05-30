@@ -126,6 +126,21 @@ RUN --mount=type=cache,sharing=locked,target=/root/.cache/pip \
     /build/4-apps/40-moonraker/get-packages.sh
 
 ###############################################################
+# build-shim-zoffset cross-compiles the K3SysUi Z-offset LD_PRELOAD shim.
+# This shim restores the live Z-offset button on the K3SysUi print page that
+# Anycubic shipped hidden. Built natively in the ARMv7 uClibc environment so
+# the resulting libzoffset.so loads cleanly into K3SysUi on the printer.
+FROM --platform=linux/arm/v7 ghcr.io/jbatonnet/armv7-uclibc:rinkhals AS build-shim-zoffset
+
+COPY ./files/3-rinkhals/opt/rinkhals/shims/k3sysui-zoffset/zoffset.cpp /build/zoffset.cpp
+
+RUN mkdir -p /files/3-rinkhals/opt/rinkhals/shims/k3sysui-zoffset && \
+    g++ -O2 -fPIC -shared -Wall -nostdlib -fvisibility=hidden \
+        -o /files/3-rinkhals/opt/rinkhals/shims/k3sysui-zoffset/libzoffset.so \
+        /build/zoffset.cpp \
+        -lc -lgcc -lstdc++
+
+###############################################################
 # app-remote-display prepares Remote Display app files
 FROM build-base AS app-remote-display
 COPY ./build/4-apps/50-remote-display/* /build/
@@ -187,6 +202,7 @@ COPY --from=app-fluidd /files/4-apps/ /bundle/rinkhals/
 COPY --from=app-moonraker /files/4-apps/ /bundle/rinkhals/
 COPY --from=app-moonraker-armv7 /files/4-apps/ /bundle/rinkhals/
 COPY --from=app-remote-display /files/4-apps/ /bundle/rinkhals/
+COPY --from=build-shim-zoffset /files/3-rinkhals/ /bundle/rinkhals/
 COPY ./files/3-rinkhals /bundle/rinkhals/
 COPY ./files/4-apps /bundle/rinkhals/
 COPY ./files/*.* /bundle/
