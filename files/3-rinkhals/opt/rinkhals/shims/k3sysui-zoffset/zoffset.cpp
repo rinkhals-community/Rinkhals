@@ -1,16 +1,40 @@
-// rinkhals-zoffset-shim.cpp - PHASE 2b
+// =============================================================================
+// K3SysUi Z-offset button shim
 //
-// Key finding from phase-2: K3SysUi *itself* registers buttons with id=10 (and
-// id=11) on the print-page group(s). The button exists; it's just not visible.
-// So instead of constructing a new QPushButton, we capture the pointer of the
-// existing id=10 button and call setVisible(true) + setGeometry + raise() on it.
+// LD_PRELOAD library that restores the live Z-offset adjust button on the
+// K3SysUi print page without modifying the K3SysUi binary. The popup widget,
+// the dispatcher case-10 handler, and the embedded SVG icon are all still
+// present in the binary; only the QPushButton on the print page that emits
+// clicked() with id=10 was removed. We inject a replacement.
 //
-// Opt-in env vars:
-//   RINKHALS_ZOFFSET_LOG=1     log addButton calls
-//   RINKHALS_ZOFFSET_UNHIDE=1  capture and un-hide existing id=10 buttons
+// Opt-in env vars (set by Rinkhals start.sh):
+//   RINKHALS_ZOFFSET_LOG=1     log diagnostics to stderr
+//   RINKHALS_ZOFFSET_INJECT=1  inject the new button (the feature itself)
+//   RINKHALS_ZOFFSET_UNHIDE=1  legacy diagnostic: try to un-hide K3SysUi's
+//                              own id=10 button (does not work in isolation;
+//                              kept for debugging)
 //
-// The track table is also bumped from 4 to 32 slots since the print page is
-// initialized several groups deep into K3SysUi startup.
+// Architecture overview:
+//   - Interpose QButtonGroup::addButton via LD_PRELOAD symbol shadowing.
+//   - Watch each group's id sequence; a group registering ids 0..9 in order is
+//     a print-page button group. K3SysUi then adds its hidden id=10 button;
+//     that callsite is our trigger to construct and add our visible button.
+//   - The new QPushButton is parented to the top-level main window so its
+//     coordinate space is always visible. Its clicked(bool) signal is
+//     connected directly to popup->show() via Qt's string-based connect,
+//     bypassing QButtonGroup routing entirely.
+//   - Visibility mirrors the print page via a global event filter on qApp,
+//     matching Show/Hide against an ancestor chain registered for each
+//     captured template button. The filter object is a bare QObject with its
+//     per-instance vtable patched at the eventFilter slot, avoiding moc.
+//
+// Verified targets:
+//   KS1 / Anycubic firmware 2.7.2.1 / Qt 5.14.2 / ARM 32-bit hardfloat uClibc
+//
+// All foreign Qt construction is wrapped in a SIGSEGV/sigsetjmp trap, so any
+// per-firmware structural mismatch aborts the affected step rather than
+// crashing K3SysUi.
+// =============================================================================
 
 #include <dlfcn.h>
 #include <signal.h>
@@ -25,62 +49,238 @@
 #include <sys/stat.h>
 #include <elf.h>
 
-extern "C" {
 
-typedef void  (*addButton_fn)(void* self, void* button, int id);
-typedef void  (*setGeomRect_fn)(void* this_, const int* qrect4_ints);  // setGeometry(QRect const&)
-typedef void  (*setVisible_fn)(void* this_, bool);
-typedef void  (*show_fn)     (void* this_);
-typedef void  (*raise_fn)    (void* this_);
-typedef void* (*qpush_ctor_fn)(void* this_, void* parent);
-typedef void  (*setText_fn)  (void* this_, const void* qstring_ref);
-typedef void  (*setStyle_fn) (void* this_, const void* qstring_ref);
-// QString::QString(const char*) is inline in Qt 5.14 (not exported). Use
-// QString::fromUtf8_helper(const char*, int) instead - exported as sret.
-typedef void (*qstring_from_utf8_fn)(void* result_storage, const char* utf8, int size);
-// Old typedef kept for the setText/setStyle paths (they use QString const&,
-// constructed via fromUtf8 into the same stack storage).
-typedef void* (*qstring_ctor_fn)(void* this_, const char* utf8);
-typedef void  (*qstring_dtor_fn)(void* this_);
+// =============================================================================
+// Named constants (formerly magic numbers scattered through the code)
+// =============================================================================
 
-static addButton_fn   s_real_addButton = 0;
-static void*          s_h_widgets  = 0;
-static void*          s_h_core     = 0;
-static int            s_log    = 0;
-static int            s_unhide = 0;
-static int            s_inject = 0;
-static int            s_call_count = 0;
-static void*          s_mainwindow = 0;
+namespace constants {
 
-#define MAX_TRACKS 32
-struct GroupTrack { void* group; int next_id; int got9; };
-static GroupTrack s_tracks[MAX_TRACKS];
+// Pointer-sanity threshold. Any pointer value below this is considered invalid
+// (catches null and small numeric values that aren't real addresses).
+constexpr uintptr_t kMinPlausiblePointer = 0x10000;
 
-// Captured "id=10 button on a print-page group" pointers
-static void* s_id10_buttons[MAX_TRACKS];
-static int   s_id10_count = 0;
+// Anycubic-specific MainWindow member layout. The popup widget pointer lives
+// at MainWindow + this offset. Verified on KS1 2.7.2.1; discover_offsets()
+// finds the real value at runtime by disassembling case 10 in the dispatcher.
+constexpr int kPopupOffsetFallback = 0x530;
 
-// SIGSEGV trap
-static sigjmp_buf g_jmp;
-static volatile int g_jmp_armed = 0;
-static void segv_handler(int sig) {
+// Capacity for runtime tracking tables.
+constexpr int kMaxGroupTracks   = 32;  // tracked QButtonGroups
+constexpr int kMaxAncestors     = 64;  // (ancestor, button) registrations
+constexpr int kMaxAncestorHops  = 4;   // walk depth from template button
+constexpr int kFindToplevelHops = 64;  // walk depth for top-level lookup
+
+// Default button placement when the template button's geometry isn't readable.
+constexpr int kDefaultBtnX = 120;
+constexpr int kDefaultBtnY = 120;
+constexpr int kDefaultBtnW = 50;
+constexpr int kDefaultBtnH = 50;
+constexpr int kIconSize    = 40;
+
+// QPushButton allocation size. K3SysUi itself uses 40 bytes for QtCSquareBtn
+// (a QPushButton subclass), so sizeof(QPushButton) <= 40. 64 leaves headroom.
+constexpr int kQPushButtonAllocBytes = 64;
+
+// Bare QObject we construct as our event filter. sizeof(QObject) is
+// vtable+d_ptr = 8 on 32-bit ARM; 32 leaves space + a stash slot at +16.
+constexpr int kFilterObjAllocBytes = 32;
+constexpr int kFilterObjStashOff   = 16;  // where we stash our button pointer
+
+// QObject vtable entry count we copy. Index 6 is eventFilter (after
+// metaObject, qt_metacast, qt_metacall, dtor, dtor, event); 12 entries
+// covers up to timerEvent etc. and is conservative.
+constexpr int kVtableCopyEntries   = 12;
+constexpr int kVtableIndexEventFilter = 6;
+
+// QEvent layout: type stored as ushort at this byte offset from the QEvent
+// object's base. Stable across Qt 5 ABI.
+constexpr int kQEventTypeOffset = 8;
+
+// QObject layout: d_ptr at +4 (after vtable), and within QObjectData,
+// parent is at +8 (after vtable + q_ptr). Stable across Qt 5 ABI.
+constexpr int kQObjectDPtrOffset    = 4;
+constexpr int kQObjectDataParentOff = 8;
+
+// ARM bl encoding: 0xeb000000 | (signed 24-bit instruction offset).
+// Target = PC + 8 + offset*4.
+constexpr uint32_t kArmBlOpcodeMask    = 0xff000000;
+constexpr uint32_t kArmBlOpcode        = 0xeb000000;
+// ldr r3, [r3, #N]  encoding (low 12 bits are immediate N).
+constexpr uint32_t kArmLdrR3R3ImmMask  = 0xfffff000;
+constexpr uint32_t kArmLdrR3R3Imm      = 0xe5933000;
+// mov r0, r3
+constexpr uint32_t kArmMovR0R3         = 0xe1a00003;
+
+// Discovery scan window: after a matching `bl getZoffset`, look this many
+// instructions forward for the popup-load pattern.
+constexpr int kDiscoveryScanWindow = 50;
+// Sanity bounds for the popup offset; must be a non-trivial MainWindow member.
+constexpr int kPopupOffsetMin = 0x40;
+constexpr int kPopupOffsetMax = 0x10000;
+
+// Sanity bound on the print-page id sequence we accept (we expect 0..9 plus
+// the hidden 10/11; anything past 12 is out of expected range).
+constexpr int kMaxExpectedGroupId = 12;
+
+}  // namespace constants
+
+
+// =============================================================================
+// QEvent::Type subset (just what we care about)
+// =============================================================================
+
+namespace qevent {
+enum Type : unsigned short {
+    Show         = 17,
+    Hide         = 18,
+    ShowToParent = 26,
+    HideToParent = 27,
+};
+}
+
+
+// =============================================================================
+// Vtable manipulation type aliases (replaces void***/void** in raw code)
+// =============================================================================
+//
+// A C++ object with virtual methods has a hidden vtable pointer at offset 0.
+//   object_ptr[0] == vtable (= array of function pointers)
+//
+// In types:
+//   VtableEntry = a function pointer slot              (void*)
+//   Vtable      = pointer to an array of slots         (VtableEntry*)
+//   VtableSlot  = where the vtable pointer lives in    (Vtable*)
+//                 the object (= the object's first
+//                 4 bytes, treated as a pointer-to-Vtable)
+//
+// Reading the current vtable:    Vtable old_vt = *vtable_slot_of(obj);
+// Overriding to a per-instance copy:  *vtable_slot_of(obj) = new_vt;
+//
+typedef void*        VtableEntry;
+typedef VtableEntry* Vtable;
+typedef Vtable*      VtableSlot;
+
+static inline VtableSlot vtable_slot_of(void* obj) {
+    return reinterpret_cast<VtableSlot>(obj);
+}
+
+
+// =============================================================================
+// Function-pointer typedefs for the Qt symbols we dlsym
+// =============================================================================
+
+namespace qtfn {
+typedef void  (*addButton_t)        (void* self, void* button, int id);
+typedef void  (*setGeometryRect_t)  (void* this_widget, const int* qrect4);
+typedef void  (*setVisible_t)       (void* this_widget, bool);
+typedef void  (*show_t)             (void* this_widget);
+typedef void  (*raise_t)            (void* this_widget);
+typedef void* (*qpushButton_ctor_t) (void* this_obj, void* parent_widget);
+typedef void  (*setText_t)          (void* this_button, const void* qstring_ref);
+typedef void  (*setStyleSheet_t)    (void* this_widget, const void* qstring_ref);
+typedef void  (*qstring_fromUtf8_t) (void* result_storage,
+                                     const char* utf8, int size);
+typedef void  (*qstring_dtor_t)     (void* this_qstring);
+typedef void* (*qicon_ctor_str_t)   (void* this_qicon, const void* qstring_ref);
+typedef void  (*qicon_dtor_t)       (void* this_qicon);
+typedef bool  (*qicon_isNull_t)     (const void* this_qicon);
+typedef void  (*setIcon_t)          (void* this_button, const void* qicon_ref);
+typedef void  (*setIconSize_t)      (void* this_button, const int* qsize2);
+typedef int   (*intGetter_t)        (const void* this_widget);
+typedef void* (*qobject_ctor_t)     (void* this_obj, void* parent);
+typedef void  (*installEventFilter_t)(void* this_obj, void* filter);
+// QObject::connect (string-based overload, sret return on ARM EABI):
+//   QMetaObject::Connection connect(const QObject*, const char* signal,
+//                                   const QObject*, const char* member,
+//                                   Qt::ConnectionType)
+// The result is a non-trivially-destructible struct returned via sret, so the
+// ABI prepends a hidden result-pointer to the actual args.
+typedef void  (*connect_str_t)(void* result_storage,
+                               const void* sender, const char* signal,
+                               const void* receiver, const char* member,
+                               int conn_type);
+}
+
+
+// =============================================================================
+// Internal state and helpers (anonymous namespace = internal linkage)
+// =============================================================================
+
+namespace {
+
+// --- Tracking structures ---
+
+struct GroupTrack {
+    void* group;
+    int   next_id;
+    int   got9;    // 1 once the strict 0..9 sequence has been observed
+};
+
+struct AncestorMapping {
+    void* ancestor;
+    void* button;
+    unsigned char seen_hide;   // set once we observe Hide on this ancestor
+};
+
+// --- Shim state ---
+//
+// All state is internal-linkage and grouped here so it's easy to inventory.
+// Not encapsulated in a class because the LD_PRELOAD entry point and
+// __attribute__((constructor)) need free access to it; a class would just
+// add boilerplate without changing visibility.
+
+qtfn::addButton_t s_real_addButton = 0;
+
+void* s_h_widgets   = 0;   // libQt5Widgets.so.5 handle
+void* s_h_core      = 0;   // libQt5Core.so.5 handle
+
+int   s_log         = 0;   // env-driven mode flags
+int   s_unhide      = 0;
+int   s_inject      = 0;
+
+int   s_call_count  = 0;
+void* s_mainwindow  = 0;   // captured from top-level walk on first inject
+
+GroupTrack       s_tracks[constants::kMaxGroupTracks];
+void*            s_id10_buttons[constants::kMaxGroupTracks];
+int              s_id10_count = 0;
+
+AncestorMapping  s_ancestors[constants::kMaxAncestors];
+int              s_ancestor_count = 0;
+
+int   s_popup_offset            = constants::kPopupOffsetFallback;
+int   s_popup_offset_discovered = 0;
+
+// --- SIGSEGV trap ---
+
+sigjmp_buf     g_jmp;
+volatile int   g_jmp_armed = 0;
+
+void segv_handler(int /*sig*/) {
     if (g_jmp_armed) { g_jmp_armed = 0; siglongjmp(g_jmp, 1); }
-    signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
+    signal(SIGSEGV, SIG_DFL);
+    raise(SIGSEGV);
 }
 
-static GroupTrack* track_find_or_new(void* group) {
-    for (int i = 0; i < MAX_TRACKS; i++) if (s_tracks[i].group == group) return &s_tracks[i];
-    for (int i = 0; i < MAX_TRACKS; i++) if (s_tracks[i].group == 0)     {
-        s_tracks[i].group = group;
-        s_tracks[i].next_id = 0;
-        s_tracks[i].got9 = 0;
-        return &s_tracks[i];
-    }
-    return 0;
+// --- Helpers ---
+
+inline bool ptr_plausible(const void* p) {
+    return reinterpret_cast<uintptr_t>(p) >= constants::kMinPlausiblePointer;
 }
 
-// Look up Qt libs once.
-static void resolve_qt(void) {
+// Read parent widget pointer from a QObject-derived widget.
+// Layout: widget[0]=vtable, widget[1]=d_ptr, d_ptr[2]=parent (in QObjectData).
+inline void* qwidget_parent(void* widget) {
+    void** widget_words = reinterpret_cast<void**>(widget);
+    void*  d_ptr        = widget_words[1];
+    if (!d_ptr) return 0;
+    void** d_words      = reinterpret_cast<void**>(d_ptr);
+    return d_words[constants::kQObjectDataParentOff / sizeof(void*)];
+}
+
+// Look up Qt libraries once; cache handles.
+void resolve_qt() {
     if (!s_h_widgets) s_h_widgets = dlopen("libQt5Widgets.so.5", RTLD_LAZY | RTLD_LOCAL);
     if (!s_h_core)    s_h_core    = dlopen("libQt5Core.so.5",    RTLD_LAZY | RTLD_LOCAL);
     // QtSvg isn't linked into K3SysUi. Loading it here registers SVG as a
@@ -88,556 +288,696 @@ static void resolve_qt(void) {
     static int svg_loaded = 0;
     if (!svg_loaded) {
         void* h_svg = dlopen("libQt5Svg.so.5", RTLD_LAZY | RTLD_GLOBAL);
-        if (s_log) fprintf(stderr, "[zoffset-2b] dlopen libQt5Svg.so.5 = %p\n", h_svg);
+        if (s_log) fprintf(stderr, "[zoffset] dlopen libQt5Svg.so.5 = %p\n", h_svg);
         svg_loaded = 1;
     }
 }
 
-// Forward declaration: event filter defined later, used by inject_new_button.
-bool zoffset_eventFilter(void* this_obj, void* watched, void* event);
+GroupTrack* track_find_or_new(void* group) {
+    for (int i = 0; i < constants::kMaxGroupTracks; i++) {
+        if (s_tracks[i].group == group) return &s_tracks[i];
+    }
+    for (int i = 0; i < constants::kMaxGroupTracks; i++) {
+        if (s_tracks[i].group == 0) {
+            s_tracks[i].group   = group;
+            s_tracks[i].next_id = 0;
+            s_tracks[i].got9    = 0;
+            return &s_tracks[i];
+        }
+    }
+    return 0;
+}
+
+// Walk parent chain from `start` widget upwards until parent==null.
+// All reads are SIGSEGV-trapped (per-firmware layouts may differ).
+void* find_toplevel_ancestor(void* start) {
+    void* current = start;
+    for (int hops = 0; hops < constants::kFindToplevelHops; hops++) {
+        void* parent = 0;
+        g_jmp_armed = 1;
+        if (sigsetjmp(g_jmp, 1) == 0) {
+            parent = qwidget_parent(current);
+        } else {
+            g_jmp_armed = 0;
+            break;
+        }
+        g_jmp_armed = 0;
+        if (!ptr_plausible(parent)) break;
+        current = parent;
+    }
+    return current;
+}
 
 // =========================================================================
 // Dynamic offset discovery
 //
-// Reads K3SysUi's own ELF symbol table and disassembles the relevant case 10
-// handler in MainWindow::AcFilePrintPageUiInit's button-clicked dispatcher to
-// extract the popup widget offset from MainWindow (hardcoded as 0x530 on KS1
-// 2.7.2.1, but varies per binary).
+// Reads K3SysUi's own ELF symbol table and disassembles case 10 in
+// MainWindow::AcFilePrintPageUiInit's button-clicked dispatcher to extract
+// the popup widget offset from MainWindow (hardcoded as 0x530 on KS1 2.7.2.1,
+// but it varies per binary).
 //
-// Approach (no libelf, no capstone - just ELF struct casting and ARM opcode
+// Approach (no libelf, no capstone -- just ELF struct casting and ARM opcode
 // pattern matching):
 //   1. mmap /proc/self/exe (the K3SysUi binary; not stripped, so .symtab is
 //      present).
 //   2. Find MainWindow::AcDeviceLeviqGetZoffset() by mangled name. The case 10
 //      handler is the only place that calls it.
-//   3. Scan all of .text for `bl <getZoffset>`. ARM bl encoding:
-//        0xeb000000 | (signed 24-bit instruction offset)
-//        target = PC + 8 + offset*4
-//   4. After each matching bl, scan forward up to ~50 instructions for the
-//      pattern  `ldr r3, [r3, #N]; mov r0, r3`. The N is the popup widget
-//      offset. (This pair specifically loads the popup pointer right before
-//      `bl QWidget::show()@plt`.)
-//   5. Fall back to the KS1 2.7.2.1 known value of 0x530 if discovery fails.
+//   3. Scan all of .text for `bl <getZoffset>`.
+//   4. After each matching bl, scan forward for the pattern
+//      `ldr r3, [r3, #N]; mov r0, r3`. The N is the popup widget offset.
+//   5. Fall back to constants::kPopupOffsetFallback if discovery fails.
 // =========================================================================
 
-static int s_popup_offset = 0x530;       // default; replaced by discover_offsets()
-static int s_popup_offset_discovered = 0;
-
-static int decode_bl_target(uint32_t inst, uint32_t pc, uint32_t* out_target) {
-    if ((inst & 0xff000000) != 0xeb000000) return 0;
-    int32_t off = (int32_t)(inst << 8) >> 8; // sign-extend lower 24 bits
-    *out_target = pc + 8 + (uint32_t)(off * 4);
+int decode_bl_target(uint32_t inst, uint32_t pc, uint32_t* out_target) {
+    if ((inst & constants::kArmBlOpcodeMask) != constants::kArmBlOpcode) return 0;
+    // Sign-extend the lower 24 bits.
+    int32_t signed_offset = static_cast<int32_t>(inst << 8) >> 8;
+    *out_target = pc + 8 + static_cast<uint32_t>(signed_offset * 4);
     return 1;
 }
 
-static void discover_offsets(void) {
+void discover_offsets() {
     if (s_popup_offset_discovered) return;
-    s_popup_offset_discovered = 1; // attempt only once
+    s_popup_offset_discovered = 1;  // attempt only once
 
     int fd = open("/proc/self/exe", O_RDONLY);
-    if (fd < 0) { if (s_log) fprintf(stderr, "[zoffset-discover] open /proc/self/exe failed\n"); return; }
+    if (fd < 0) {
+        if (s_log) fprintf(stderr, "[zoffset-discover] open /proc/self/exe failed\n");
+        return;
+    }
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 0x1000) { close(fd); return; }
 
     void* base = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (base == MAP_FAILED) { if (s_log) fprintf(stderr, "[zoffset-discover] mmap failed\n"); return; }
+    if (base == MAP_FAILED) {
+        if (s_log) fprintf(stderr, "[zoffset-discover] mmap failed\n");
+        return;
+    }
 
-    Elf32_Ehdr* eh = (Elf32_Ehdr*)base;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32) {
+    Elf32_Ehdr* ehdr = reinterpret_cast<Elf32_Ehdr*>(base);
+    if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr->e_ident[EI_CLASS] != ELFCLASS32) {
         if (s_log) fprintf(stderr, "[zoffset-discover] not a valid 32-bit ELF\n");
         munmap(base, st.st_size);
         return;
     }
 
-    // Section headers
-    Elf32_Shdr* sh = (Elf32_Shdr*)((char*)base + eh->e_shoff);
-    const char* shstrtab = (const char*)base + sh[eh->e_shstrndx].sh_offset;
-    Elf32_Shdr *symtab_sh = 0, *strtab_sh = 0, *text_sh = 0;
-    for (int i = 0; i < eh->e_shnum; i++) {
-        const char* name = shstrtab + sh[i].sh_name;
-        if      (strcmp(name, ".symtab") == 0) symtab_sh = &sh[i];
-        else if (strcmp(name, ".strtab") == 0) strtab_sh = &sh[i];
-        else if (strcmp(name, ".text")   == 0) text_sh   = &sh[i];
+    // Locate .symtab, .strtab, .text via section headers.
+    Elf32_Shdr* shdrs   = reinterpret_cast<Elf32_Shdr*>(
+        static_cast<char*>(base) + ehdr->e_shoff);
+    const char* shstrtab = static_cast<const char*>(base)
+                         + shdrs[ehdr->e_shstrndx].sh_offset;
+    Elf32_Shdr *symtab_shdr = 0, *strtab_shdr = 0, *text_shdr = 0;
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        const char* section_name = shstrtab + shdrs[i].sh_name;
+        if      (strcmp(section_name, ".symtab") == 0) symtab_shdr = &shdrs[i];
+        else if (strcmp(section_name, ".strtab") == 0) strtab_shdr = &shdrs[i];
+        else if (strcmp(section_name, ".text")   == 0) text_shdr   = &shdrs[i];
     }
-    if (!symtab_sh || !strtab_sh || !text_sh) {
+    if (!symtab_shdr || !strtab_shdr || !text_shdr) {
         if (s_log) fprintf(stderr, "[zoffset-discover] missing .symtab/.strtab/.text\n");
         munmap(base, st.st_size);
         return;
     }
 
-    Elf32_Sym* syms = (Elf32_Sym*)((char*)base + symtab_sh->sh_offset);
-    const char* strs = (const char*)base + strtab_sh->sh_offset;
-    int nsyms = symtab_sh->sh_size / sizeof(Elf32_Sym);
+    Elf32_Sym* symtab = reinterpret_cast<Elf32_Sym*>(
+        static_cast<char*>(base) + symtab_shdr->sh_offset);
+    const char* strtab = static_cast<const char*>(base) + strtab_shdr->sh_offset;
+    int symbol_count = symtab_shdr->sh_size / sizeof(Elf32_Sym);
 
     // Step 1: find MainWindow::AcDeviceLeviqGetZoffset() address.
-    const char* getz_name = "_ZN10MainWindow23AcDeviceLeviqGetZoffsetEv";
+    const char* getz_mangled = "_ZN10MainWindow23AcDeviceLeviqGetZoffsetEv";
     uint32_t getz_addr = 0;
-    for (int i = 0; i < nsyms; i++) {
-        if (ELF32_ST_TYPE(syms[i].st_info) != STT_FUNC) continue;
-        const char* nm = strs + syms[i].st_name;
-        if (strcmp(nm, getz_name) == 0) { getz_addr = syms[i].st_value; break; }
+    for (int i = 0; i < symbol_count; i++) {
+        if (ELF32_ST_TYPE(symtab[i].st_info) != STT_FUNC) continue;
+        const char* sym_name = strtab + symtab[i].st_name;
+        if (strcmp(sym_name, getz_mangled) == 0) {
+            getz_addr = symtab[i].st_value;
+            break;
+        }
     }
     if (!getz_addr) {
-        if (s_log) fprintf(stderr, "[zoffset-discover] %s not found in symbols\n", getz_name);
+        if (s_log) fprintf(stderr, "[zoffset-discover] %s not found in symbols\n", getz_mangled);
         munmap(base, st.st_size);
         return;
     }
     if (s_log) fprintf(stderr, "[zoffset-discover] AcDeviceLeviqGetZoffset @ 0x%x\n", getz_addr);
 
-    // Step 2: scan .text for bl <getz> followed by  ldr r3,[r3,#N]; mov r0,r3
-    uint32_t text_vma  = text_sh->sh_addr;
-    uint32_t text_file = text_sh->sh_offset;
-    uint32_t text_size = text_sh->sh_size;
-    uint32_t* code = (uint32_t*)((char*)base + text_file);
-    int nwords = text_size / 4;
+    // Step 2: scan .text for `bl <getZoffset>`, then the popup-load pattern.
+    uint32_t  text_vma  = text_shdr->sh_addr;
+    uint32_t  text_file = text_shdr->sh_offset;
+    uint32_t  text_size = text_shdr->sh_size;
+    uint32_t* code = reinterpret_cast<uint32_t*>(
+        static_cast<char*>(base) + text_file);
+    int word_count = text_size / 4;
 
-    for (int i = 0; i + 1 < nwords; i++) {
+    for (int i = 0; i + 1 < word_count; i++) {
         uint32_t pc = text_vma + i * 4;
-        uint32_t target = 0;
-        if (!decode_bl_target(code[i], pc, &target)) continue;
-        if (target != getz_addr) continue;
+        uint32_t bl_target = 0;
+        if (!decode_bl_target(code[i], pc, &bl_target)) continue;
+        if (bl_target != getz_addr) continue;
 
-        // Found bl to getZoffset. Scan forward for the popup-load pattern.
-        int max_j = i + 50;
-        if (max_j >= nwords - 1) max_j = nwords - 2;
-        for (int j = i + 1; j <= max_j; j++) {
-            uint32_t ldr = code[j];
-            uint32_t mov = code[j + 1];
-            // ldr r3, [r3, #N]   = 0xE5933NNN
-            // mov r0, r3         = 0xE1A00003
-            if ((ldr & 0xfffff000) == 0xe5933000 && mov == 0xe1a00003) {
-                uint32_t n = ldr & 0xfff;
-                // Sanity: popup offset should be a non-trivial MainWindow member
-                if (n >= 0x40 && n < 0x10000) {
-                    s_popup_offset = (int)n;
-                    if (s_log) fprintf(stderr,
-                        "[zoffset-discover] popup offset discovered: 0x%x (at .text+0x%x)\n",
-                        n, (uint32_t)(j * 4 + text_file));
-                    munmap(base, st.st_size);
-                    return;
-                }
-            }
+        // Found bl to getZoffset; scan forward for the popup-load pattern.
+        int scan_end = i + constants::kDiscoveryScanWindow;
+        if (scan_end >= word_count - 1) scan_end = word_count - 2;
+        for (int j = i + 1; j <= scan_end; j++) {
+            uint32_t ldr_inst = code[j];
+            uint32_t mov_inst = code[j + 1];
+            const bool is_ldr_r3_r3_imm =
+                (ldr_inst & constants::kArmLdrR3R3ImmMask) == constants::kArmLdrR3R3Imm;
+            const bool is_mov_r0_r3 = (mov_inst == constants::kArmMovR0R3);
+            if (!is_ldr_r3_r3_imm || !is_mov_r0_r3) continue;
+
+            uint32_t imm = ldr_inst & 0xfff;
+            const bool plausible_member_offset =
+                imm >= static_cast<uint32_t>(constants::kPopupOffsetMin) &&
+                imm <  static_cast<uint32_t>(constants::kPopupOffsetMax);
+            if (!plausible_member_offset) continue;
+
+            s_popup_offset = static_cast<int>(imm);
+            if (s_log) fprintf(stderr,
+                "[zoffset-discover] popup offset discovered: 0x%x (at .text+0x%x)\n",
+                imm, static_cast<uint32_t>(j * 4 + text_file));
+            munmap(base, st.st_size);
+            return;
         }
     }
 
-    if (s_log) fprintf(stderr, "[zoffset-discover] pattern not matched; using fallback popup offset 0x%x\n", s_popup_offset);
+    if (s_log) fprintf(stderr,
+        "[zoffset-discover] pattern not matched; using fallback popup offset 0x%x\n",
+        s_popup_offset);
     munmap(base, st.st_size);
 }
 
-// Registry: each entry maps an ancestor widget pointer to our injected button.
-// When the global event filter sees Show/Hide on any registered ancestor, we
-// toggle the corresponding button's visibility.
-struct AncestorMapping {
-    void* ancestor;
-    void* button;
-    unsigned char seen_hide;  // set once we observe a Hide on this ancestor
-};
-static AncestorMapping s_ancestors[64];
-static int s_ancestor_count = 0;
-
-// Walk parent chain from `start` widget upwards until parent==null (top-level).
-// All reads are SIGSEGV-trapped.
-static void* find_toplevel_ancestor(void* start) {
-    void* cur = start;
-    for (int hops = 0; hops < 64; hops++) {
-        void* parent = 0;
-        g_jmp_armed = 1;
-        if (sigsetjmp(g_jmp, 1) == 0) {
-            void** w = (void**)cur;
-            void*  d = w[1];
-            if (d) parent = ((void**)d)[2];
-        } else { g_jmp_armed = 0; break; }
-        g_jmp_armed = 0;
-        if (!parent || (uintptr_t)parent < 0x10000) break;
-        cur = parent;
-    }
-    return cur;
-}
-
-// Construct a new QPushButton parented to the top-level ancestor of `template_btn`,
-// position it visibly, add it to `group` with id=10. Body fully SIGSEGV-trapped.
-static void inject_new_button(void* group, void* template_btn) {
-    if (s_log) fprintf(stderr, "[zoffset-2b] inject begin: group=%p template=%p\n", group, template_btn);
-
-    void* topwidget = find_toplevel_ancestor(template_btn);
-    if (s_log) fprintf(stderr, "[zoffset-2b] top-level ancestor = %p\n", topwidget);
-    if ((uintptr_t)topwidget < 0x10000) {
-        if (s_log) fprintf(stderr, "[zoffset-2b] no valid top-level; abort inject\n");
-        return;
-    }
-    if (!s_mainwindow) {
-        s_mainwindow = topwidget;
-        if (s_log) fprintf(stderr, "[zoffset-2b] saved MainWindow=%p for SIGUSR1 diagnostic\n", topwidget);
-    }
-
-    resolve_qt();
-    if (!s_h_widgets || !s_h_core) { if (s_log) fprintf(stderr, "[zoffset-2b] no Qt libs; abort inject\n"); return; }
-
-    qpush_ctor_fn   ctor      = (qpush_ctor_fn)   dlsym(s_h_widgets, "_ZN11QPushButtonC1EP7QWidget");
-    if (!ctor) ctor           = (qpush_ctor_fn)   dlsym(s_h_widgets, "_ZN11QPushButtonC2EP7QWidget");
-    setGeomRect_fn  setGeomR  = (setGeomRect_fn)  dlsym(s_h_widgets, "_ZN7QWidget11setGeometryERK5QRect");
-    setText_fn      setText   = (setText_fn)      dlsym(s_h_widgets, "_ZN15QAbstractButton7setTextERK7QString");
-    setStyle_fn     setStyle  = (setStyle_fn)     dlsym(s_h_widgets, "_ZN7QWidget13setStyleSheetERK7QString");
-    show_fn         w_show    = (show_fn)         dlsym(s_h_widgets, "_ZN7QWidget4showEv");
-    raise_fn        w_raise   = (raise_fn)        dlsym(s_h_widgets, "_ZN7QWidget5raiseEv");
-    qstring_ctor_fn qs_ctor   = (qstring_ctor_fn) dlsym(s_h_core, "_ZN7QStringC1EPKc");
-    if (!qs_ctor) qs_ctor     = (qstring_ctor_fn) dlsym(s_h_core, "_ZN7QStringC2EPKc");
-    qstring_from_utf8_fn qs_fromUtf8 = (qstring_from_utf8_fn) dlsym(s_h_core, "_ZN7QString15fromUtf8_helperEPKci");
-    qstring_dtor_fn qs_dtor   = (qstring_dtor_fn) dlsym(s_h_core, "_ZN7QStringD1Ev");
-    if (!qs_dtor) qs_dtor     = (qstring_dtor_fn) dlsym(s_h_core, "_ZN7QStringD2Ev");
-
-    if (s_log) fprintf(stderr, "[zoffset-2b] syms: ctor=%p geom=%p text=%p style=%p show=%p qs_ctor=%p qs_fromUtf8=%p\n",
-                       ctor, setGeomR, setText, setStyle, w_show, qs_ctor, qs_fromUtf8);
-    if (!ctor || !w_show) { if (s_log) fprintf(stderr, "[zoffset-2b] essential symbol missing; abort\n"); return; }
-
-    // Allocate; K3SysUi uses 40 bytes for QtCSquareBtn (a QPushButton subclass)
-    // so sizeof(QPushButton) <= 40. 64 leaves comfortable headroom.
-    void* btn = calloc(1, 64);
-    if (!btn) return;
-
-    // Parent to top-level main window (always visible coordinate space).
-    // Auto-hide on non-print pages is a future refinement; needs event-filter
-    // on a print-page widget to mirror its visibility.
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) != 0) {
-        if (s_log) fprintf(stderr, "[zoffset-2b] SEGV constructing QPushButton; abort\n");
-        g_jmp_armed = 0; free(btn); return;
-    }
-    ctor(btn, topwidget);
-    g_jmp_armed = 0;
-    if (s_log) fprintf(stderr, "[zoffset-2b] constructed new QPushButton at %p (parent=%p)\n", btn, topwidget);
-
-    // Inherit geometry from K3SysUi's own (hidden) id=10 button if it set one.
-    // Anycubic's setGeometry call places the button where it was originally
-    // designed to live; we just copy that placement.
-    typedef int (*int_getter_fn)(const void* this_);
-    int_getter_fn w_x      = (int_getter_fn) dlsym(s_h_widgets, "_ZNK7QWidget1xEv");
-    int_getter_fn w_y      = (int_getter_fn) dlsym(s_h_widgets, "_ZNK7QWidget1yEv");
-    int_getter_fn w_width  = (int_getter_fn) dlsym(s_h_widgets, "_ZNK7QWidget5widthEv");
-    int_getter_fn w_height = (int_getter_fn) dlsym(s_h_widgets, "_ZNK7QWidget6heightEv");
-
-    int x=120, y=120, w=50, h=50;
-    if (w_x && w_y && w_width && w_height) {
-        g_jmp_armed = 1;
-        if (sigsetjmp(g_jmp, 1) == 0) {
-            int tx = w_x(template_btn);
-            int ty = w_y(template_btn);
-            int tw = w_width(template_btn);
-            int th = w_height(template_btn);
-            if (s_log) fprintf(stderr, "[zoffset-2b] template geometry: x=%d y=%d w=%d h=%d\n", tx, ty, tw, th);
-            if (tw > 0 && th > 0 && tx >= 0 && ty >= 0) { x = tx; y = ty; w = tw; h = th; }
-        }
-        g_jmp_armed = 0;
-    }
-
-    int rect[4] = { x, y, x + w - 1, y + h - 1 };
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) == 0 && setGeomR) setGeomR(btn, rect);
-    g_jmp_armed = 0;
-    if (s_log) fprintf(stderr, "[zoffset-2b] new button placed at (%d,%d) %dx%d\n", x, y, w, h);
-
-    // Icon from the Z-offset SVG that Anycubic already shipped in the Qt
-    // resource bundle. Replaces the gray default styling with the asset that
-    // was always meant for this button.
-    typedef void* (*qicon_ctor_str_fn)(void* this_, const void* qstring_ref);
-    typedef void  (*qicon_dtor_fn)(void* this_);
-    typedef void  (*setIcon_fn)(void* this_, const void* qicon_ref);
-    qicon_ctor_str_fn qicon_ctor = (qicon_ctor_str_fn) dlsym(s_h_widgets, "_ZN5QIconC1ERK7QString");
-    if (!qicon_ctor) qicon_ctor  = (qicon_ctor_str_fn) dlsym(s_h_widgets, "_ZN5QIconC2ERK7QString");
-    qicon_dtor_fn     qicon_dtor = (qicon_dtor_fn)     dlsym(s_h_widgets, "_ZN5QIconD1Ev");
-    if (!qicon_dtor) qicon_dtor  = (qicon_dtor_fn)     dlsym(s_h_widgets, "_ZN5QIconD2Ev");
-    setIcon_fn        setIcon    = (setIcon_fn)        dlsym(s_h_widgets, "_ZN15QAbstractButton7setIconERK5QIcon");
-    if (s_log) fprintf(stderr, "[zoffset-2b] icon syms: qicon_ctor=%p qicon_dtor=%p setIcon=%p\n", qicon_ctor, qicon_dtor, setIcon);
-
-    typedef bool (*qicon_isnull_fn)(const void* this_);
-    typedef void (*set_iconsize_fn)(void* this_, const int* qsize2);
-    qicon_isnull_fn qicon_isnull = (qicon_isnull_fn) dlsym(s_h_widgets, "_ZNK5QIcon6isNullEv");
-    set_iconsize_fn setIconSize  = (set_iconsize_fn) dlsym(s_h_widgets, "_ZN15QAbstractButton11setIconSizeERK5QSize");
-
-    if (qs_fromUtf8 && qicon_ctor && setIcon) {
-        const char* paths[] = {
-            ":/FilePrintPage/Zoffset_Item.svg",
-            ":/FilePrintPage/Pause-nor.png",  // known-good PNG fallback for diagnostic
-            0
-        };
-        for (int i = 0; paths[i]; i++) {
-            char qs[8] = {0};
-            char qi[8] = {0};
-            int  is_null = 1;
-            g_jmp_armed = 1;
-            if (sigsetjmp(g_jmp, 1) == 0) {
-                // fromUtf8_helper (the exported helper) asserts size != -1;
-                // only the inline fromUtf8() wrapper handles the -1 sentinel.
-                int slen = (int)strlen(paths[i]);
-                qs_fromUtf8(qs, paths[i], slen);
-                qicon_ctor(qi, qs);
-                if (qicon_isnull) is_null = qicon_isnull(qi) ? 1 : 0;
-                if (s_log) fprintf(stderr, "[zoffset-2b] icon[%s] isNull=%d\n", paths[i], is_null);
-                if (!is_null) {
-                    setIcon(btn, qi);
-                    int qsize[2] = { 40, 40 };
-                    if (setIconSize) setIconSize(btn, qsize);
-                    if (s_log) fprintf(stderr, "[zoffset-2b] applied icon %s + iconSize(40,40)\n", paths[i]);
-                }
-                if (qicon_dtor) qicon_dtor(qi);
-                if (qs_dtor) qs_dtor(qs);
-            }
-            g_jmp_armed = 0;
-            if (!is_null) break;
-        }
-    }
-
-    // Show and add to group with id=10 (group routing is a backup)
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) == 0) {
-        w_show(btn);
-        if (w_raise) w_raise(btn);
-        if (s_real_addButton) s_real_addButton(group, btn, 10);
-        if (s_log) fprintf(stderr, "[zoffset-2b] new button %p shown + addButton(group=%p,id=10) done\n", btn, group);
-    } else {
-        if (s_log) fprintf(stderr, "[zoffset-2b] SEGV during show/addButton; partial inject\n");
-    }
-    g_jmp_armed = 0;
-
-    // Visibility mirror: install a Qt event filter on the template button
-    // that forwards Show/Hide events to our button via setVisible. We avoid
-    // the moc requirement by constructing a bare QObject and replacing its
-    // per-instance vtable[6] (QObject::eventFilter) with our C function.
-    typedef void* (*qobject_ctor_fn)(void* this_, void* parent);
-    typedef void  (*install_filter_fn)(void* this_, void* filter);
-    qobject_ctor_fn   qobject_ctor   = (qobject_ctor_fn)   dlsym(s_h_core,    "_ZN7QObjectC1EPS_");
-    if (!qobject_ctor) qobject_ctor   = (qobject_ctor_fn)   dlsym(s_h_core,    "_ZN7QObjectC2EPS_");
-    install_filter_fn installFilter  = (install_filter_fn) dlsym(s_h_core,    "_ZN7QObject18installEventFilterEPS_");
-    // We'll need setVisible to call from our event filter
-    static setVisible_fn s_setVisible = 0;
-    if (!s_setVisible) s_setVisible = (setVisible_fn) dlsym(s_h_widgets, "_ZN7QWidget10setVisibleEb");
-    if (s_log) fprintf(stderr, "[zoffset-2b] mirror syms: qobject_ctor=%p installFilter=%p setVisible=%p\n",
-                       qobject_ctor, installFilter, s_setVisible);
-
-    if (qobject_ctor && installFilter && s_setVisible) {
-        // Allocate space for the QObject. sizeof(QObject) is small (vtable+d_ptr=8).
-        void* filter_obj = calloc(1, 32);
-        if (filter_obj) {
-            g_jmp_armed = 1;
-            if (sigsetjmp(g_jmp, 1) == 0) {
-                qobject_ctor(filter_obj, 0); // parent=null
-                if (s_log) fprintf(stderr, "[zoffset-2b] constructed event-filter QObject at %p\n", filter_obj);
-
-                // Allocate a per-instance vtable copy and patch eventFilter at index 6
-                void** old_vt = *(void***)filter_obj;
-                void** new_vt = (void**)malloc(sizeof(void*) * 12);
-                for (int i = 0; i < 12; i++) new_vt[i] = old_vt[i];
-
-                new_vt[6] = (void*)zoffset_eventFilter;
-
-                // Stash our button pointer right after the QObject so the filter
-                // can find it without globals. filter_obj+8 is the d_ptr slot;
-                // we put a pointer to our button at offset 16 (past d_ptr).
-                *(void**)((char*)filter_obj + 16) = btn;
-
-                *(void***)filter_obj = new_vt;
-
-                // Register first 4 ancestors of template_btn. The page widget
-                // is always close to its children; higher ancestors (MainWindow,
-                // QStackedWidget root) fire Show only once at boot, which would
-                // be false positives. 4 levels covers known cases.
-                void* cur = template_btn;
-                for (int hops = 0; hops < 4; hops++) {
-                    if (s_ancestor_count < 64) {
-                        s_ancestors[s_ancestor_count].ancestor  = cur;
-                        s_ancestors[s_ancestor_count].button    = btn;
-                        s_ancestors[s_ancestor_count].seen_hide = 0;
-                        s_ancestor_count++;
-                        if (s_log) fprintf(stderr, "[zoffset-2b] registered ancestor[%d]=%p -> btn=%p\n",
-                                           s_ancestor_count - 1, cur, btn);
-                    }
-                    void** w = (void**)cur;
-                    void*  d = w[1];
-                    if (!d) break;
-                    void* p = ((void**)d)[2];
-                    if ((uintptr_t)p < 0x10000) break;
-                    cur = p;
-                }
-
-                // Install the global filter on qApp once.
-                static int global_installed = 0;
-                if (!global_installed) {
-                    static void** s_app_self = 0;
-                    if (!s_app_self) s_app_self = (void**) dlsym(s_h_core, "_ZN16QCoreApplication4selfE");
-                    void* qapp = s_app_self ? *s_app_self : 0;
-                    if (qapp) {
-                        installFilter(qapp, filter_obj);
-                        global_installed = 1;
-                        if (s_log) fprintf(stderr, "[zoffset-2b] GLOBAL event filter installed on qApp=%p\n", qapp);
-                    }
-                }
-
-                // Start the button HIDDEN. K3SysUi boots on the home page,
-                // so the button should not appear until the user navigates to
-                // the print page, at which point the event filter on level 1
-                // (template_btn->parent) catches ShowToParent and shows it.
-                s_setVisible(btn, false);
-                if (s_log) fprintf(stderr, "[zoffset-2b] initial visibility set to false (filter will show on Show events)\n");
-            } else {
-                if (s_log) fprintf(stderr, "[zoffset-2b] SEGV during event filter install\n");
-                free(filter_obj);
-            }
-            g_jmp_armed = 0;
-        }
-    }
-
-    // PRIMARY routing: connect button->clicked() directly to popup->show()
-    // via Qt's string-based connect. Bypasses QButtonGroup entirely.
-    //   QMetaObject::Connection QObject::connect(
-    //       const QObject *sender, const char *signal,
-    //       const QObject *receiver, const char *member,
-    //       Qt::ConnectionType type = Qt::AutoConnection)
-    // QMetaObject::Connection has a non-trivial dtor, so on ARM EABI it's
-    // returned via sret: a hidden result-pointer comes BEFORE the real args.
-    // Actual ABI: (result*, sender, signal, recv, slot, type) - 6 args.
-    typedef void (*connect_str_fn)(void* result_storage,
-                                   const void* sender, const char* signal,
-                                   const void* receiver, const char* member, int connType);
-    connect_str_fn connectStr = (connect_str_fn)
-        dlsym(s_h_core, "_ZN7QObject7connectEPKS_PKcS1_S3_N2Qt14ConnectionTypeE");
-    if (s_log) fprintf(stderr, "[zoffset-2b] connectStr=%p, MainWindow=%p\n", connectStr, s_mainwindow);
-    if (connectStr && s_mainwindow) {
-        void* popup = 0;
-        g_jmp_armed = 1;
-        if (sigsetjmp(g_jmp, 1) == 0) {
-            popup = *(void**)((char*)s_mainwindow + s_popup_offset);
-        }
-        g_jmp_armed = 0;
-        if (s_log) fprintf(stderr, "[zoffset-2b] popup widget = %p\n", popup);
-        if ((uintptr_t)popup >= 0x10000) {
-            // QMetaObject::Connection is sizeof(void*) == 4 (single d_ptr member).
-            // Allocate 8 for slack and zero-init.
-            char conn_storage[8] = {0};
-            g_jmp_armed = 1;
-            if (sigsetjmp(g_jmp, 1) == 0) {
-                // QAbstractButton::clicked(bool checked = false) - full sig required
-                connectStr(conn_storage, btn, "2clicked(bool)", popup, "1show()", 0 /*AutoConnection*/);
-                void* conn_d = *(void**)conn_storage;
-                if (s_log) fprintf(stderr, "[zoffset-2b] direct connect btn->clicked => popup->show() conn.d_ptr=%p\n", conn_d);
-            } else {
-                if (s_log) fprintf(stderr, "[zoffset-2b] SEGV during string-based connect\n");
-            }
-            g_jmp_armed = 0;
-        }
-    }
-}
-
-// Un-hide a captured id=10 button: show + raise + place at a known location.
-static void unhide_button(void* btn) {
-    resolve_qt();
-    if (!s_h_widgets) { if (s_log) fprintf(stderr, "[zoffset-2b] no Qt handle; cannot unhide\n"); return; }
-
-    setVisible_fn   setVisible = (setVisible_fn)   dlsym(s_h_widgets, "_ZN7QWidget10setVisibleEb");
-    show_fn         widget_show = (show_fn)        dlsym(s_h_widgets, "_ZN7QWidget4showEv");
-    raise_fn        widget_raise= (raise_fn)       dlsym(s_h_widgets, "_ZN7QWidget5raiseEv");
-    setGeomRect_fn  setGeomR   = (setGeomRect_fn)  dlsym(s_h_widgets, "_ZN7QWidget11setGeometryERK5QRect");
-
-    if (s_log) fprintf(stderr, "[zoffset-2b] unhide btn=%p: setVisible=%p show=%p raise=%p setGeomR=%p\n",
-                       btn, setVisible, widget_show, widget_raise, setGeomR);
-
-    // QRect in Qt 5 is { int x1, y1, x2, y2 } where x2 = x+w-1, y2 = y+h-1.
-    // Place the button at (30, 30) with size 100x100 -> { 30, 30, 129, 129 }.
-    int rect[4] = { 120, 120, 120 + 50 - 1, 120 + 50 - 1 };
-
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) == 0) {
-        if (setGeomR)   setGeomR(btn, rect);
-        if (setVisible) setVisible(btn, true);
-        if (widget_show) widget_show(btn);
-        if (widget_raise) widget_raise(btn);
-        if (s_log) fprintf(stderr, "[zoffset-2b] btn=%p un-hidden (rect set via QRect overload)\n", btn);
-    } else {
-        if (s_log) fprintf(stderr, "[zoffset-2b] SEGV un-hiding btn=%p; skipping\n", btn);
-    }
-    g_jmp_armed = 0;
-}
-
-// SIGUSR1: replicate dispatcher case 10's popup show.
-//   popup_ptr = *(MainWindow + 0x530)
-//   popup_ptr->show()
-//   popup_ptr->raise()
-// If the popup appears, the click-through-signal path is what's broken.
-static void on_sigusr1(int) {
-    if (!s_mainwindow) {
-        fprintf(stderr, "[zoffset-2b] SIGUSR1: no MainWindow saved\n");
-        return;
-    }
-    fprintf(stderr, "[zoffset-2b] SIGUSR1: attempting popup->show() via MainWindow+0x%x\n", s_popup_offset);
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) != 0) {
-        fprintf(stderr, "[zoffset-2b] SIGUSR1: SEGV reading popup ptr\n");
-        g_jmp_armed = 0; return;
-    }
-    void* popup = *(void**)((char*)s_mainwindow + s_popup_offset);
-    g_jmp_armed = 0;
-    fprintf(stderr, "[zoffset-2b] SIGUSR1: popup_ptr at MainWindow+0x%x = %p\n", s_popup_offset, popup);
-    if ((uintptr_t)popup < 0x10000) { fprintf(stderr, "[zoffset-2b] SIGUSR1: implausible popup ptr\n"); return; }
-
-    resolve_qt();
-    if (!s_h_widgets) { fprintf(stderr, "[zoffset-2b] SIGUSR1: no Qt handle\n"); return; }
-    show_fn  ws = (show_fn)  dlsym(s_h_widgets, "_ZN7QWidget4showEv");
-    raise_fn wr = (raise_fn) dlsym(s_h_widgets, "_ZN7QWidget5raiseEv");
-    g_jmp_armed = 1;
-    if (sigsetjmp(g_jmp, 1) == 0) {
-        if (ws) ws(popup);
-        if (wr) wr(popup);
-        fprintf(stderr, "[zoffset-2b] SIGUSR1: show()+raise() invoked on popup=%p\n", popup);
-    } else {
-        fprintf(stderr, "[zoffset-2b] SIGUSR1: SEGV during show()\n");
-    }
-    g_jmp_armed = 0;
-}
-
-// Event filter installed on the K3SysUi template button. Layout:
-//   filter_obj+0:  vtable* (our patched copy)
-//   filter_obj+4:  d_ptr (real QObject d_ptr)
-//   filter_obj+16: our injected button pointer (stashed by injector)
+// =========================================================================
+// Event filter -- called via the per-instance vtable patch.
 //
-// QEvent layout (Qt 5):
-//   +0: vtable*
-//   +4: d (QEventPrivate*)
-//   +8: t (ushort, the event type)
+// Layout of our filter object (allocated by inject_new_button):
+//   +0:  vtable* (our patched copy)
+//   +4:  d_ptr (real QObject d_ptr from QObject ctor)
+//   +16: our injected button pointer (stash, so the filter can find it
+//        without globals -- supports multiple injects)
 //
-// QEvent::Type values: Show=17, Hide=18
-// Discovery global event filter. Logs Show/Hide events for every widget in the
-// process to identify the widget(s) that toggle on print-page transitions.
-extern "C" bool zoffset_eventFilter(void* this_obj, void* watched, void* event) {
+// QEvent::type() lives at offset constants::kQEventTypeOffset (8) as ushort.
+// =========================================================================
+
+bool zoffset_eventFilter(void* this_obj, void* watched, void* event) {
     if (!event || !watched) return false;
-    unsigned short t = *(unsigned short*)((char*)event + 8);
 
-    // Only Show (17) and Hide (18); match against registered ancestors.
-    if (t != 17 && t != 18) return false;
+    const unsigned short event_type =
+        *reinterpret_cast<unsigned short*>(
+            static_cast<char*>(event) + constants::kQEventTypeOffset);
+
+    if (event_type != qevent::Show && event_type != qevent::Hide) return false;
 
     for (int i = 0; i < s_ancestor_count; i++) {
         if (s_ancestors[i].ancestor != watched) continue;
 
-        typedef void (*setvis_fn)(void*, bool);
-        static setvis_fn setvis = 0;
-        if (!setvis) {
+        static qtfn::setVisible_t set_visible = 0;
+        if (!set_visible) {
             void* h = dlopen("libQt5Widgets.so.5", RTLD_LAZY | RTLD_LOCAL);
-            if (h) setvis = (setvis_fn) dlsym(h, "_ZN7QWidget10setVisibleEb");
+            if (h) {
+                set_visible = reinterpret_cast<qtfn::setVisible_t>(
+                    dlsym(h, "_ZN7QWidget10setVisibleEb"));
+            }
         }
-        if (!setvis) return false;
+        if (!set_visible) return false;
 
-        bool visible = (t == 17);
-        setvis(s_ancestors[i].button, visible);
-        fprintf(stderr, "[zoffset-2b] ancestor %s on %p -> setVisible(%d) on btn=%p\n",
-                visible ? "SHOW" : "HIDE", watched, (int)visible, s_ancestors[i].button);
+        const bool become_visible = (event_type == qevent::Show);
+        set_visible(s_ancestors[i].button, become_visible);
+        fprintf(stderr,
+                "[zoffset] ancestor %s on %p -> setVisible(%d) on btn=%p\n",
+                become_visible ? "SHOW" : "HIDE",
+                watched, static_cast<int>(become_visible),
+                s_ancestors[i].button);
         break;
     }
-    return false;
+    (void)this_obj;  // not used; the stash is reached via watched/ancestors
+    return false;    // never consume events; pass through
 }
 
-__attribute__((visibility("default")))
+// =========================================================================
+// SIGUSR1 diagnostic: replicate dispatcher case 10's popup show.
+//   popup_ptr = *(MainWindow + s_popup_offset)
+//   popup_ptr->show(); popup_ptr->raise();
+// Used to disentangle click-routing failures from popup-display failures.
+// =========================================================================
+
+void on_sigusr1(int /*signum*/) {
+    if (!s_mainwindow) {
+        fprintf(stderr, "[zoffset] SIGUSR1: no MainWindow saved\n");
+        return;
+    }
+    fprintf(stderr, "[zoffset] SIGUSR1: attempting popup->show() via MainWindow+0x%x\n",
+            s_popup_offset);
+    void* popup = 0;
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) != 0) {
+        fprintf(stderr, "[zoffset] SIGUSR1: SEGV reading popup ptr\n");
+        g_jmp_armed = 0;
+        return;
+    }
+    popup = *reinterpret_cast<void**>(
+        static_cast<char*>(s_mainwindow) + s_popup_offset);
+    g_jmp_armed = 0;
+    fprintf(stderr, "[zoffset] SIGUSR1: popup_ptr at MainWindow+0x%x = %p\n",
+            s_popup_offset, popup);
+    if (!ptr_plausible(popup)) {
+        fprintf(stderr, "[zoffset] SIGUSR1: implausible popup ptr\n");
+        return;
+    }
+
+    resolve_qt();
+    if (!s_h_widgets) { fprintf(stderr, "[zoffset] SIGUSR1: no Qt handle\n"); return; }
+    qtfn::show_t  qwidget_show  = reinterpret_cast<qtfn::show_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget4showEv"));
+    qtfn::raise_t qwidget_raise = reinterpret_cast<qtfn::raise_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget5raiseEv"));
+
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) == 0) {
+        if (qwidget_show)  qwidget_show(popup);
+        if (qwidget_raise) qwidget_raise(popup);
+        fprintf(stderr, "[zoffset] SIGUSR1: show()+raise() invoked on popup=%p\n", popup);
+    } else {
+        fprintf(stderr, "[zoffset] SIGUSR1: SEGV during show()\n");
+    }
+    g_jmp_armed = 0;
+}
+
+// =========================================================================
+// Diagnostic un-hide: try to make K3SysUi's existing id=10 button visible.
+// Does not work in isolation (the button's parent layout zero-sizes it), but
+// kept as a debugging tool. Off unless RINKHALS_ZOFFSET_UNHIDE=1.
+// =========================================================================
+
+void unhide_button(void* btn) {
+    resolve_qt();
+    if (!s_h_widgets) {
+        if (s_log) fprintf(stderr, "[zoffset] no Qt handle; cannot unhide\n");
+        return;
+    }
+
+    qtfn::setVisible_t      set_visible   = reinterpret_cast<qtfn::setVisible_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget10setVisibleEb"));
+    qtfn::show_t            qwidget_show  = reinterpret_cast<qtfn::show_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget4showEv"));
+    qtfn::raise_t           qwidget_raise = reinterpret_cast<qtfn::raise_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget5raiseEv"));
+    qtfn::setGeometryRect_t set_geometry  = reinterpret_cast<qtfn::setGeometryRect_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget11setGeometryERK5QRect"));
+
+    if (s_log) fprintf(stderr,
+        "[zoffset] unhide btn=%p: setVisible=%p show=%p raise=%p setGeometry=%p\n",
+        btn, set_visible, qwidget_show, qwidget_raise, set_geometry);
+
+    // QRect in Qt 5 is { int x1, y1, x2, y2 } where x2 = x+w-1.
+    const int rect[4] = {
+        constants::kDefaultBtnX,
+        constants::kDefaultBtnY,
+        constants::kDefaultBtnX + constants::kDefaultBtnW - 1,
+        constants::kDefaultBtnY + constants::kDefaultBtnH - 1
+    };
+
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) == 0) {
+        if (set_geometry)  set_geometry(btn, rect);
+        if (set_visible)   set_visible(btn, true);
+        if (qwidget_show)  qwidget_show(btn);
+        if (qwidget_raise) qwidget_raise(btn);
+        if (s_log) fprintf(stderr, "[zoffset] btn=%p un-hidden\n", btn);
+    } else {
+        if (s_log) fprintf(stderr, "[zoffset] SEGV un-hiding btn=%p; skipping\n", btn);
+    }
+    g_jmp_armed = 0;
+}
+
+// =========================================================================
+// inject_new_button: the feature itself.
+//
+// Constructs a fresh QPushButton parented to the top-level main window,
+// gives it geometry and the embedded Z-offset SVG icon, connects its
+// clicked(bool) signal directly to popup->show(), and registers ancestor
+// chain entries so the global event filter mirrors visibility.
+// =========================================================================
+
+void inject_new_button(void* group, void* template_btn) {
+    if (s_log) fprintf(stderr,
+        "[zoffset] inject begin: group=%p template=%p\n", group, template_btn);
+
+    void* topwidget = find_toplevel_ancestor(template_btn);
+    if (s_log) fprintf(stderr, "[zoffset] top-level ancestor = %p\n", topwidget);
+    if (!ptr_plausible(topwidget)) {
+        if (s_log) fprintf(stderr, "[zoffset] no valid top-level; abort inject\n");
+        return;
+    }
+    if (!s_mainwindow) {
+        s_mainwindow = topwidget;
+        if (s_log) fprintf(stderr,
+            "[zoffset] saved MainWindow=%p for SIGUSR1 diagnostic\n", topwidget);
+    }
+
+    resolve_qt();
+    if (!s_h_widgets || !s_h_core) {
+        if (s_log) fprintf(stderr, "[zoffset] no Qt libs; abort inject\n");
+        return;
+    }
+
+    // Resolve Qt entry points. C1 is the complete-object ctor; if missing,
+    // C2 (base-object ctor) is functionally equivalent for a standalone obj.
+    qtfn::qpushButton_ctor_t qpush_ctor = reinterpret_cast<qtfn::qpushButton_ctor_t>(
+        dlsym(s_h_widgets, "_ZN11QPushButtonC1EP7QWidget"));
+    if (!qpush_ctor) qpush_ctor = reinterpret_cast<qtfn::qpushButton_ctor_t>(
+        dlsym(s_h_widgets, "_ZN11QPushButtonC2EP7QWidget"));
+
+    qtfn::setGeometryRect_t set_geometry = reinterpret_cast<qtfn::setGeometryRect_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget11setGeometryERK5QRect"));
+    qtfn::show_t            qwidget_show = reinterpret_cast<qtfn::show_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget4showEv"));
+    qtfn::raise_t           qwidget_raise = reinterpret_cast<qtfn::raise_t>(
+        dlsym(s_h_widgets, "_ZN7QWidget5raiseEv"));
+
+    qtfn::qstring_fromUtf8_t qstr_fromUtf8 = reinterpret_cast<qtfn::qstring_fromUtf8_t>(
+        dlsym(s_h_core, "_ZN7QString15fromUtf8_helperEPKci"));
+    qtfn::qstring_dtor_t     qstr_dtor     = reinterpret_cast<qtfn::qstring_dtor_t>(
+        dlsym(s_h_core, "_ZN7QStringD1Ev"));
+    if (!qstr_dtor) qstr_dtor = reinterpret_cast<qtfn::qstring_dtor_t>(
+        dlsym(s_h_core, "_ZN7QStringD2Ev"));
+
+    if (s_log) fprintf(stderr,
+        "[zoffset] syms: qpush_ctor=%p set_geometry=%p show=%p qstr_fromUtf8=%p\n",
+        qpush_ctor, set_geometry, qwidget_show, qstr_fromUtf8);
+    if (!qpush_ctor || !qwidget_show) {
+        if (s_log) fprintf(stderr, "[zoffset] essential symbol missing; abort\n");
+        return;
+    }
+
+    // Allocate and construct the new button.
+    void* btn = calloc(1, constants::kQPushButtonAllocBytes);
+    if (!btn) return;
+
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) != 0) {
+        if (s_log) fprintf(stderr, "[zoffset] SEGV constructing QPushButton; abort\n");
+        g_jmp_armed = 0;
+        free(btn);
+        return;
+    }
+    qpush_ctor(btn, topwidget);
+    g_jmp_armed = 0;
+    if (s_log) fprintf(stderr,
+        "[zoffset] constructed new QPushButton at %p (parent=%p)\n",
+        btn, topwidget);
+
+    // ---- Geometry: copy K3SysUi's intended placement if readable ----
+
+    qtfn::intGetter_t qw_x      = reinterpret_cast<qtfn::intGetter_t>(
+        dlsym(s_h_widgets, "_ZNK7QWidget1xEv"));
+    qtfn::intGetter_t qw_y      = reinterpret_cast<qtfn::intGetter_t>(
+        dlsym(s_h_widgets, "_ZNK7QWidget1yEv"));
+    qtfn::intGetter_t qw_width  = reinterpret_cast<qtfn::intGetter_t>(
+        dlsym(s_h_widgets, "_ZNK7QWidget5widthEv"));
+    qtfn::intGetter_t qw_height = reinterpret_cast<qtfn::intGetter_t>(
+        dlsym(s_h_widgets, "_ZNK7QWidget6heightEv"));
+
+    int btn_x = constants::kDefaultBtnX;
+    int btn_y = constants::kDefaultBtnY;
+    int btn_w = constants::kDefaultBtnW;
+    int btn_h = constants::kDefaultBtnH;
+    if (qw_x && qw_y && qw_width && qw_height) {
+        g_jmp_armed = 1;
+        if (sigsetjmp(g_jmp, 1) == 0) {
+            const int tx = qw_x(template_btn);
+            const int ty = qw_y(template_btn);
+            const int tw = qw_width(template_btn);
+            const int th = qw_height(template_btn);
+            if (s_log) fprintf(stderr,
+                "[zoffset] template geometry: x=%d y=%d w=%d h=%d\n", tx, ty, tw, th);
+            const bool template_has_real_geom =
+                tw > 0 && th > 0 && tx >= 0 && ty >= 0;
+            if (template_has_real_geom) {
+                btn_x = tx; btn_y = ty; btn_w = tw; btn_h = th;
+            }
+        }
+        g_jmp_armed = 0;
+    }
+
+    const int rect[4] = { btn_x, btn_y, btn_x + btn_w - 1, btn_y + btn_h - 1 };
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) == 0 && set_geometry) set_geometry(btn, rect);
+    g_jmp_armed = 0;
+    if (s_log) fprintf(stderr,
+        "[zoffset] new button placed at (%d,%d) %dx%d\n",
+        btn_x, btn_y, btn_w, btn_h);
+
+    // ---- Icon: load the embedded SVG Anycubic already ships ----
+
+    qtfn::qicon_ctor_str_t qicon_ctor = reinterpret_cast<qtfn::qicon_ctor_str_t>(
+        dlsym(s_h_widgets, "_ZN5QIconC1ERK7QString"));
+    if (!qicon_ctor) qicon_ctor = reinterpret_cast<qtfn::qicon_ctor_str_t>(
+        dlsym(s_h_widgets, "_ZN5QIconC2ERK7QString"));
+    qtfn::qicon_dtor_t     qicon_dtor   = reinterpret_cast<qtfn::qicon_dtor_t>(
+        dlsym(s_h_widgets, "_ZN5QIconD1Ev"));
+    if (!qicon_dtor) qicon_dtor = reinterpret_cast<qtfn::qicon_dtor_t>(
+        dlsym(s_h_widgets, "_ZN5QIconD2Ev"));
+    qtfn::setIcon_t        set_icon     = reinterpret_cast<qtfn::setIcon_t>(
+        dlsym(s_h_widgets, "_ZN15QAbstractButton7setIconERK5QIcon"));
+    qtfn::qicon_isNull_t   qicon_isNull = reinterpret_cast<qtfn::qicon_isNull_t>(
+        dlsym(s_h_widgets, "_ZNK5QIcon6isNullEv"));
+    qtfn::setIconSize_t    set_icon_size = reinterpret_cast<qtfn::setIconSize_t>(
+        dlsym(s_h_widgets, "_ZN15QAbstractButton11setIconSizeERK5QSize"));
+
+    if (s_log) fprintf(stderr,
+        "[zoffset] icon syms: qicon_ctor=%p qicon_dtor=%p set_icon=%p\n",
+        qicon_ctor, qicon_dtor, set_icon);
+
+    if (qstr_fromUtf8 && qicon_ctor && set_icon) {
+        // Try the real Z-offset SVG first; fall back to a known-loadable PNG
+        // for diagnostics (so we know whether the resource bundle is reachable
+        // at all when SVG fails).
+        const char* icon_paths[] = {
+            ":/FilePrintPage/Zoffset_Item.svg",
+            ":/FilePrintPage/Pause-nor.png",
+            0
+        };
+        for (int i = 0; icon_paths[i]; i++) {
+            char qstr_storage[8] = {0};
+            char qicon_storage[8] = {0};
+            bool icon_is_null = true;
+
+            g_jmp_armed = 1;
+            if (sigsetjmp(g_jmp, 1) == 0) {
+                // fromUtf8_helper requires an explicit length (no -1 sentinel).
+                const int path_len = static_cast<int>(strlen(icon_paths[i]));
+                qstr_fromUtf8(qstr_storage, icon_paths[i], path_len);
+                qicon_ctor(qicon_storage, qstr_storage);
+                if (qicon_isNull) icon_is_null = qicon_isNull(qicon_storage);
+
+                if (s_log) fprintf(stderr,
+                    "[zoffset] icon[%s] isNull=%d\n", icon_paths[i], (int)icon_is_null);
+
+                if (!icon_is_null) {
+                    set_icon(btn, qicon_storage);
+                    const int qsize[2] = { constants::kIconSize, constants::kIconSize };
+                    if (set_icon_size) set_icon_size(btn, qsize);
+                    if (s_log) fprintf(stderr,
+                        "[zoffset] applied icon %s + iconSize(%d,%d)\n",
+                        icon_paths[i], constants::kIconSize, constants::kIconSize);
+                }
+
+                if (qicon_dtor) qicon_dtor(qicon_storage);
+                if (qstr_dtor)  qstr_dtor(qstr_storage);
+            }
+            g_jmp_armed = 0;
+            if (!icon_is_null) break;
+        }
+    }
+
+    // ---- Show and register with the group (group routing is a backup) ----
+
+    g_jmp_armed = 1;
+    if (sigsetjmp(g_jmp, 1) == 0) {
+        qwidget_show(btn);
+        if (qwidget_raise) qwidget_raise(btn);
+        if (s_real_addButton) s_real_addButton(group, btn, 10);
+        if (s_log) fprintf(stderr,
+            "[zoffset] new button %p shown + addButton(group=%p,id=10) done\n",
+            btn, group);
+    } else {
+        if (s_log) fprintf(stderr,
+            "[zoffset] SEGV during show/addButton; partial inject\n");
+    }
+    g_jmp_armed = 0;
+
+    // ---- Visibility mirror: per-instance vtable patch + global filter ----
+
+    qtfn::qobject_ctor_t qobject_ctor = reinterpret_cast<qtfn::qobject_ctor_t>(
+        dlsym(s_h_core, "_ZN7QObjectC1EPS_"));
+    if (!qobject_ctor) qobject_ctor = reinterpret_cast<qtfn::qobject_ctor_t>(
+        dlsym(s_h_core, "_ZN7QObjectC2EPS_"));
+    qtfn::installEventFilter_t install_filter =
+        reinterpret_cast<qtfn::installEventFilter_t>(
+            dlsym(s_h_core, "_ZN7QObject18installEventFilterEPS_"));
+    static qtfn::setVisible_t set_visible_for_init = 0;
+    if (!set_visible_for_init) {
+        set_visible_for_init = reinterpret_cast<qtfn::setVisible_t>(
+            dlsym(s_h_widgets, "_ZN7QWidget10setVisibleEb"));
+    }
+    if (s_log) fprintf(stderr,
+        "[zoffset] mirror syms: qobject_ctor=%p install_filter=%p set_visible=%p\n",
+        qobject_ctor, install_filter, set_visible_for_init);
+
+    if (qobject_ctor && install_filter && set_visible_for_init) {
+        void* filter_obj = calloc(1, constants::kFilterObjAllocBytes);
+        if (!filter_obj) return;
+
+        g_jmp_armed = 1;
+        if (sigsetjmp(g_jmp, 1) != 0) {
+            if (s_log) fprintf(stderr, "[zoffset] SEGV during event filter install\n");
+            g_jmp_armed = 0;
+            free(filter_obj);
+            return;
+        }
+
+        qobject_ctor(filter_obj, /*parent*/0);
+        if (s_log) fprintf(stderr,
+            "[zoffset] constructed event-filter QObject at %p\n", filter_obj);
+
+        // -- Per-instance vtable patch --
+        //
+        // Allocate a Vtable copy with kVtableCopyEntries slots, copy the
+        // QObject vtable's leading entries, override slot kVtableIndexEventFilter
+        // (= eventFilter) to point at our function, then redirect the object's
+        // vtable slot to the copy. Only this single instance sees our patched
+        // vtable; all other QObjects in the process keep the shared one.
+        Vtable old_vt = *vtable_slot_of(filter_obj);
+        Vtable new_vt = static_cast<Vtable>(
+            malloc(sizeof(VtableEntry) * constants::kVtableCopyEntries));
+        for (int i = 0; i < constants::kVtableCopyEntries; i++) {
+            new_vt[i] = old_vt[i];
+        }
+        new_vt[constants::kVtableIndexEventFilter] =
+            reinterpret_cast<VtableEntry>(&zoffset_eventFilter);
+
+        // Stash our button pointer at +kFilterObjStashOff (past d_ptr) so the
+        // filter can find it without going through globals, supporting more
+        // than one inject in the same process.
+        *reinterpret_cast<void**>(
+            static_cast<char*>(filter_obj) + constants::kFilterObjStashOff) = btn;
+
+        *vtable_slot_of(filter_obj) = new_vt;
+
+        // Register the first kMaxAncestorHops ancestors of template_btn.
+        // The page widget is always close to its children; higher ancestors
+        // (MainWindow, QStackedWidget root) fire Show only once at boot and
+        // would be false positives.
+        void* ancestor = template_btn;
+        for (int hops = 0; hops < constants::kMaxAncestorHops; hops++) {
+            if (s_ancestor_count < constants::kMaxAncestors) {
+                s_ancestors[s_ancestor_count].ancestor  = ancestor;
+                s_ancestors[s_ancestor_count].button    = btn;
+                s_ancestors[s_ancestor_count].seen_hide = 0;
+                s_ancestor_count++;
+                if (s_log) fprintf(stderr,
+                    "[zoffset] registered ancestor[%d]=%p -> btn=%p\n",
+                    s_ancestor_count - 1, ancestor, btn);
+            }
+            void* parent = qwidget_parent(ancestor);
+            if (!ptr_plausible(parent)) break;
+            ancestor = parent;
+        }
+
+        // Install the global filter on qApp exactly once.
+        static int global_filter_installed = 0;
+        if (!global_filter_installed) {
+            static void** qcore_app_self = 0;
+            if (!qcore_app_self) {
+                qcore_app_self = reinterpret_cast<void**>(
+                    dlsym(s_h_core, "_ZN16QCoreApplication4selfE"));
+            }
+            void* qapp = qcore_app_self ? *qcore_app_self : 0;
+            if (qapp) {
+                install_filter(qapp, filter_obj);
+                global_filter_installed = 1;
+                if (s_log) fprintf(stderr,
+                    "[zoffset] GLOBAL event filter installed on qApp=%p\n", qapp);
+            }
+        }
+
+        // Start the button HIDDEN. K3SysUi boots on the home page; the filter
+        // will show it when the print page becomes visible.
+        set_visible_for_init(btn, false);
+        if (s_log) fprintf(stderr,
+            "[zoffset] initial visibility set to false (filter will show on Show)\n");
+
+        g_jmp_armed = 0;
+    }
+
+    // ---- Primary routing: connect clicked() directly to popup->show() ----
+    //
+    // QObject::connect (string-based, with ConnectionType arg). The return
+    // value (QMetaObject::Connection) has a non-trivial dtor, so on ARM EABI
+    // it's returned via sret -- a hidden result-pointer is prepended to the
+    // real args. Hence 6 args total in the actual ABI call.
+
+    qtfn::connect_str_t connect_str = reinterpret_cast<qtfn::connect_str_t>(
+        dlsym(s_h_core, "_ZN7QObject7connectEPKS_PKcS1_S3_N2Qt14ConnectionTypeE"));
+    if (s_log) fprintf(stderr,
+        "[zoffset] connectStr=%p, MainWindow=%p\n", connect_str, s_mainwindow);
+
+    if (connect_str && s_mainwindow) {
+        void* popup = 0;
+        g_jmp_armed = 1;
+        if (sigsetjmp(g_jmp, 1) == 0) {
+            popup = *reinterpret_cast<void**>(
+                static_cast<char*>(s_mainwindow) + s_popup_offset);
+        }
+        g_jmp_armed = 0;
+        if (s_log) fprintf(stderr, "[zoffset] popup widget = %p\n", popup);
+
+        if (ptr_plausible(popup)) {
+            // QMetaObject::Connection is sizeof(void*) = 4. 8 leaves slack.
+            char conn_storage[8] = {0};
+            g_jmp_armed = 1;
+            if (sigsetjmp(g_jmp, 1) == 0) {
+                // QAbstractButton::clicked(bool checked = false): the bool arg
+                // must appear in the signal signature (no `clicked()` overload
+                // exists). The slot `show()` takes nothing; Qt allows the
+                // signal-to-slot arity mismatch (extra args are discarded).
+                connect_str(conn_storage,
+                            btn,    "2clicked(bool)",
+                            popup,  "1show()",
+                            /*Qt::AutoConnection*/ 0);
+                void* conn_d_ptr = *reinterpret_cast<void**>(conn_storage);
+                if (s_log) fprintf(stderr,
+                    "[zoffset] direct connect btn->clicked => popup->show() conn.d_ptr=%p\n",
+                    conn_d_ptr);
+            } else {
+                if (s_log) fprintf(stderr,
+                    "[zoffset] SEGV during string-based connect\n");
+            }
+            g_jmp_armed = 0;
+        }
+    }
+}
+
+}  // anonymous namespace
+
+
+// =============================================================================
+// LD_PRELOAD entry point: interposed QButtonGroup::addButton.
+//
+// The dynamic linker resolves K3SysUi's call to QButtonGroup::addButton to
+// this exported symbol (LD_PRELOAD libs are searched first). We always
+// forward to the real libQt5Widgets implementation via RTLD_NEXT.
+// =============================================================================
+
+extern "C" __attribute__((visibility("default")))
 void _ZN12QButtonGroup9addButtonEP15QAbstractButtoni(void* self, void* button, int id) {
     if (!s_real_addButton) {
-        s_real_addButton = (addButton_fn) dlsym(RTLD_NEXT, "_ZN12QButtonGroup9addButtonEP15QAbstractButtoni");
+        s_real_addButton = reinterpret_cast<qtfn::addButton_t>(
+            dlsym(RTLD_NEXT, "_ZN12QButtonGroup9addButtonEP15QAbstractButtoni"));
     }
     if (!s_real_addButton) return;
 
@@ -649,62 +989,90 @@ void _ZN12QButtonGroup9addButtonEP15QAbstractButtoni(void* self, void* button, i
     if (!s_log && !s_unhide && !s_inject) return;
 
     s_call_count++;
-    if (s_log) fprintf(stderr, "[zoffset-2b] #%d addButton(group=%p, btn=%p, id=%d)\n",
-                       s_call_count, self, button, id);
+    if (s_log) fprintf(stderr,
+        "[zoffset] #%d addButton(group=%p, btn=%p, id=%d)\n",
+        s_call_count, self, button, id);
 
-    GroupTrack* t = track_find_or_new(self);
-    if (!t) return;
+    GroupTrack* track = track_find_or_new(self);
+    if (!track) return;
 
     // Track strict 0..9 sequence (the print-page button-construction loop).
     // After id=9 increments next_id to 10, the next addButton(id=10) is the
-    // existing K3SysUi-built button we want to capture and un-hide.
+    // existing K3SysUi-built button we capture and inject alongside.
     if (id == 0) {
-        t->next_id = 1;
-        t->got9 = 0;
-    } else if (id == t->next_id) {
-        t->next_id++;
+        track->next_id = 1;
+        track->got9    = 0;
+        return;
+    }
+
+    if (id == track->next_id) {
+        track->next_id++;
+
         if (id == 9) {
-            t->got9 = 1;
-            if (s_log) fprintf(stderr, "[zoffset-2b] group=%p completed 0..9 (print-page candidate)\n", self);
-        } else if (id == 10 && t->got9 && s_id10_count < MAX_TRACKS) {
+            track->got9 = 1;
+            if (s_log) fprintf(stderr,
+                "[zoffset] group=%p completed 0..9 (print-page candidate)\n", self);
+            return;
+        }
+
+        const bool is_template_button =
+            id == 10 && track->got9 && s_id10_count < constants::kMaxGroupTracks;
+        if (is_template_button) {
             s_id10_buttons[s_id10_count++] = button;
-            if (s_log) fprintf(stderr, "[zoffset-2b] captured existing id=10 button on print-page group=%p btn=%p (#%d total)\n",
-                               self, button, s_id10_count);
+            if (s_log) fprintf(stderr,
+                "[zoffset] captured existing id=10 button on print-page group=%p btn=%p (#%d total)\n",
+                self, button, s_id10_count);
             if (s_unhide) unhide_button(button);
             if (s_inject) inject_new_button(self, button);
         }
-    } else if (id < t->next_id || id > 12) {
-        t->next_id = 0; t->got9 = 0;
+        return;
+    }
+
+    // Out-of-sequence id: reset tracking for this group so a later 0..9
+    // attempt can re-trigger.
+    if (id < track->next_id || id > constants::kMaxExpectedGroupId) {
+        track->next_id = 0;
+        track->got9    = 0;
     }
 }
 
-} // extern "C"
+
+// =============================================================================
+// Constructor: env-var setup, signal handlers, dynamic offset discovery.
+// Runs at LD_PRELOAD load time, before main().
+// =============================================================================
 
 __attribute__((constructor))
-static void rinkhals_zoffset_init(void) {
+static void rinkhals_zoffset_init() {
     setvbuf(stderr, 0, _IOLBF, 0);
-    const char* l = getenv("RINKHALS_ZOFFSET_LOG");
-    const char* u = getenv("RINKHALS_ZOFFSET_UNHIDE");
-    const char* i = getenv("RINKHALS_ZOFFSET_INJECT");
-    s_log    = (l && l[0] == '1');
-    s_unhide = (u && u[0] == '1');
-    s_inject = (i && i[0] == '1');
+
+    const char* env_log    = getenv("RINKHALS_ZOFFSET_LOG");
+    const char* env_unhide = getenv("RINKHALS_ZOFFSET_UNHIDE");
+    const char* env_inject = getenv("RINKHALS_ZOFFSET_INJECT");
+    s_log    = env_log    && env_log[0]    == '1';
+    s_unhide = env_unhide && env_unhide[0] == '1';
+    s_inject = env_inject && env_inject[0] == '1';
+
     if (s_log || s_unhide || s_inject) {
-        struct sigaction sa = {};
-        sa.sa_handler = segv_handler;
-        sa.sa_flags = SA_NODEFER;
-        sigaction(SIGSEGV, &sa, 0);
-        struct sigaction su = {};
-        su.sa_handler = on_sigusr1;
-        sigaction(SIGUSR1, &su, 0);
-        fprintf(stderr, "[zoffset-2b] loaded pid=%d (log=%d unhide=%d inject=%d) SIGUSR1=popup-show\n",
-                (int)getpid(), s_log, s_unhide, s_inject);
+        struct sigaction segv_act = {};
+        segv_act.sa_handler = segv_handler;
+        segv_act.sa_flags   = SA_NODEFER;
+        sigaction(SIGSEGV, &segv_act, 0);
+
+        struct sigaction usr1_act = {};
+        usr1_act.sa_handler = on_sigusr1;
+        sigaction(SIGUSR1, &usr1_act, 0);
+
+        fprintf(stderr,
+            "[zoffset] loaded pid=%d (log=%d unhide=%d inject=%d) SIGUSR1=popup-show\n",
+            static_cast<int>(getpid()), s_log, s_unhide, s_inject);
 
         // Discover Anycubic-specific offsets from the K3SysUi binary now so
-        // subsequent uses pick up the discovered value (or fall back gracefully).
+        // subsequent code paths pick up the discovered value (or fall back).
         discover_offsets();
     }
-    memset(s_tracks, 0, sizeof(s_tracks));
-    memset(s_id10_buttons, 0, sizeof(s_id10_buttons));
+
+    memset(s_tracks,        0, sizeof(s_tracks));
+    memset(s_id10_buttons,  0, sizeof(s_id10_buttons));
     s_id10_count = 0;
 }
