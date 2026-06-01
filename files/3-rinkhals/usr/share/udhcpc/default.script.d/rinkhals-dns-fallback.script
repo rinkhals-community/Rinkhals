@@ -1,0 +1,52 @@
+#!/bin/sh
+# Add public-DNS fallback entries to /etc/resolv.conf only when udhcpc didn't
+# supply any nameservers (or supplied an empty list).
+#
+# The stock /usr/share/udhcpc/default.script already manages DHCP-supplied
+# entries: on bound/renew it strips any line tagged "# $interface" from
+# resolv.conf and appends fresh "nameserver X # $interface" lines from $dns;
+# on deconfig it strips the same tagged lines. This hook layers on top with
+# its own distinct tag, so the two never contend over the same lines:
+#
+#   - we strip our own previous fallback every run (idempotent across renews)
+#   - we re-add the fallback ONLY when the resulting resolv.conf has zero
+#     nameservers, i.e. the network is up but DHCP returned no DNS
+#
+# Net behaviour:
+#
+#   Router pushes DNS via DHCP  -> resolv.conf has DHCP entries only,
+#                                  no fallback added.
+#   Router pushes no DNS        -> stock script adds nothing, we add 1.1.1.1
+#                                  and 8.8.8.8 with our tag.
+#   Lease drops (deconfig)      -> stock strips DHCP lines, we strip our own,
+#                                  re-add fallback so name resolution still
+#                                  works until DHCP comes back.
+#
+# Replaces the older prepend-dns-entries-resolv.conf.script, which was never
+# executable and would have duplicated the stock script's writes anyway.
+
+set -e
+
+RESOLV=/etc/resolv.conf
+FALLBACK_TAG="# rinkhals-fallback"
+
+case "$1" in
+    bound|renew|leasefail|nak|deconfig)
+        # Strip our previous fallback (safe if absent).
+        TMP=$(mktemp)
+        grep -vE "${FALLBACK_TAG}\$" "$RESOLV" > "$TMP" 2>/dev/null || true
+        mv "$TMP" "$RESOLV"
+        chmod 644 "$RESOLV"
+
+        # If nothing supplied a nameserver, add the public fallback so DNS
+        # resolution doesn't break entirely. The stock script writes its
+        # "# $interface" lines BEFORE invoking hooks, so by the time we run
+        # this check, any DHCP-supplied entries are already in place.
+        if ! grep -qE '^nameserver' "$RESOLV" 2>/dev/null; then
+            echo "nameserver 1.1.1.1 $FALLBACK_TAG" >> "$RESOLV"
+            echo "nameserver 8.8.8.8 $FALLBACK_TAG" >> "$RESOLV"
+        fi
+        ;;
+esac
+
+exit 0

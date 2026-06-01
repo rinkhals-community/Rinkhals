@@ -11,15 +11,42 @@ GoKlipper (1) is not starting properly, it's most likely due to a printer config
 
 1. GoKlipper is Anycubic's reimplementation of Klipper in Go
 
-Please check the information in [I got 11407 or my printer doesn't boot anymore](Rinkhals/printer-configuration.md#i-got-11407-or-my-printer-doesnt-boot-anymore)
+Please check the information in [I got 11407 or my printer doesn't boot anymore](about/printer-configuration.md#i-got-11407-or-my-printer-doesnt-boot-anymore)
+
+## The load average is huge (10+) - is the printer overloaded?
+
+Almost certainly not. The single-core CPU on these printers is typically idle 30-50% of the time even when the load average reads 10-13. The number looks alarming because Linux's load average counts a category of processes that don't actually use the CPU.
+
+A handful of kernel threads on this hardware are permanently parked in **uninterruptible-sleep (D state)** waiting on hardware semaphores:
+
+- **5 Realtek WiFi driver threads** (`RTW_XMIT_THREAD`, `RTW_RECV_THREAD`, `RTW_CMD_THREAD`, `RTWHALXT` x2) from the out-of-tree `RTL8723DS` vendor driver. They block on a kernel semaphore until a packet or command arrives.
+- **6 Anycubic vision pipeline threads** (`vmcu`, `vsys`, `vpss`, `vrga`, `vrgn`, `vlog`) from the stock kernel modules that drive the camera and AI failure-detection hardware. They block on hardware events.
+
+Linux counts both **R** (runnable) and **D** (uninterruptible-sleep) tasks toward the load average. On a desktop, D-state usually means a process is stuck on disk I/O, which is real work. On this printer, D-state is the resting state of those 11 kernel threads, so they contribute a permanent floor of ~11 to the load average regardless of what the system is actually doing.
+
+When evaluating whether the printer is under real pressure, look at:
+
+- **`top` idle %** - the CPU usage panel. If you have meaningful idle time, the CPU is not saturated.
+- **The 4th field of `/proc/loadavg`** - it reads `running/total`. On a single core, sustained values above 2 or 3 in the `running` count indicate genuine queueing.
+- **`free`** - this device ships with very little RAM headroom. Real performance issues here usually come from memory pressure, not CPU load.
+
+There is no practical way to remove these kernel threads. The Realtek driver is a closed-source vendor driver that would need to be replaced with the upstream `rtw88` driver and rebuilt against the kernel; the Anycubic vision threads are part of proprietary modules with no source available, and disabling them would break the camera and failure detection. The load number is misleading on this hardware by design, but the system itself is fine.
+
+## I'm getting "Timer too close" errors during prints
+This is often caused by MCU starvation when GoKlipper receives too many small, high-resolution G-Code segments combined with rapid Dynamic Cooling fan adjustments (frequent `M106` / `M160` commands). 
+
+If you are using **Anycubic Slicer Next** or **Orca Slicer**:
+1. Increase your **Max Deviation** settings (under Print settings > Precision) to reduce the G-Code fragment density.
+2. Consider disabling **Dynamic overhang cooling** or reducing the frequency of fan speed changes, as the constant back-and-forth commands can overwhelm the host proxy.
+*(Note: As of Rinkhals 20260501_01, core priority processes have been optimized to better mitigate this, but slicer adjustments remain the best practice.)*
 
 ## Should I use installer-\*.swu or update-\*.swu?
 
-The installer-\*.swu is the Rinkhals Installer tool. It's like a web installer on steroids. Using this tool you can download any Rinkhals or system firmware and perform some other operations. Check more details on the [Installer page](Rinkhals/rinkhals-installer.md)
+The installer-\*.swu is the Rinkhals Installer tool. It's like a web installer on steroids. Using this tool you can download any Rinkhals or system firmware and perform some other operations. Check more details on the [Installer page](about/rinkhals-installer.md)
 
 The update-\*.swu is the full Rinkhals package. There's no installation screen here, it will just install the downloaded Rinkhals version on your printer. Useful for offline installations for example.
 
-Either way, select the right SWU for your printer, download it and install it as described in the [installation page](Rinkhals/installation-and-firmware-updates.md).
+Either way, select the right SWU for your printer, download it and install it as described in the [installation page](about/installation-and-firmware-updates.md).
 
 ## How can I print multicolor / with the ACE from Orca Slicer?
 Filament mapping is stored in the gcode and depends on your slicer configuration.
@@ -42,7 +69,7 @@ You have to disable and stop the app to make the camera work in Anycubic apps.
 ## Can I use OctoApp with Rinkhals?
 Yes, Rinkhals supports OctoApp out of the box. To work properly, OctoApp needs the Moonraker app and one of Mainsail and Fluidd app to be enabled.
 
-You don’t need the octoapp companion from this repo: [Rinkhals.apps](https://github.com/jbatonnet/Rinkhals.apps/) for OctoApp to work. This companion app will allow you to get live notifications if this is something you want.
+You don’t need the octoapp companion from this repo: [Rinkhals.apps](https://github.com/rinkhals-community/Rinkhals.apps/) for OctoApp to work. This companion app will allow you to get live notifications if this is something you want.
 
 ## I cannot see my camera in OctoApp / Mainsail / Fluidd
 
@@ -57,7 +84,7 @@ The code modifications are already in Rinkhals.
 If Rinkhals is running on your printer, you can already connect to port 22 on your printer.
 
 If you’re running stock firmware or any other, you’ll need to use the SSH SWU tool. This tool will start a SSH server on port 2222 on any firmware at any time.
-1. Go to the releases page: [https://github.com/jbatonnet/Rinkhals/releases](https://github.com/jbatonnet/Rinkhals/releases)
+1. Go to the releases page: [https://github.com/rinkhals-community/Rinkhals/releases](https://github.com/rinkhals-community/Rinkhals/releases)
 2. Download the right SWU tools for your printer (tools-xxx.zip)
 3. Extract and get the SSH tool you want
 4. Copy the tool as `update.swu` on a FAT32 USB drive in a `aGVscF9zb3Nf` directory (same as during Rinkhals installation)

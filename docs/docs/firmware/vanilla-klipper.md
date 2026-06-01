@@ -6,7 +6,7 @@ title: Vanilla Klipper
 
 Working on the K2P:
 
-- App and config are provided here: [https://github.com/jbatonnet/Rinkhals.apps/blob/master/apps/vanilla-klipper](https://github.com/jbatonnet/Rinkhals.apps/blob/master/apps/vanilla-klipper)
+- App and config are provided here: [https://github.com/rinkhals-community/Rinkhals.apps/blob/master/apps/vanilla-klipper](https://github.com/rinkhals-community/Rinkhals.apps/blob/master/apps/vanilla-klipper)
 
 ## K3 and KS1 Support
 
@@ -16,7 +16,7 @@ Vanilla Klipper is now working for KS1 and K3 printers. However, they require a 
 
 An updated klipper base with the necessary driver additions exists on the `feature/anycubic-klippy` branch of the Rinkhals.Apps repository, but it is not yet merged to master:
 
-- [https://github.com/jbatonnet/Rinkhals.Apps/tree/feature/anycubic-klippy](https://github.com/jbatonnet/Rinkhals.Apps/tree/feature/anycubic-klippy)
+- [https://github.com/rinkhals-community/Rinkhals.Apps/tree/feature/anycubic-klippy](https://github.com/rinkhals-community/Rinkhals.Apps/tree/feature/anycubic-klippy)
 
 Alternatively, for KS1/K3 vanilla-klipper APP builds, you can use this repository which contains the necessary klipper base and driver patches:
 

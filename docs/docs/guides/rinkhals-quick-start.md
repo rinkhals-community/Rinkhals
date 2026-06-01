@@ -6,16 +6,16 @@ title: Rinkhals quick start guide
 
 ### Using the full offline package
 
-- Go to the release page on GitHub: [Rinkhals releases](https://github.com/jbatonnet/Rinkhals/releases)
+- Go to the release page on GitHub: [Rinkhals releases](https://github.com/rinkhals-community/Rinkhals/releases)
 - Select and download the right update-\*.swu for your printer
-- Follow the install [instructions](../Rinkhals/installation-and-firmware-updates.md) for your printer.
+- Follow the install [instructions](../about/installation-and-firmware-updates.md) for your printer.
 
 ### Using the Rinkhals installer
 
 !!! note
     The installer you downloaded will still work for future releases. You can leave it on your USB drive and just plug it, even for future releases
 
-- Go to the release page on GitHub: [Rinkhals releases](https://github.com/jbatonnet/Rinkhals/releases)
+- Go to the release page on GitHub: [Rinkhals releases](https://github.com/rinkhals-community/Rinkhals/releases)
 - Select and download the right installer-\*.swu for your printer
 - Rename the downloaded SWU file as **update.swu**
 

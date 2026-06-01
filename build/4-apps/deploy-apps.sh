@@ -16,8 +16,10 @@ export RCLONE_CONFIG_KOBRA_PORT=${KOBRA_PORT:-22}
 export RCLONE_CONFIG_KOBRA_USER=root
 export RCLONE_CONFIG_KOBRA_PASS=$(rclone obscure "rockchip")
 
+FILES_DIR="${FILES_DIR:-/files}"
+
 # Sync base files
-for APP_ROOT in $(find /files/4-apps/home/rinkhals/apps -type d -mindepth 1 -maxdepth 1); do
+for APP_ROOT in $(find $FILES_DIR/4-apps/home/rinkhals/apps -type d -mindepth 1 -maxdepth 1); do
     if [ ! -f $APP_ROOT/app.sh ]; then
         continue
     fi

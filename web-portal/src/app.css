@@ -1,0 +1,98 @@
+@import 'tailwindcss';
+
+/*
+ * Theme tokens. Same semantic names in both themes; values flip
+ * when [data-theme="dark"] is set on the <html> element. Pages
+ * keep using bg-canvas / text-ink / border-line-soft etc. and
+ * pick up the right palette automatically.
+ */
+:root {
+	--c-canvas: #ffffff;
+	--c-surface: #f7f7f7;
+	--c-surface-warm: #fff9f0;
+	--c-surface-accent: #fff5f0;
+	--c-surface-cool: #f2f3f5;
+
+	--c-brand: #005aff;
+	--c-brand-hover: #0044cc;
+	--c-brand-soft: #e6efff;
+	--c-accent: #ff9a00;
+	--c-accent-hover: #e68900;
+	--c-coral: #ff795c;
+
+	--c-ink: #1a1a1a;
+	--c-ink-2: #333333;
+	--c-ink-muted: #606266;
+	--c-ink-faint: #909399;
+
+	--c-line: #d1d1d1;
+	--c-line-soft: #e1e1e1;
+
+	color-scheme: light;
+}
+
+[data-theme="dark"] {
+	--c-canvas: #0f1115;
+	--c-surface: #181b22;
+	--c-surface-warm: #1f1a12;
+	--c-surface-accent: #241612;
+	--c-surface-cool: #161922;
+
+	--c-brand: #3b82f6;
+	--c-brand-hover: #60a5fa;
+	--c-brand-soft: #11233d;
+	--c-accent: #ff9a00;
+	--c-accent-hover: #ffae33;
+	--c-coral: #ff8a72;
+
+	--c-ink: #f5f5f7;
+	--c-ink-2: #d4d4d8;
+	--c-ink-muted: #a1a1aa;
+	--c-ink-faint: #71717a;
+
+	--c-line: #2a2d35;
+	--c-line-soft: #1f2229;
+
+	color-scheme: dark;
+}
+
+@theme {
+	/* Surfaces */
+	--color-canvas: var(--c-canvas);
+	--color-surface: var(--c-surface);
+	--color-surface-warm: var(--c-surface-warm);
+	--color-surface-accent: var(--c-surface-accent);
+	--color-surface-cool: var(--c-surface-cool);
+
+	/* Brand */
+	--color-brand: var(--c-brand);
+	--color-brand-hover: var(--c-brand-hover);
+	--color-brand-soft: var(--c-brand-soft);
+	--color-accent: var(--c-accent);
+	--color-accent-hover: var(--c-accent-hover);
+	--color-coral: var(--c-coral);
+
+	/* Ink */
+	--color-ink: var(--c-ink);
+	--color-ink-2: var(--c-ink-2);
+	--color-ink-muted: var(--c-ink-muted);
+	--color-ink-faint: var(--c-ink-faint);
+
+	/* Lines */
+	--color-line: var(--c-line);
+	--color-line-soft: var(--c-line-soft);
+
+	/* Type */
+	--font-sans:
+		'Inter', 'MiSans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+		'Helvetica Neue', Arial, sans-serif;
+}
+
+html,
+body {
+	background-color: var(--color-canvas);
+	color: var(--color-ink);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}

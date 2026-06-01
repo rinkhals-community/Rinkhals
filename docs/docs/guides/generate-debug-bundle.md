@@ -16,14 +16,14 @@ There are 2 ways to generate a debug bundle:
 
 ### 1. Using the Rinkhals Installer
 
-Refer to [this page](../Rinkhals/rinkhals-installer.md#tools) to use the Debug Bundle tool from the installer.
+Refer to [this page](../about/rinkhals-installer.md#tools) to use the Debug Bundle tool from the installer.
 
 ### 2. Using the Debug Bundle SWU tool
 
 A SWU tool to directly collect a Debug Bundle on a connected USB drive is also provided.
-To use it, go to [GitHub releases](https://github.com/jbatonnet/Rinkhals/releases) and download the tools-*.zip for your printer. Extract the ZIP file and get the debug bundle SWU file.
+To use it, go to [GitHub releases](https://github.com/rinkhals-community/Rinkhals/releases) and download the tools-*.zip for your printer. Extract the ZIP file and get the debug bundle SWU file.
 
-Then you can follow the same steps as during a [manual installation](../Rinkhals/installation-and-firmware-updates.md). Copy the SWU as update.swu in a `aGVscF9zb3Nf` directory on a FAT32 USB drive, plug it in your printer.
+Then you can follow the same steps as during a [manual installation](../about/installation-and-firmware-updates.md). Copy the SWU as update.swu in a `aGVscF9zb3Nf` directory on a FAT32 USB drive, plug it in your printer.
 
 Once running you'll hear 2 beeps, the first one for the tool startup and the second one for its completion.
 

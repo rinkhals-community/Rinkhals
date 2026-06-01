@@ -19,7 +19,8 @@ def readSections(path, hintPath = None):
     with open(path, 'r') as f:
         config = f.read()
 
-    sections = re.findall("(?:^|\n)\[([^\]]+)\]((?:.|\n)*?)(?=\n\[|$)", config)
+    # Accept section headers with optional indentation before '['.
+    sections = re.findall(r"(?:^|\n)\s*\[([^\]]+)\]((?:.|\n)*?)(?=\n\s*\[|$)", config)
 
     i = 0
     while i < len(sections):
@@ -46,7 +47,7 @@ def main():
             sections.append(section)
 
     # Decode sections content
-    sections = [ ( s[0], re.findall('(?:^|\n)([^\[\]\s:]+[^\[\]:]+):((?:.|\n)*?)(?=\n[^\[\]\s#:]|\n\[|$)', s[1]) ) for s in sections ]
+    sections = [ ( s[0], re.findall(r'(?:^|\n)([^\[\]\s:]+[^\[\]:]+):((?:.|\n)*?)(?=\n[^\[\]\s#:]|\n\[|$)', s[1]) ) for s in sections ]
 
     # Resolve section overrides
     resolvedSections = {}

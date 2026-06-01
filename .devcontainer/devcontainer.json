@@ -1,0 +1,26 @@
+{
+    "name": "Rinkhals Dev",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2.17.0": {}
+    },
+    "mounts": [
+        "type=volume,source=rinkhals-build,target=/rinkhals-build",
+        "type=volume,source=rinkhals-dind-data,target=/var/lib/docker"
+    ],
+    "postCreateCommand": "chmod +x .devcontainer/post-create.sh && .devcontainer/post-create.sh",
+    "workspaceFolder": "/workspaces/Rinkhals",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "nefrob.vscode-just-syntax"
+            ],
+            "settings": {
+                "vscode-just.runInTerminal": true,
+                "vscode-just.useSingleTerminal": true
+            }
+        }
+    }
+}

@@ -1,5 +1,5 @@
 ---
-Orca Slicer Usage
+title: Orca Slicer Usage
 ---
 
 This guide covers only the printers: Kobra 3, Kobra S1 (Combo) because only those have presets in OrcaSlicer. 
@@ -14,7 +14,7 @@ Download and install the latest OrcaSlicer application from: [Official OrcaSlice
 
 Make sure you have Rinkhals installed on your printer. 
 
-For the installation of Rinkhals, use [this guide](../Rinkhals/installation-and-firmware-updates.md).
+For the installation of Rinkhals, use [this guide](../about/installation-and-firmware-updates.md).
 
 When you first start OrcaSlicer, you will be prompted to select a printer preset. Look for your printer and the nozzle type you are using.
 
@@ -65,5 +65,15 @@ You can now slice your prints and send them off to your printer 🖨️ 😊✌�
 ![Upload and Print](https://raw.githubusercontent.com/Rickeetz/Rinkhals/master/docs/docs/assets/orca-guide/Orca-Upload-and-Print.png)
 
 You are done with setting up your printer on OrcaSlicer with the basic settings.
+
+## Best Practices and Troubleshooting
+
+**"Timer too close" errors or MCU Starvation**
+If your printer suddenly halts with a "Timer too close" error during prints:
+- **Decrease G-Code Resolution:** Go to Print settings > Precision and increase the **Max Deviation** value. Highly detailed arcs or circles can spawn too many tiny segments that overwhelm the printer.
+- **Turn off Dynamic Cooling:** Go to Filament settings > Cooling. Disable "Dynamic overhang cooling" or minimize the frequency of fan speed changes. Rapid temperature/fan adjustment commands (`M106` / `M160`) interleaved with tight G-Code movements easily overload the host communications.
+
+**Anycubic Slicer Next ACE Connection Issues**
+If you are using Anycubic Slicer Next (based on Orca) and experience errors where the slicer fails to detect the ACE unit or complains about ACE status, ensure your firmware is updated to **Rinkhals 20260501_01** or later, which completely resolves the `ACE missing` error logic payload from Slicer Next.
 
 **Happy Printing!**

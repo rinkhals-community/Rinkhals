@@ -1,5 +1,5 @@
-# docker build -t ghcr.io/jbatonnet/rinkhals/build -f build/Dockerfile build
-# docker push ghcr.io/jbatonnet/rinkhals/build
+# docker build -t ghcr.io/rinkhals-community/rinkhals/build -f build/Dockerfile build
+# docker push ghcr.io/rinkhals-community/rinkhals/build
 
 FROM debian:12.8
 

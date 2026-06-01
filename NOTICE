@@ -1,0 +1,19 @@
+Rinkhals
+Copyright (c) 2025 Julien Batonnet
+Copyright (c) 2026 Rinkhals Community contributors
+
+The MIT License in LICENSE applies to original Rinkhals code.
+
+This distribution bundles third-party code and assets that retain their own
+licenses, including but not limited to:
+
+- files/3-rinkhals/opt/rinkhals/ui/MaterialIcons-Regular.ttf
+  Google Material Design Icons
+  https://github.com/google/material-design-icons/blob/master/LICENSE
+
+- */icon.png
+  "Cobra" icon by Freepik via Flaticon
+  https://www.flaticon.com/free-icon/cobra_375098
+
+Additional dependencies pulled in at build time (Buildroot, busybox,
+Python packages, etc.) retain their respective upstream licenses.

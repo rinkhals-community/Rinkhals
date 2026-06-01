@@ -14,7 +14,7 @@ title: Simplyprint support
 This guide provides step-by-step instructions for installing **Rinkhals**, a custom firmware with **Moonraker** support, on the **Anycubic Kobra 3** printer. Once installed, the printer can be integrated with **SimplyPrint**, a cloud-based 3D printing management service. Follow this guide carefully to ensure a smooth installation process.
 
 ## 1. Download Rinkhals
-1. Head to the [Rinkhals GitHub releases page](https://github.com/jbatonnet/Rinkhals/releases).
+1. Head to the [Rinkhals GitHub releases page](https://github.com/rinkhals-community/Rinkhals/releases).
 2. Download the latest release of Rinkhals.
 
 ## 2. Prepare the USB Drive

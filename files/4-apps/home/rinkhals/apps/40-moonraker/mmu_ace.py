@@ -244,6 +244,67 @@ TOOL_GATE_BYPASS = -2
 # Maximum tools for memory management (prevents unbounded list growth)
 MAX_TOOLS = 32  # Reasonable limit for multi-material printing
 
+# ACE auto-feed defaults (issue #464). Tuned for the ACE Pro tube length on
+# Kobra 3 Combo; ACE v1 and other K-series tube lengths may need different
+# values. Promote to moonraker config once we have more hardware data points.
+ACE_AUTO_FEED_LENGTH_MM = 80
+ACE_AUTO_FEED_SPEED_MM_S = 25
+
+# print_stats.state values that mean "this print isn't going to happen". The
+# auto-feed poller treats any of these as a signal to abandon waiting rather
+# than burn through its full heat-up timeout after a user cancel or error.
+ACE_AUTO_FEED_DEAD_PRINT_STATES = frozenset({
+    "cancelled", "complete", "error", "standby"
+})
+
+# Standard gcode directory used by the Anycubic firmware. The metadata
+# pre-processor appends a "; referenced_tools = N,M,..." trailer to every
+# processed file at this location.
+ACE_GCODE_DIR = "/userdata/app/gk/printer_data/gcodes"
+
+# How much of the file's tail to scan when looking for the trailer. The
+# trailer is the last line, so a small window is enough. Avoids reading
+# multi-MB gcode files when we only need ~50 bytes.
+ACE_REFERENCED_TOOLS_TAIL_BYTES = 4096
+
+
+def _read_referenced_tools(gcode_path):
+    """Return the 0-indexed list of slicer tools referenced by a gcode file.
+
+    mmu_ace_metadata.process_file appends a "; referenced_tools = N,M,..."
+    comment to every file it processes during upload. Reading the file's tail
+    lets patch_print_data know which tools the slicer actually uses without
+    re-parsing the whole gcode body.
+
+    Returns the parsed list of ints, or None if the trailer is missing,
+    malformed, or the file can't be read. Callers should treat None as
+    "unknown" and fall back to safer, more conservative behaviour.
+    """
+    try:
+        if not gcode_path or not os.path.isfile(gcode_path):
+            return None
+        size = os.path.getsize(gcode_path)
+        read_from = max(0, size - ACE_REFERENCED_TOOLS_TAIL_BYTES)
+        with open(gcode_path, "rb") as f:
+            f.seek(read_from)
+            tail = f.read().decode("utf-8", errors="replace")
+        # Trailer format from mmu_ace_metadata.process_file:
+        #   ; referenced_tools = 0,2,3
+        for line in reversed(tail.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("; referenced_tools"):
+                _, _, value = stripped.partition("=")
+                tools = []
+                for tok in value.strip().split(","):
+                    tok = tok.strip()
+                    if not tok:
+                        continue
+                    tools.append(int(tok))
+                return sorted(set(tools))
+    except Exception as exc:
+        logging.warning(f"_read_referenced_tools failed for {gcode_path}: {exc}")
+    return None
+
 FILAMENT_POS_UNKNOWN = -1
 FILAMENT_POS_UNLOADED = 0 # Parked in gate
 FILAMENT_POS_HOMED_GATE = 1 # Homed at either gate or gear sensor (currently assumed mutually exclusive sensors)
@@ -541,6 +602,10 @@ class MmuAceController:
         self.eventloop = self.server.get_event_loop()
         self._last_status_update = 0.0
         self._status_update_task: Optional[asyncio.Task] = None
+        # Tracks the single in-flight _plan_load_ace retry loop. set_ace() can be
+        # re-entered (via reinit()); without tracking, overlapping retry loops
+        # would both poll query_objects for up to ~20s.
+        self._plan_load_task: Optional[asyncio.Task] = None
         self._status_update_delay = 0.2  # 200ms debounce for rapid commands
         self._throttle_delay = 0.3  # 300ms minimum delay between updates (max 3/sec)
         self._pending_update = False  # Flag to track if update is needed
@@ -560,9 +625,44 @@ class MmuAceController:
         else:
             self.printer = RemotePrinterController(self.server, host)
 
+        self._last_gate_fingerprint: str = ""
+
         # Start periodic cache cleanup task (runs every 60 seconds)
         # Removes expired temperature cache entries to prevent slow memory leak
         asyncio.create_task(self._periodic_cache_cleanup())
+
+    @staticmethod
+    def _is_no_ace_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return (
+            "filament hub not exist" in message
+            or ("filament_hub" in message and "not exist" in message)
+            or "11503" in message
+        )
+
+    @staticmethod
+    def _has_filament_hub_data(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+
+        filament_hub = result.get("filament_hub")
+        if not isinstance(filament_hub, dict):
+            return False
+
+        return isinstance(filament_hub.get("filament_hubs"), list)
+
+    def _disable_ace(self, reason: str):
+        if self.ace.enabled:
+            logging.warning(f"ACE disabled: {reason}")
+        else:
+            logging.info(f"ACE remains disabled: {reason}")
+
+        self.ace.enabled = False
+        self.ace.units = [MmuAceUnit(0, "ACE 1")]
+        self.ace.tools = []
+        self.ace.ttg_map = []
+        self._invalidate_gate_cache()
+        self._handle_status_update(force=True)
 
     def _handle_status_update(self, force: bool = False, throttle: bool = False):
         """Send status update notification with debouncing or throttling.
@@ -737,24 +837,58 @@ class MmuAceController:
         self.ace = ace
         self._handle_status_update(force=True)
 
-        self.eventloop.create_task(self._plan_load_ace())
+        # Cancel a retry loop left over from an earlier set_ace()/reinit() call
+        # so only one _plan_load_ace can poll at a time.
+        if self._plan_load_task is not None and not self._plan_load_task.done():
+            logging.info("set_ace: cancelling stale _plan_load_ace task")
+            self._plan_load_task.cancel()
+        self._plan_load_task = self.eventloop.create_task(self._plan_load_ace())
 
     async def _plan_load_ace(self, retry=10, delay=2):
         for _ in range(retry):
             success = False
             try:
+                # Check if filament_hub is in the object list before querying it.
+                # This prevents a fatal crash in Anycubic gklib on some firmware versions (e.g. KS1M 2.6.9.3 without ACE)
+                # where querying a non-existent filament_hub causes a nil pointer panic.
+                try:
+                    list_result = await self.server.lookup_component("klippy").request(WebRequest("objects/list"))
+                    if list_result and "objects" in list_result and "filament_hub" not in list_result["objects"]:
+                        logging.info("filament_hub not in objects/list, skipping ACE initialization.")
+                        self._disable_ace("filament_hub object unavailable on this printer")
+                        return
+                    # also fallback to list_endpoints
+                    endpoints = await self.printer.send_request("list_endpoints", {})
+                    if endpoints and isinstance(endpoints, list) and not any("filament_hub" in str(e) for e in endpoints):
+                        logging.info("filament_hub not in list_endpoints, skipping ACE initialization.")
+                        self._disable_ace("filament_hub endpoints unavailable on this printer")
+                        return
+                except Exception as eval_e:
+                    logging.debug(f"Pre-check for filament_hub failed: {eval_e}")
+
                 # await self._load_mmu_ace_config()
                 klippy_apis: KlippyAPI = self.server.lookup_component("klippy_apis")
                 result = await klippy_apis.query_objects({ "filament_hub": None })
+                if not self._has_filament_hub_data(result):
+                    self._disable_ace("filament_hub object unavailable on this printer")
+                    return
                 success = True
             except Exception as e:
+                if self._is_no_ace_error(e):
+                    self._disable_ace(str(e))
+                    return
                 logging.error(f"Error contacting moonraker: {e}")
                 success = False
             if success:
                 logging.info("Contacted moonraker")
                 break
             logging.warning(f"Moonraker not available. {f'Retrying in {delay} seconds...' if retry > 1 else ''}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(delay)
+
+        if not success:
+            logging.warning("Skipping ACE initialization because filament_hub is unavailable")
+            return
+
         try:
             await self._load_ace()
         except Exception as e:
@@ -762,18 +896,47 @@ class MmuAceController:
 
     async def _load_ace(self):
         await self._load_mmu_ace_config()
+        if not self.ace.enabled:
+            return
+
         await self._subscribe_mmu_ace_status_update()
+        if not self.ace.enabled:
+            return
 
         self._handle_status_update(force=True)
 
     async def _load_mmu_ace_config(self):
-        result = await self.printer.query_objects({ "filament_hub": None })
-        logging.debug(f"mmu ace config: {json.dumps(result)}")
+        try:
+            result = await self.printer.query_objects({ "filament_hub": None })
+        except Exception as e:
+            if self._is_no_ace_error(e):
+                self._disable_ace(str(e))
+                return
+            raise
+
+        if not self._has_filament_hub_data(result):
+            self._disable_ace("filament_hub config not present in query response")
+            return
+
+        logging.debug(f"mmu ace config: {result}")
 
     async def _subscribe_mmu_ace_status_update(self):
-        result = await self.printer.subscribe_objects({ "filament_hub": None }, self._handle_mmu_ace_status_update)
+        if not self.ace.enabled:
+            return
 
-        logging.debug(f"mmu ace status subscribe: {json.dumps(result)}")
+        try:
+            result = await self.printer.subscribe_objects({ "filament_hub": None }, self._handle_mmu_ace_status_update)
+        except Exception as e:
+            if self._is_no_ace_error(e):
+                self._disable_ace(str(e))
+                return
+            raise
+
+        if not self._has_filament_hub_data(result):
+            self._disable_ace("filament_hub missing from subscription response")
+            return
+
+        logging.debug(f"mmu ace status subscribe: {result}")
 
         filament_hub = result["filament_hub"]
 
@@ -814,7 +977,24 @@ class MmuAceController:
     async def _handle_mmu_ace_status_update(self, status: Dict[str, Any], _: float):
         if "filament_hub" in status:
             filament_hub = status["filament_hub"]
-            logging.debug(f"mmu ace status update: {json.dumps(filament_hub)}")
+            logging.debug(f"mmu ace status update: {filament_hub}")
+
+            if not isinstance(filament_hub, dict):
+                logging.warning(f"Ignoring malformed filament_hub update: {filament_hub}")
+                return
+
+            if "filament_hubs" not in filament_hub:
+                current_filament = filament_hub.get("current_filament")
+
+                if current_filament is not None:
+                    self._sync_loaded_gate_from_current_filament(current_filament)
+                    self._handle_status_update(force=True)
+                else:
+                    logging.debug(
+                        "Ignoring partial filament_hub update without current_filament: "
+                        f"{list(filament_hub.keys())}"
+                    )
+                return
 
             # Fetch temperature info for all gates with material
             # Collect all temperature fetch tasks for parallel execution
@@ -904,6 +1084,47 @@ class MmuAceController:
         except Exception as e:
             logging.warning(f"Failed to get filament_info for unit {unit_id} gate {gate_index}: {e}")
             return None
+
+    def _sync_loaded_gate_from_current_filament(self, current_filament: Optional[str]):
+        """Synchronize loaded gate state from ACE Hub current_filament value."""
+        previous_loaded_gate = self.ace.loaded_gate
+        was_loaded = self.ace.filament.pos == FILAMENT_POS_LOADED
+
+        if current_filament is None:
+            return
+
+        if current_filament == "":
+            if self.ace.loaded_gate != TOOL_GATE_UNKNOWN or was_loaded:
+                logging.info("_sync_loaded_gate_from_current_filament: ACE Hub reports no loaded filament, clearing loaded state")
+
+            self.ace.loaded_gate = TOOL_GATE_UNKNOWN
+            self.ace.filament.pos = FILAMENT_POS_UNLOADED
+
+            if self.ace.gate in [TOOL_GATE_UNKNOWN, previous_loaded_gate] or was_loaded:
+                self.ace.gate = TOOL_GATE_UNKNOWN
+                self.ace.tool = TOOL_GATE_UNKNOWN
+            return
+
+        try:
+            parts = current_filament.split("-")
+            if len(parts) != 2:
+                raise ValueError(f"unexpected current_filament format: {current_filament}")
+
+            unit_id = int(parts[0])
+            local_gate = int(parts[1])
+            global_gate = (unit_id * 4) + local_gate
+        except Exception as e:
+            logging.error(f"_sync_loaded_gate_from_current_filament: Failed to parse current_filament '{current_filament}': {e}")
+            return
+
+        self.ace.loaded_gate = global_gate
+
+        if self.ace.filament.pos != FILAMENT_POS_LOADED or self.ace.gate in [TOOL_GATE_UNKNOWN, previous_loaded_gate]:
+            logging.info(f"_sync_loaded_gate_from_current_filament: ACE Hub current_filament='{current_filament}', setting MMU gate={global_gate}")
+            self.ace.gate = global_gate
+            self.ace.tool = global_gate  # Tool = Gate for ACE
+
+        self.ace.filament.pos = FILAMENT_POS_LOADED
 
     def _set_ace_status(self, filament_hub):
         # set units
@@ -1000,34 +1221,18 @@ class MmuAceController:
             self.ace.units.append(unit)
 
         # Sync MMU status with ACE Hub current_filament state
-        # Only sync if MMU thinks filament is loaded (pos == LOADED) but ACE Hub disagrees
         current_filament = filament_hub.get("current_filament", "")
+        self._sync_loaded_gate_from_current_filament(current_filament)
 
-        # If MMU thinks filament is LOADED but ACE Hub says nothing loaded -> sync (reset)
-        if self.ace.filament.pos == FILAMENT_POS_LOADED and (not current_filament or current_filament == ""):
-            logging.info(f"_set_ace_status: MMU thinks loaded but ACE Hub current_filament is empty, resetting MMU status")
-            self.ace.gate = -1
-            self.ace.tool = -1
-            self.ace.filament.pos = FILAMENT_POS_UNLOADED
-        # If ACE Hub says filament loaded but MMU doesn't know -> sync (set loaded)
-        elif current_filament and current_filament != "" and self.ace.filament.pos != FILAMENT_POS_LOADED:
-            # Parse current_filament (format: "unit_id-gate_index" like "0-1")
-            try:
-                parts = current_filament.split("-")
-                if len(parts) == 2:
-                    unit_id = int(parts[0])
-                    local_gate = int(parts[1])
-                    # Calculate global gate index
-                    global_gate = (unit_id * 4) + local_gate
-                    logging.info(f"_set_ace_status: ACE Hub current_filament='{current_filament}', setting MMU gate={global_gate}")
-                    self.ace.gate = global_gate
-                    self.ace.tool = global_gate  # Tool = Gate for ACE
-                    self.ace.filament.pos = FILAMENT_POS_LOADED
-            except Exception as e:
-                logging.error(f"_set_ace_status: Failed to parse current_filament '{current_filament}': {e}")
-        # Otherwise: MMU status and ACE Hub agree, or MMU is in selection state (gate >= 0 but not loaded) - don't interfere
+        gates = [g for u in self.ace.units for g in u.gates]
+        fingerprint = str([
+            (g.index, g.spool_id, g.status, g.material, g.color)
+            for g in gates
+        ]) + f"|{self.ace.loaded_gate}"
 
-        self._handle_status_update(force=True)
+        if fingerprint != self._last_gate_fingerprint:
+            self._last_gate_fingerprint = fingerprint
+            self._handle_status_update(force=True)
 
     def get_status(self) -> MmuAceStatus:
 
@@ -1044,13 +1249,14 @@ class MmuAceController:
         gate_speed_override = [gate.speed_override if gate.speed_override >= 0 else 100 for gate in gates]
         gate_vendor = [gate.vendor if hasattr(gate, 'vendor') and gate.vendor else "" for gate in gates]
 
-        # Determine filament_pos based on loaded_gate vs selected gate
-        # This controls Load/Unload button visibility in Happy Hare GUI
-        if self.ace.loaded_gate != TOOL_GATE_UNKNOWN and self.ace.loaded_gate == self.ace.gate:
-            # Currently selected gate is the one that's loaded -> show LOADED (Unload button)
+        # Determine filament_pos based on whether anything is physically loaded.
+        # This controls Load/Unload button visibility in Happy Hare GUI.
+        # We do NOT require the selected gate to match loaded_gate: the user may have
+        # selected a different gate while gate N is still threaded, and the Unload button
+        # must still appear so they can retract the loaded filament.
+        if self.ace.loaded_gate != TOOL_GATE_UNKNOWN:
             filament_pos = FILAMENT_POS_LOADED
         else:
-            # Either no gate loaded, or different gate selected -> show UNLOADED (Load button)
             filament_pos = FILAMENT_POS_UNLOADED
 
         filament_name = "Unknown"
@@ -1177,7 +1383,7 @@ class MmuAceController:
             vendor = "Anycubic",
             version = "1.0",
             num_gates = len(unit.gates),
-            first_gate = 0,
+            first_gate = sum(len(u.gates) for u in self.ace.units[:index]),
             selector_type = "VirtualSelector",
             variable_rotation_distances = False,
             variable_bowden_lengths = False,
@@ -1315,6 +1521,13 @@ class MmuAcePatcher:
         host = config.get("host", None)
         self.ace_controller = MmuAceController(self.server, host)
 
+        # Tracks the single in-flight auto-feed poller (issue #464). patch_print_data
+        # runs inside kobra.py's network retry loop, so without tracking, a retried
+        # print start would spawn duplicate pollers that all fire FEED_FILAMENT.
+        # Initialised before reinit() so the cancel-on-reinit guard can read it
+        # safely on the first call (reinit() runs during __init__).
+        self._auto_feed_task = None
+
         self.reinit()
 
         # mmu test enpoints
@@ -1350,6 +1563,20 @@ class MmuAcePatcher:
         self.kobra.register_status_patcher(self.patch_status)
 
         self.kobra.register_print_data_patcher(self.patch_print_data)
+
+        # Tube-length / push-speed for the auto-feed FEED_FILAMENT command.
+        # Defaults are tuned for ACE Pro on Kobra 3 Combo; ACE v1 and other
+        # K-series tube lengths can override in moonraker.conf under [mmu_ace]:
+        #   auto_feed_length: 80      ; mm
+        #   auto_feed_speed:  25      ; mm/s
+        # `above=0` makes moonraker reject zero / negative / non-numeric values
+        # at startup instead of silently feeding zero mm at print start.
+        self._auto_feed_length = config.getfloat(
+            "auto_feed_length", ACE_AUTO_FEED_LENGTH_MM, above=0
+        )
+        self._auto_feed_speed = config.getfloat(
+            "auto_feed_speed", ACE_AUTO_FEED_SPEED_MM_S, above=0
+        )
 
         # Add AnycubicSlicerNext to supported slicers
         self.setup_anycubic_slicer()
@@ -1627,10 +1854,11 @@ class MmuAcePatcher:
             return None
 
         # Determine local gate index (GoKlipper's FEED_FILAMENT uses INDEX 0-3, not global gate)
+        ace_id = gate // 4
         local_index = gate % 4
 
         # Build G-code command for GoKlipper
-        gcode = f"FEED_FILAMENT INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
+        gcode = f"FEED_FILAMENT ID={ace_id} INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
 
         try:
             # Send directly to GoKlipper via G-code
@@ -1783,10 +2011,11 @@ class MmuAcePatcher:
             return None
 
         # Determine local gate index (GoKlipper's UNWIND_FILAMENT uses INDEX 0-3, not global gate)
+        ace_id = gate // 4
         local_index = gate % 4
 
         # Build G-code command for GoKlipper
-        gcode = f"UNWIND_FILAMENT INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
+        gcode = f"UNWIND_FILAMENT ID={ace_id} INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
 
         try:
             # Send directly to GoKlipper via G-code
@@ -1833,10 +2062,11 @@ class MmuAcePatcher:
             return None
 
         # Determine local gate index (GoKlipper's UNWIND_FILAMENT uses INDEX 0-3, not global gate)
+        ace_id = gate // 4
         local_index = gate % 4
 
         # Build G-code command for GoKlipper (EJECT is just UNWIND with longer distance)
-        gcode = f"UNWIND_FILAMENT INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
+        gcode = f"UNWIND_FILAMENT ID={ace_id} INDEX={local_index} LENGTH={int(length)} SPEED={int(speed)}"
 
         try:
             # Send directly to GoKlipper via G-code
@@ -1912,7 +2142,20 @@ class MmuAcePatcher:
         return None  # Don't execute original command
 
     async def _on_gcode_mmu_recover(self, args: dict[str, str | None], delegate):
-        """Recover MMU state - refresh ACE status and RFID data"""
+        """Recover MMU state by refreshing ACE status and RFID data."""
+
+        if args:
+            unsupported = ", ".join(
+                f"{key}={value}" if value is not None else key
+                for key, value in sorted(args.items())
+            )
+            message = (
+                f"MMU_RECOVER: unsupported parameters ({unsupported}). "
+                "This command only refreshes ACE status. Use MMU_SELECT, MMU_LOAD, or MMU_UNLOAD for manual changes."
+            )
+            logging.error(message)
+            await self._send_gcode_response(message)
+            return None
 
         # Trigger full status update to refresh all ACE data
         self.ace_controller._handle_status_update(force=True)
@@ -2055,6 +2298,16 @@ class MmuAcePatcher:
 
     def reinit(self):
 
+        # Cancel any in-flight auto-feed poller before swapping self.ace --
+        # otherwise an old task would keep polling against the fresh MmuAce
+        # and could fire FEED_FILAMENT after the state reset. Symmetric to
+        # the cancel-on-retry guard inside patch_print_data; same risk shape,
+        # just at the reinit boundary instead of the network-retry boundary.
+        if self._auto_feed_task is not None and not self._auto_feed_task.done():
+            logging.info("reinit: cancelling stale auto-feed task")
+            self._auto_feed_task.cancel()
+            self._auto_feed_task = None
+
         self.ace = MmuAce()
         self.ace_controller.set_ace(self.ace)
 
@@ -2093,6 +2346,60 @@ class MmuAcePatcher:
         return status
 
     def patch_print_data(self, print_data: dict):
+
+        # ── ext_spool auto-detect (Kobra 3 / Kobra 3 Combo) ──────────
+        # Fix for issue 433 / 448: Disable T0 and ACM files when no ACE hub is connected.
+        import os as _os
+
+        def _toggle_tools_in_gcode(filepath: str, disable: bool):
+            try:
+                with open(filepath, 'r+b') as f:
+                    for _ in range(2000):  # Scans first 2000 lines (very fast)
+                        pos = f.tell()
+                        line = f.readline()
+                        if not line:
+                            break
+                        stripped = line.lstrip()
+
+                        if disable:
+                            if stripped == b'T0\n' or stripped == b'T0\r\n' or stripped.startswith(b'T0 '):
+                                idx = line.find(b'T0')
+                                f.seek(pos + idx)
+                                f.write(b';T')
+                                f.readline()  # consume the rest of the line
+                                logging.info(f"[ext_spool] Disabled T0 at offset {pos + idx}")
+                        else:
+                            if stripped == b';T\n' or stripped == b';T\r\n' or stripped.startswith(b';T '):
+                                idx = line.find(b';T')
+                                f.seek(pos + idx)
+                                f.write(b'T0')
+                                f.readline()  # consume the rest of the line
+                                logging.info(f"[ext_spool] Restored T0 at offset {pos + idx}")
+            except Exception as e:
+                logging.error(f"[ext_spool] Failed to toggle T0 in {filepath}: {e}")
+
+        try:
+            filename = print_data.get('filename')
+            if filename:
+                gcode_path = _os.path.join('/userdata/app/gk/printer_data/gcodes', filename.lstrip('/'))
+                if _os.path.exists(gcode_path):
+                    base_name, _ = _os.path.splitext(gcode_path)
+                    acm_path = base_name + '.acm'
+                    acm_dis_path = base_name + '.acm.disabled'
+
+                    if self.ace.enabled:
+                        if _os.path.exists(acm_dis_path):
+                            _os.rename(acm_dis_path, acm_path)
+                            logging.info(f"[ext_spool] Restored ACM metadata {acm_path}")
+                        _toggle_tools_in_gcode(gcode_path, disable=False)
+                    else:
+                        if _os.path.exists(acm_path):
+                            _os.rename(acm_path, acm_dis_path)
+                            logging.info(f"[ext_spool] Disabled ACM metadata {acm_path}")
+                        _toggle_tools_in_gcode(gcode_path, disable=True)
+        except Exception as e:
+            logging.error(f"[ext_spool] auto-detect error: {e}", exc_info=True)
+        # ── end ext_spool auto-detect ─────────────────────────────────
 
         # add gate mapping for multi color printing
         if self.ace.enabled and "ams_settings" not in print_data:
@@ -2170,6 +2477,10 @@ class MmuAcePatcher:
                 # Increment paint_index for the next color in the object
                 paint_index += 1
 
+            if not mapping:
+                logging.info("No ACE gate mapping available, skipping AMS settings injection")
+                return print_data
+
             print_data["ams_settings"] = {
                 "use_ams": True,
                 "ams_box_mapping": mapping
@@ -2177,7 +2488,211 @@ class MmuAcePatcher:
 
             logging.debug(f"mmu_ace: patch_print_data: {json.dumps(print_data)}")
 
+            # Auto-feed filament when the ACE has no slot loaded into the toolhead
+            # going into this print. Without this, prints fail to extrude after the
+            # ACE retracts filament between prints (the touchscreen Color Match →
+            # Print flow currently doesn't issue FEED_FILAMENT; this hook fills
+            # that gap). See issue #464.
+            #
+            # Slot selection, in descending order of confidence:
+            #   1. self.ace.gate if set — touchscreen Color Match selection (#443).
+            #      Highest confidence: user explicitly picked.
+            #   2. ttg_map[detected_tools[0]] for a single-tool print — the slicer
+            #      told us in metadata which tool it actually uses, and the
+            #      printer's tool-to-gate map resolves it to a gate. High
+            #      confidence.
+            #   3. Skip otherwise (was: mapping[0].ams_index). For multi-tool
+            #      prints the gcode itself contains T-commands that gklib's
+            #      tool-change handler will execute, so auto-feed is unnecessary
+            #      and pre-loading the wrong slot causes a wasteful unload+reload
+            #      dance (issue #20).
+            if self.ace.loaded_gate == TOOL_GATE_UNKNOWN and mapping:
+                candidate = None
+                source = None
+
+                if self.ace.gate != TOOL_GATE_UNKNOWN:
+                    candidate = self.ace.gate
+                    source = "Color Match (self.ace.gate)"
+                else:
+                    # Consult the metadata preprocessor's tool list rather than
+                    # guessing from mapping order. The trailer is appended by
+                    # mmu_ace_metadata.process_file during upload.
+                    filename = (print_data or {}).get("filename") or ""
+                    gcode_path = os.path.join(ACE_GCODE_DIR, filename.lstrip("/"))
+                    detected_tools = _read_referenced_tools(gcode_path)
+
+                    if detected_tools is None:
+                        logging.info(
+                            "patch_print_data: detected_tools unknown for "
+                            f"{filename!r}, skipping auto-feed (no trailer found)"
+                        )
+                    elif len(detected_tools) == 0:
+                        logging.info(
+                            f"patch_print_data: detected_tools is empty for "
+                            f"{filename!r}, skipping auto-feed"
+                        )
+                    elif len(detected_tools) == 1:
+                        tool_index = detected_tools[0]
+                        if 0 <= tool_index < len(self.ace.ttg_map):
+                            candidate = self.ace.ttg_map[tool_index]
+                            source = f"detected_tools=[{tool_index}] → ttg_map[{tool_index}]"
+                        else:
+                            logging.warning(
+                                f"patch_print_data: detected tool {tool_index} out "
+                                f"of ttg_map range ({len(self.ace.ttg_map)}), "
+                                f"skipping auto-feed"
+                            )
+                    else:
+                        # Multi-tool print. The gcode contains T-commands;
+                        # gklib's tool-change handler will load the right slot
+                        # as soon as it encounters the first T. Pre-loading
+                        # would just force an unload+reload (issue #20).
+                        logging.info(
+                            f"patch_print_data: multi-tool print "
+                            f"(detected_tools={detected_tools}); "
+                            f"skipping auto-feed, gcode T-commands will handle it"
+                        )
+
+                if candidate is not None:
+                    # Reject a target gate the printer doesn't have. A stale Color
+                    # Match value or an out-of-range ttg_map entry would otherwise
+                    # resolve to an ID/INDEX pair pointing at a non-existent ACE,
+                    # and the resulting FEED_FILAMENT response from gklib is
+                    # undefined.
+                    num_gates = sum(len(unit.gates) for unit in self.ace.units)
+                    if not isinstance(candidate, int) or not 0 <= candidate < num_gates:
+                        logging.warning(
+                            f"patch_print_data: target gate {candidate!r} (via {source}) "
+                            f"out of range for {num_gates}-gate setup; skipping auto-feed"
+                        )
+                    else:
+                        target_gate = candidate
+                        logging.info(
+                            f"patch_print_data: no filament currently loaded, "
+                            f"scheduling auto-feed for gate {target_gate} (via {source})"
+                        )
+                        # Cancel a poller left over from an earlier print-start attempt
+                        # (patch_print_data is re-entered on each kobra.py network retry)
+                        # so only one auto-feed can ever fire for this print.
+                        if self._auto_feed_task is not None and not self._auto_feed_task.done():
+                            logging.info("patch_print_data: cancelling stale auto-feed task")
+                            self._auto_feed_task.cancel()
+                        self._auto_feed_task = self.ace_controller.eventloop.create_task(
+                            self._auto_feed_at_print_start(target_gate)
+                        )
+
         return print_data
+
+    async def _auto_feed_at_print_start(self, gate: int) -> None:
+        """Auto-feed filament from `gate` shortly after a print starts.
+
+        Workaround for issue #464: the Color Match → Print flow doesn't issue
+        FEED_FILAMENT, so a print after the ACE has retracted filament starts
+        with an empty nozzle and fails to extrude.
+
+        Waits until the extruder has been commanded to a real print temperature
+        (target >= 190 C) and is within 10 C of target. This avoids triggering
+        during the LeviQ3 probing routine, which oscillates target between
+        170 C (extru_temp) and 140 C (extru_end_temp) -- feeding during that
+        window would either be rejected by min_extrude_temp or ooze onto the
+        probing nozzle.
+
+        Aborts early if the print enters a terminal state (cancelled / error /
+        complete / standby) so a user-cancelled print doesn't leave the poller
+        spinning for the full MAX_WAIT_SECONDS. Cancellation by the
+        patch_print_data retry-tracker raises asyncio.CancelledError, which is
+        caught at the outer scope so the task ends with a clear log line
+        rather than the asyncio default "Task was destroyed" warning.
+        """
+        FEED_TARGET_MIN = 190
+        FEED_TEMP_MARGIN = 10
+        MAX_WAIT_SECONDS = 600
+        POLL_INTERVAL = 2.0
+
+        try:
+            start = time.time()
+            while time.time() - start < MAX_WAIT_SECONDS:
+                try:
+                    # Bail if loaded externally (e.g. via MMU_LOAD or T-command)
+                    if self.ace.loaded_gate != TOOL_GATE_UNKNOWN:
+                        logging.info(
+                            f"auto-feed: gate {self.ace.loaded_gate} loaded externally, "
+                            f"skipping scheduled auto-feed"
+                        )
+                        return
+
+                    result = await self.ace_controller.printer.query_objects({
+                        "extruder": ["temperature", "target"],
+                        "print_stats": ["state"],
+                    })
+                    if not isinstance(result, dict):
+                        result = {}
+
+                    # Bail if the print is no longer running. Covers user
+                    # cancel, gklib error, completion, and unexpected fall back
+                    # to standby before heat-up — without this the poller
+                    # would keep waiting up to MAX_WAIT_SECONDS after a cancel.
+                    print_stats = result.get("print_stats") or {}
+                    state = str(print_stats.get("state", "") or "").lower()
+                    if state in ACE_AUTO_FEED_DEAD_PRINT_STATES:
+                        logging.info(
+                            f"auto-feed: print state is '{state}', "
+                            f"abandoning auto-feed for gate {gate}"
+                        )
+                        return
+
+                    ext = result.get("extruder") or {}
+                    temp = float(ext.get("temperature", 0) or 0)
+                    target = float(ext.get("target", 0) or 0)
+
+                    if target >= FEED_TARGET_MIN and temp >= (target - FEED_TEMP_MARGIN):
+                        ace_id = gate // 4
+                        local_index = gate % 4
+                        gcode = (
+                            f"FEED_FILAMENT ID={ace_id} INDEX={local_index} "
+                            f"LENGTH={self._auto_feed_length} "
+                            f"SPEED={self._auto_feed_speed}"
+                        )
+                        logging.info(f"auto-feed: sending {gcode}")
+                        await self.ace_controller.printer.send_gcode(gcode)
+
+                        self._commit_loaded_gate(gate)
+                        return
+
+                except asyncio.CancelledError:
+                    # Never swallow cancellation via the broad Exception
+                    # catch below — propagate to the outer handler so the
+                    # task ends promptly and is logged.
+                    raise
+                except Exception as exc:
+                    logging.warning(f"auto-feed: poll error: {exc}")
+
+                await asyncio.sleep(POLL_INTERVAL)
+
+            logging.warning(
+                f"auto-feed: gave up after {MAX_WAIT_SECONDS}s "
+                f"(extruder target never reached {FEED_TARGET_MIN} C)"
+            )
+        except asyncio.CancelledError:
+            # patch_print_data cancels stale pollers before spawning new
+            # ones; shutdown lands here too. No cleanup needed: the loaded
+            # state is only mutated by _commit_loaded_gate on the success
+            # path, so cancellation can never leave split state behind.
+            logging.info(f"auto-feed: cancelled before completing (gate {gate})")
+            raise
+
+    def _commit_loaded_gate(self, gate: int) -> None:
+        """Atomically mark `gate` as the gate now loaded into the toolhead.
+
+        Single-threaded asyncio guarantees no concurrent reader can see
+        split state across these three assignments — but ONLY if no
+        `await` is introduced between them. Keep the writes here, in a
+        sync helper, so the invariant is visible and a future change
+        cannot accidentally interleave an await between the fields.
+        """
+        self.ace.gate = gate
+        self.ace.tool = gate
+        self.ace.loaded_gate = gate
 
     def _combine(self, sourceA, sourceB):
         result = {}
