@@ -156,6 +156,7 @@ class Kobra:
         self.patch_bed_mesh()
         self.patch_objects_list()
         self.patch_mainsail()
+        self.patch_ks1m_motion_report()
         self.patch_k2p_bug()
         self.patch_ace_flush_control()
 
@@ -1379,6 +1380,91 @@ class Kobra:
             return _request_standard
 
         logging.info('> Patching Mainsail macros...')
+
+        logging.debug(f'  Before: {KlippyConnection._request_standard}')
+        setattr(KlippyConnection, '_request_standard', wrap__request_standard(KlippyConnection._request_standard))
+        logging.debug(f'  After: {KlippyConnection._request_standard}')
+
+    def patch_ks1m_motion_report(self):
+        """
+        KS1M-only: strip 'motion_report' from objects/query and
+        objects/subscribe requests before forwarding to GoKlipper.
+
+        GoKlipper on the KS1M panics inside chelper when motion_report's
+        Get_status path runs after a motion (issue #34, same root cause as
+        a038374). The stack:
+
+            QueryStatusHelper._do_query
+              PrinterMotionReport.Get_status
+                DumpTrapQ.get_trapq_position
+                  chelper.Get_pull_move_move_t
+            -> panic: interface conversion: interface {} is
+               chelper._Ctype_struct_pull_move, not *chelper._Ctype_struct_pull_move
+
+        Commit a038374 already removes motion_report from our objects/list
+        response on KS1M, which keeps clients that consult objects/list
+        before subscribing (Fluidd's auto-discovery) from picking it up.
+        But Mainsail's toolhead / live-position panel hardcodes a
+        subscription to motion_report as a known Klipper object, so it
+        sends objects/subscribe?motion_report=... regardless of what
+        objects/list returned. GoKlipper serves it, hits the chelper
+        panic, and the greenlet that should respond never completes.
+        moonraker then logs "Request 'objects/query' pending: X seconds"
+        forever and Mainsail hangs on its first homing move.
+
+        Strip motion_report from the args before forwarding, then stub
+        an empty 'motion_report' object in the response so the
+        subscription stays valid on the client side and Mainsail doesn't
+        retry. UX cost: the live-position display sits at zeros and
+        live_velocity stays empty on KS1M. A future improvement could
+        synthesize position from toolhead.position, but for now no
+        position is strictly better than a permanent connection wedge
+        requiring a power-cycle.
+
+        On any model other than KS1M this is a no-op - the existing
+        motion_report path through GoKlipper works.
+        """
+        from .klippy_connection import KlippyConnection
+
+        # Keys Mainsail / Fluidd may use to refer to motion_report. Plain
+        # 'motion_report' is the only one in normal use; the quoted forms
+        # mirror how patch_bed_mesh defensively handles aliases for
+        # bed_mesh, in case a client uses an unusual encoding.
+        MOTION_REPORT_KEYS = ('motion_report',)
+
+        def wrap__request_standard(original__request_standard):
+            async def _request_standard(me, web_request, timeout=None):
+                args = web_request.get_args()
+
+                stripped = False
+                if self.KOBRA_MODEL_CODE == 'KS1M' and self.is_goklipper_running():
+                    rpc_method = web_request.get_endpoint()
+                    if rpc_method in ('objects/query', 'objects/subscribe'):
+                        if isinstance(args, dict) and isinstance(args.get('objects'), dict):
+                            for k in MOTION_REPORT_KEYS:
+                                if k in args['objects']:
+                                    del args['objects'][k]
+                                    stripped = True
+
+                result = await original__request_standard(me, web_request, timeout)
+
+                if stripped:
+                    if not isinstance(result, dict):
+                        # Shouldn't happen for these endpoints, but guard so
+                        # we don't turn the response into something Mainsail
+                        # can't parse.
+                        return result
+                    if 'status' not in result or not isinstance(result['status'], dict):
+                        result['status'] = {}
+                    # Empty stub. Mainsail tolerates missing fields on
+                    # known objects; this just keeps the key present so
+                    # the subscription is treated as live.
+                    result['status'].setdefault('motion_report', {})
+
+                return result
+            return _request_standard
+
+        logging.info('> Patching KS1M motion_report (issue #34)...')
 
         logging.debug(f'  Before: {KlippyConnection._request_standard}')
         setattr(KlippyConnection, '_request_standard', wrap__request_standard(KlippyConnection._request_standard))
