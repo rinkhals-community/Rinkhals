@@ -24,7 +24,6 @@ done
 # Cleanup temporary update payloads
 
 cd
-rm -rf $TMP_PATH
 rm -rf $UPDATE_PATH
 sync
 

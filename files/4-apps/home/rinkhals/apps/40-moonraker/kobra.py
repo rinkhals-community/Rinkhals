@@ -1469,6 +1469,9 @@ class Kobra:
         On every other model this whole method is a no-op: GoKlipper's
         motion_report works fine outside KS1M.
         """
+        if self.KOBRA_MODEL_CODE != 'KS1M':
+            return
+
         from .klippy_connection import KlippyConnection
         import math
 

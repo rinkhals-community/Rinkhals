@@ -528,6 +528,8 @@ class RinkhalsUiApp(BaseApp):
                 self.modal_text_input.panel_content = None
 
     def show_screen(self, screen):
+        if screen is None:
+            return
         super().show_screen(screen)
 
         if screen == self.screen_main: self.show_main()
@@ -1433,7 +1435,7 @@ class RinkhalsUiApp(BaseApp):
 
             # Clean up any leftover partial install
             if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+                shutil.rmtree(temp_dir, ignore_errors=True)
             os.makedirs(temp_dir, exist_ok=True)
 
             try:
