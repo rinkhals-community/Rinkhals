@@ -225,6 +225,17 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         # Hook that case directly to bypass the popup and open Rinkhals instead.
         patchJumpAddress = 0x150b30
         patchReturnAddress = 0x150bd4
+    elif modelCode == 'KS1M' and version == '2.6.9.6':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Same hook as 2.6.9.3 - the AcSettingDeviceUiInit callback was
+        # rebuilt with new compiler output for 2.6.9.6 but the relevant
+        # code structure is byte-identical at the same offset within the
+        # function (0x31c into the callback for the jump, 0x3c0 for the
+        # return). The whole function just moved by -0x58 bytes in the
+        # binary because of upstream codegen changes. Addresses below
+        # are sym + same offsets used for 2.6.9.3.
+        patchJumpAddress = 0x150ad8
+        patchReturnAddress = 0x150b7c
         s1CaseAlreadySelected = True
 
     else:
