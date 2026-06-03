@@ -18,7 +18,7 @@ Here is an example Node-RED script to perform this replication:
 ```
 
 You can also configure the Rinkhals monitor to output the metrics to any MQTT server you want.
-Create a `.env` file at `/useremain/home/rinkhals/apps/rinkhals-monitor/.env` with the following environment variables:
+Create a `.env` file at `/useremain/home/rinkhals/apps/65-rinkhals-web/.env` with the following environment variables:
 
 ```
 MQTT_IP=x.x.x.x

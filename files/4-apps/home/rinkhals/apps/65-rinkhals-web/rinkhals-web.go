@@ -1,43 +1,43 @@
-// docker run --rm -it -v .\files:/files -w /files/4-apps/home/rinkhals/apps/rinkhals-monitor --entrypoint=/bin/sh golang:1.23.4 -c "GOOS=linux GOARCH=arm go build -v"
+// docker run --rm -it -v .\files:/files -w /files/4-apps/home/rinkhals/apps/65-rinkhals-web --entrypoint=/bin/sh golang:1.23.4 -c "GOOS=linux GOARCH=arm go build -v"
 
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
-	"time"
 	"os"
-	"strings"
-	"encoding/json"
-	"syscall"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/joho/godotenv"
 	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/load"
+	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/process"
 )
 
-var processCommands = map[string]string {
-	"gklib": "gklib",
-	"gkapi": "gkapi",
-	"K3SysUi": "K3SysUi",
-	"Moonraker": "moonraker.py",
-	"Rinkhals UI": "rinkhals-ui.py",
-	"mjpg-streamer": "mjpg_streamer",
-	"Rinkhals monitor": "rinkhals-monitor",
-	"lighttp": "lighttpd",
-	"OctoApp": "octoapp",
-	"OctoEverywhere": "octoeverywhere",
+var processCommands = map[string]string{
+	"gklib":            "gklib",
+	"gkapi":            "gkapi",
+	"K3SysUi":          "K3SysUi",
+	"Moonraker":        "moonraker.py",
+	"Rinkhals UI":      "rinkhals-ui.py",
+	"mjpg-streamer":    "mjpg_streamer",
+	"Rinkhals web": "rinkhals-web",
+	"lighttp":          "lighttpd",
+	"OctoApp":          "octoapp",
+	"OctoEverywhere":   "octoeverywhere",
 }
-var processCache = map[string]*process.Process {}
+var processCache = map[string]*process.Process{}
 
 func getProcessID(processName string) (int, error) {
-	if processName == "rinkhals-monitor" {
+	if processName == "rinkhals-web" {
 		return os.Getpid(), nil
 	}
 	if runtime.GOOS != "linux" {
@@ -96,25 +96,26 @@ func checkProcesses() {
 }
 
 func main() {
-    log.SetFlags(log.Ldate | log.Ltime)
+	log.SetFlags(log.Ldate | log.Ltime)
+
+	// Start Rinkhals Web Portal HTTP Server
+	go startWebServer()
 
 	// Load environment variables from .env file
-    err := godotenv.Load(".env", "/useremain/home/rinkhals/apps/rinkhals-monitor/.env")
-    if err == nil {
-        log.Println("Loading environment from .env file")
-    }
+	err := godotenv.Load(".env", "/useremain/home/rinkhals/apps/65-rinkhals-web/.env")
+	if err == nil {
+		log.Println("Loading environment from .env file")
+	}
 
 	// Check if we can get system information on this platform
 	_, err = mem.VirtualMemory()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return
+		log.Printf("Warning: failed to get VirtualMemory: %v\n", err)
 	}
 
 	_, err = cpu.Info()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return
+		log.Printf("Warning: failed to get CPU Info: %v\n", err)
 	}
 
 	// Retrieve username and password
@@ -125,12 +126,12 @@ func main() {
 	if _, err := os.Stat(configFilePath); !os.IsNotExist(err) {
 		file, _ := os.Open(configFilePath)
 		defer file.Close()
-	
+
 		data, _ := os.ReadFile(configFilePath)
-	
+
 		var jsonData map[string]interface{}
 		err = json.Unmarshal(data, &jsonData)
-	
+
 		mqttUsername, _ = jsonData["username"].(string)
 		mqttPassword, _ = jsonData["password"].(string)
 	}
@@ -181,9 +182,17 @@ func main() {
 	}
 
 	mqttClient := mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		panic(token.Error())
-	}
+	go func() {
+		for {
+			if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+				log.Printf("MQTT connect error: %v, retrying...", token.Error())
+				time.Sleep(5 * time.Second)
+			} else {
+				log.Println("MQTT connected successfully")
+				break
+			}
+		}
+	}()
 
 	// Retrieve current device ID
 	deviceID := ""
@@ -197,7 +206,7 @@ func main() {
 	if os.Getenv("KOBRA_MODEL") != "" {
 		model = os.Getenv("KOBRA_MODEL")
 	}
-	
+
 	// Publish the Home Assistant MQTT discovery topic information
 	discoveryPayload := fmt.Sprint(`{
 		"device": {
@@ -208,7 +217,7 @@ func main() {
 			"serial_number": "`, deviceID, `"
 		},
 		"origin": {
-			"name": "rinkhals-monitor"
+			"name": "rinkhals-web"
 		},
 		"components": {
 			"memory_usage": {
@@ -269,7 +278,7 @@ func main() {
 			}
 			[[processes]]`)
 		discoveryPayload = strings.Replace(discoveryPayload, "[[processes]]", discoveryPayloadProcessCPU, 1)
-		
+
 		discoveryPayloadProcessMemory := fmt.Sprint(`,
 			"`, sanitizedProcessName, `_memory_usage": {
 				"name": "`, processName, ` memory usage",
@@ -342,7 +351,7 @@ func main() {
 			}
 
 			processUsage[sanitizedProcessName] = map[string]float64{
-				"cpu_usage": cpuPercent,
+				"cpu_usage":    cpuPercent,
 				"memory_usage": float64(memInfo.RSS) / 1024 / 1024,
 			}
 		}
@@ -373,7 +382,7 @@ func main() {
 	}
 
 	time.Sleep(2 * time.Second)
-	
+
 	updateInformation()
 
 	for range ticker.C {

@@ -592,7 +592,14 @@ class RinkhalsUiApp(BaseApp):
 
                 checkbox_app = lvr.checkbox(panel_app)
                 checkbox_app.align(lv.ALIGN.RIGHT_MID, -lv.dpx(5), 0)
-                checkbox_app.add_event_cb(lambda e, app=app, enabled=enabled: toggle_app(app, not enabled), lv.EVENT_CODE.CLICKED, None)
+                # Query ground truth on each click. The previous implementation
+                # captured `enabled` via a keyword default, which only reflects
+                # state at widget-creation time. After the first click flipped
+                # the app, subsequent clicks kept sending the same command
+                # (because the closure's `enabled` never updated), so users
+                # saw the checkbox stay in whatever state the first click left
+                # it in until they backed out and re-entered the Apps screen.
+                checkbox_app.add_event_cb(lambda e, app=app: toggle_app(app, is_app_enabled(app) != '1'), lv.EVENT_CODE.CLICKED, None)
                 checkbox_app.set_checked(enabled)
                 lv.unlock()
 
