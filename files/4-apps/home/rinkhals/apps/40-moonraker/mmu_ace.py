@@ -2405,8 +2405,6 @@ class MmuAcePatcher:
         if self.ace.enabled and "ams_settings" not in print_data:
 
             mapping = []
-            paint_index = 0  # paint_index counts the order of colors in the object (starts at 0)
-
             for tool_index, tool in enumerate(self.ace.tools):
                 gate_index = self.ace.ttg_map[tool_index]
 
@@ -2437,14 +2435,14 @@ class MmuAcePatcher:
                 # paint_index = order of colors in object (0, 1, 2, ...)
                 # ams_index = physical gate number (can be any gate)
                 mapping.append({
-                    "paint_index": paint_index,
+                    "paint_index": tool_index,
                     "ams_index": gate_index,
                     "paint_color": gate.color,
                     "ams_color": gate.color,
                     "material_type": gate.material
                 })
 
-                logging.info(f"Mapping: paint_index {paint_index} (T{tool_index}) → ams_index {gate_index} ({gate.filament_name})")
+                logging.info(f"Mapping: paint_index {tool_index} (T{tool_index}) → ams_index {gate_index} ({gate.filament_name})")
 
                 # Add backup gates from endless spool groups
                 if gate_index < len(self.ace.endless_spool_groups):
@@ -2466,16 +2464,14 @@ class MmuAcePatcher:
                             if backup_gate:
                                 # Add backup gate with same paint_index (same color) but different ams_index (gate)
                                 mapping.append({
-                                    "paint_index": paint_index,
+                                    "paint_index": tool_index,
                                     "ams_index": backup_gate_index,
                                     "paint_color": backup_gate.color,
                                     "ams_color": backup_gate.color,
                                     "material_type": backup_gate.material
                                 })
-                                logging.info(f"Endless Spool: paint_index {paint_index} (T{tool_index}) can use Gate {backup_gate_index} as backup for Gate {gate_index} (group {endless_spool_group})")
+                                logging.info(f"Endless Spool: paint_index {tool_index} (T{tool_index}) can use Gate {backup_gate_index} as backup for Gate {gate_index} (group {endless_spool_group})")
 
-                # Increment paint_index for the next color in the object
-                paint_index += 1
 
             if not mapping:
                 logging.info("No ACE gate mapping available, skipping AMS settings injection")
