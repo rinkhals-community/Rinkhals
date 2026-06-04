@@ -1,10 +1,5 @@
 #!/bin/sh
 
-function beep() {
-    echo 1 > /sys/class/pwm/pwmchip0/pwm0/enable
-    usleep $(($1 * 1000))
-    echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
-}
 
 UPDATE_PATH="/useremain/update_swu"
 TMP_PATH="/tmp/rinkhals-debug"
@@ -95,5 +90,16 @@ rm -rf $TMP_PATH
 rm -rf $UPDATE_PATH
 sync
 
-# Beep to notify completion
-beep 500
+# Play ok jingle to notify completion
+if [ ! -f /useremain/rinkhals/.mute-sounds ]; then
+    B=/sys/class/pwm/pwmchip0/pwm0
+    echo 0 > $B/enable; echo 0 > $B/duty_cycle
+    echo 2551000 > $B/period; echo 1020400 > $B/duty_cycle; echo 1 > $B/enable
+    usleep 120000; echo 0 > $B/enable; usleep 40000
+    echo 0 > $B/duty_cycle
+    echo 1912000 > $B/period; echo 764800 > $B/duty_cycle; echo 1 > $B/enable
+    usleep 120000; echo 0 > $B/enable; usleep 40000
+    echo 0 > $B/duty_cycle
+    echo 1517000 > $B/period; echo 606800 > $B/duty_cycle; echo 1 > $B/enable
+    usleep 180000; echo 0 > $B/enable
+fi

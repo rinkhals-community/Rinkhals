@@ -156,6 +156,7 @@ class Kobra:
         self.patch_bed_mesh()
         self.patch_objects_list()
         self.patch_mainsail()
+        self.patch_ks1m_motion_report()
         self.patch_k2p_bug()
         self.patch_klipper_restart()
         self.patch_ace_flush_control()
@@ -1414,6 +1415,208 @@ class Kobra:
         logging.debug(f'  Before: {KlippyConnection._request_standard}')
         setattr(KlippyConnection, '_request_standard', wrap__request_standard(KlippyConnection._request_standard))
         logging.debug(f'  After: {KlippyConnection._request_standard}')
+
+    def patch_ks1m_motion_report(self):
+        """
+        KS1M-only: keep Mainsail's live-position display working while
+        avoiding the GoKlipper chelper panic on motion_report.
+
+        GoKlipper on KS1M panics inside chelper whenever motion_report's
+        get_status path runs after a motion (issue #34):
+
+            QueryStatusHelper._do_query
+              PrinterMotionReport.Get_status
+                DumpTrapQ.get_trapq_position
+                  chelper.Get_pull_move_move_t
+            -> panic: interface conversion: interface {} is
+               chelper._Ctype_struct_pull_move, not *chelper._Ctype_struct_pull_move
+
+        Commit a038374 keeps motion_report out of our objects/list response
+        on KS1M, which is enough for clients that build their subscription
+        list from objects/list (Fluidd's auto-discovery). Mainsail doesn't:
+        its toolhead panel hardcodes a subscription to motion_report as a
+        known Klipper object and sends objects/subscribe?motion_report=...
+        regardless of what objects/list returned. GoKlipper serves it,
+        hits the chelper panic on the next motion, and Mainsail hangs
+        until the printer is power-cycled.
+
+        Mainsail's toolhead panel reads four fields off motion_report:
+        live_position, live_velocity, live_extruder_velocity, and the
+        steppers / trapq lists. All of that is derivable from toolhead's
+        position field, which GoKlipper does serve safely. So instead of
+        suppressing motion_report and leaving the display frozen at zero,
+        we synthesise it from toolhead:
+
+          - On objects/query and objects/subscribe: drop motion_report
+            from args before forwarding (so gklib never tries to compute
+            it), and add toolhead to args if the client didn't ask for it
+            (so the initial response carries position we can use).
+          - On the response, build a motion_report block from toolhead.
+            position and our running per-object delta tracker, then strip
+            toolhead back out of the response if the client didn't
+            originally subscribe to it.
+          - On every incoming status update from gklib: if the delta
+            includes toolhead.position, synthesise a motion_report from
+            it and add it to the update so subscribed clients get pushed
+            updates at the same cadence they would have from gklib.
+
+        Velocity is computed from the delta between successive position
+        samples and the eventtime difference. live_velocity is the XYZ
+        speed, live_extruder_velocity is the E-axis speed. The first
+        update after a long pause or printer restart resets to zero so
+        we don't emit a spike when the prev sample is stale.
+
+        On every other model this whole method is a no-op: GoKlipper's
+        motion_report works fine outside KS1M.
+        """
+        if self.KOBRA_MODEL_CODE != 'KS1M':
+            return
+
+        from .klippy_connection import KlippyConnection
+        import math
+
+        # Per-printer state for the delta-based velocity tracker. We
+        # only need one set of state because there's a single toolhead
+        # and a single GoKlipper update stream feeding all subscribers.
+        self._mr_prev_position = None  # tuple (x, y, z, e)
+        self._mr_prev_eventtime = None  # float seconds (GoKlipper eventtime)
+
+        def synthesize(toolhead, eventtime):
+            """
+            Build a motion_report-shaped dict from a toolhead status
+            dict and a GoKlipper eventtime. Returns None when the input
+            doesn't carry enough to derive position, in which case the
+            caller should skip the synthesis for this status frame.
+            """
+            if not isinstance(toolhead, dict):
+                return None
+            position = toolhead.get('position')
+            if not isinstance(position, (list, tuple)) or len(position) < 4:
+                return None
+
+            try:
+                live_position = [float(position[i]) for i in range(4)]
+            except (TypeError, ValueError):
+                return None
+
+            live_velocity = 0.0
+            live_extruder_velocity = 0.0
+
+            prev_pos = self._mr_prev_position
+            prev_t = self._mr_prev_eventtime
+            if prev_pos is not None and prev_t is not None and eventtime is not None:
+                try:
+                    dt = float(eventtime) - prev_t
+                except (TypeError, ValueError):
+                    dt = 0.0
+                # Reasonable bounds. Reject dt <= 0 (clock jumps backwards or
+                # duplicate samples), and reject dt > 2s (stale prev sample
+                # across a long idle gap; reporting the resulting "instant
+                # jump" velocity would just produce a confusing spike in the
+                # UI). In either case we keep velocity at zero.
+                if 0.001 < dt < 2.0:
+                    dx = live_position[0] - prev_pos[0]
+                    dy = live_position[1] - prev_pos[1]
+                    dz = live_position[2] - prev_pos[2]
+                    de = live_position[3] - prev_pos[3]
+                    live_velocity = math.sqrt(dx * dx + dy * dy + dz * dz) / dt
+                    live_extruder_velocity = de / dt
+
+            self._mr_prev_position = tuple(live_position)
+            if eventtime is not None:
+                try:
+                    self._mr_prev_eventtime = float(eventtime)
+                except (TypeError, ValueError):
+                    pass
+
+            return {
+                'live_position': live_position,
+                'live_velocity': live_velocity,
+                'live_extruder_velocity': live_extruder_velocity,
+                # Static lists. Mainsail uses these only for display
+                # labels in the toolhead panel; their actual contents
+                # don't influence the live-position animation.
+                'steppers': ['stepper_x', 'stepper_y', 'stepper_z'],
+                'trapq': ['toolhead'],
+            }
+
+        def wrap__request_standard(original__request_standard):
+            async def _request_standard(me, web_request, timeout=None):
+                args = web_request.get_args()
+
+                client_wanted_motion_report = False
+                we_added_toolhead = False
+
+                if (self.KOBRA_MODEL_CODE == 'KS1M' and
+                        self.is_goklipper_running() and
+                        isinstance(args, dict) and
+                        isinstance(args.get('objects'), dict) and
+                        web_request.get_endpoint() in ('objects/query', 'objects/subscribe')):
+                    if 'motion_report' in args['objects']:
+                        client_wanted_motion_report = True
+                        # Don't let gklib see motion_report at all.
+                        del args['objects']['motion_report']
+                        # Make sure we'll have toolhead in the response so
+                        # synthesise() has position to work with. None as
+                        # the field filter means "all fields".
+                        if 'toolhead' not in args['objects']:
+                            args['objects']['toolhead'] = None
+                            we_added_toolhead = True
+
+                result = await original__request_standard(me, web_request, timeout)
+
+                if client_wanted_motion_report and isinstance(result, dict):
+                    if not isinstance(result.get('status'), dict):
+                        result['status'] = {}
+                    status = result['status']
+                    eventtime = result.get('eventtime')
+
+                    synthesised = synthesize(status.get('toolhead'), eventtime)
+                    if synthesised is not None:
+                        status['motion_report'] = synthesised
+                    else:
+                        # Couldn't synthesise (no position in this snapshot).
+                        # Leave an empty stub so the client's subscription
+                        # is recognised as valid; the next status update
+                        # carrying toolhead.position will fill it in.
+                        status.setdefault('motion_report', {})
+
+                    # If we injected toolhead just to grab position, hide
+                    # it from the response so the client doesn't see a
+                    # field it didn't ask for.
+                    if we_added_toolhead and 'toolhead' in status:
+                        del status['toolhead']
+
+                return result
+            return _request_standard
+
+        def wrap__process_status_update(original__process_status_update):
+            def _process_status_update(me, eventtime, status):
+                # Inject motion_report into pushed status updates so
+                # subscriptions receive ongoing live-position deltas at
+                # the same cadence GoKlipper would have given them.
+                if (self.KOBRA_MODEL_CODE == 'KS1M' and
+                        self.is_goklipper_running() and
+                        isinstance(status, dict) and
+                        isinstance(status.get('toolhead'), dict) and
+                        'position' in status['toolhead']):
+                    synthesised = synthesize(status['toolhead'], eventtime)
+                    if synthesised is not None:
+                        status['motion_report'] = synthesised
+                return original__process_status_update(me, eventtime, status)
+            return _process_status_update
+
+        logging.info('> Patching KS1M motion_report (issue #34)...')
+
+        logging.debug(f'  Before: {KlippyConnection._request_standard}')
+        setattr(KlippyConnection, '_request_standard',
+                wrap__request_standard(KlippyConnection._request_standard))
+        logging.debug(f'  After: {KlippyConnection._request_standard}')
+
+        logging.debug(f'  Before: {KlippyConnection._process_status_update}')
+        setattr(KlippyConnection, '_process_status_update',
+                wrap__process_status_update(KlippyConnection._process_status_update))
+        logging.debug(f'  After: {KlippyConnection._process_status_update}')
 
     def patch_klipper_restart(self):
         """
