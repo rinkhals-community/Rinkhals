@@ -1427,78 +1427,90 @@ class RinkhalsUiApp(BaseApp):
         self.show_modal(self.modal_store_install)
 
         def do_install():
-            import shutil
-            target_dir = f'{RINKHALS_HOME}/apps/{app_dir}'
-            temp_dir = f'{RINKHALS_HOME}/apps/.installing-{app_dir}'
-            api_url = f'https://api.github.com/repos/{self.APP_STORE_REPO}/contents/apps/{app_dir}'
             api_headers = {'User-Agent': 'Rinkhals-AppStore/1.0'}
+            swu_path = f'/tmp/rinkhals-appstore/{app_dir}.swu'
 
-            # Clean up any leftover partial install
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            os.makedirs(temp_dir, exist_ok=True)
+            # Map the printer model to the Rinkhals.Apps SWU asset group, mirroring
+            # rinkhals-web's modelToAssetGroup so both installers pick the same build.
+            asset_group = {
+                'K2P': 'k2p-k3', 'K3': 'k2p-k3', 'K3V2': 'k2p-k3',
+                'K3M': 'k3m',
+                'KS1': 'ks1', 'KS1M': 'ks1',
+            }.get((KOBRA_MODEL_CODE or '').strip().upper())
+
+            if not asset_group:
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                    self.modal_store_install.label_progress_text.set_text(f'Unsupported model ({KOBRA_MODEL_CODE})')
+                return
 
             try:
                 import requests
 
+                # Resolve the model-aware SWU asset from the latest Rinkhals.Apps release,
+                # so the TouchUI installs exactly the same build and version as rinkhals-web
+                # (avoiding the version skew of copying raw branch files).
                 with lvr.lock():
-                    self.modal_store_install.label_progress_text.set_text('Fetching file list...')
+                    self.modal_store_install.label_progress_text.set_text('Finding release...')
 
-                def collect_files(url):
-                    r = requests.get(url, headers=api_headers, timeout=10)
-                    if r.status_code != 200:
-                        raise Exception(f'HTTP {r.status_code} listing {url}')
-                    files = []
-                    for entry in r.json():
-                        if entry['type'] == 'file':
-                            files.append((entry['path'], entry['download_url']))
-                        elif entry['type'] == 'dir':
-                            files.extend(collect_files(entry['url']))
-                    return files
+                release_url = f'https://api.github.com/repos/{self.APP_STORE_REPO}/releases/latest'
+                r = requests.get(release_url, headers=api_headers, timeout=10)
+                if r.status_code != 200:
+                    raise Exception(f'HTTP {r.status_code} fetching latest release')
 
-                all_files = collect_files(api_url)
-                # Strip leading apps/{app_dir}/ prefix for local paths
-                prefix = f'apps/{app_dir}/'
-                all_files = [(p[len(prefix):] if p.startswith(prefix) else p, u) for p, u in all_files]
+                asset_name = f'app-{app_dir}-{asset_group}.swu'
+                download_url = next((a.get('browser_download_url')
+                                     for a in r.json().get('assets', [])
+                                     if a.get('name') == asset_name), None)
 
-                total = len(all_files)
-                if total == 0:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                if not download_url:
                     with lvr.lock():
                         self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
-                        self.modal_store_install.label_progress_text.set_text('No files found')
+                        self.modal_store_install.label_progress_text.set_text(f'No build for {KOBRA_MODEL_CODE}')
                     return
 
-                for i, (rel_path, download_url) in enumerate(all_files):
-                    if self.modal_store_install.has_flag(lv.OBJ_FLAG.HIDDEN):
-                        logging.info('App store install canceled.')
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        return
+                # Download the SWU
+                os.makedirs(os.path.dirname(swu_path), exist_ok=True)
+                with lvr.lock():
+                    self.modal_store_install.label_progress_text.set_text('Downloading...')
 
+                with requests.get(download_url, headers=api_headers, timeout=120, stream=True) as swu_response:
+                    swu_response.raise_for_status()
+                    total = int(swu_response.headers.get('Content-Length') or 0)
+                    downloaded = 0
+                    with open(swu_path, 'wb') as f:
+                        for chunk in swu_response.iter_content(chunk_size=65536):
+                            if self.modal_store_install.has_flag(lv.OBJ_FLAG.HIDDEN):
+                                logging.info('App store install canceled.')
+                                if os.path.exists(swu_path):
+                                    os.remove(swu_path)
+                                return
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                with lvr.lock():
+                                    self.modal_store_install.obj_progress_bar.set_width(lv.pct(int(downloaded / total * 90)))
+
+                # Install through tools.sh install_swu, the same path rinkhals-web and the
+                # USB-stick installer use (model-aware password + update.sh). shell() only
+                # returns stdout, so append a sentinel to recover the exit code.
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_width(lv.pct(95))
+                    self.modal_store_install.label_progress_text.set_text('Installing...')
+                    self.modal_store_install.button_cancel.add_flag(lv.OBJ_FLAG.HIDDEN)
+
+                output = shell(f'. /useremain/rinkhals/.current/tools.sh && install_swu "{swu_path}"; echo "RINKHALS_RC=$?"')
+
+                if os.path.exists(swu_path):
+                    os.remove(swu_path)
+
+                installed_ok = 'RINKHALS_RC=0' in output and os.path.exists(f'{RINKHALS_HOME}/apps/{app_dir}/app.json')
+                if not installed_ok:
+                    logging.error(f'App store install_swu failed: {output}')
                     with lvr.lock():
-                        progress = int(i / total * 100)
-                        self.modal_store_install.obj_progress_bar.set_width(lv.pct(progress))
-                        self.modal_store_install.label_progress_text.set_text(f'{i + 1}/{total}: {rel_path}')
-
-                    file_path = os.path.realpath(os.path.join(temp_dir, rel_path))
-                    if not file_path.startswith(os.path.realpath(temp_dir) + os.sep):
-                        logging.warning('Skipping path outside install dir: %s', rel_path)
-                        continue
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-                    with requests.get(download_url, headers=api_headers, timeout=120, stream=True) as file_response:
-                        file_response.raise_for_status()
-                        with open(file_path, 'wb') as f:
-                            for chunk in file_response.iter_content(chunk_size=65536):
-                                f.write(chunk)
-
-                    if rel_path.endswith('.sh'):
-                        os.chmod(file_path, 0o755)
-
-                # Atomic promotion: replace target with completed temp dir
-                if os.path.exists(target_dir):
-                    shutil.rmtree(target_dir)
-                shutil.move(temp_dir, target_dir)
+                        self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                        self.modal_store_install.label_progress_text.set_text('Install failed')
+                    return
 
                 with lvr.lock():
                     self.modal_store_install.obj_progress_bar.set_width(lv.pct(100))
@@ -1520,7 +1532,8 @@ class RinkhalsUiApp(BaseApp):
                     )
 
             except Exception as ex:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                if os.path.exists(swu_path):
+                    os.remove(swu_path)
                 logging.error(f'App store install failed: {ex}')
                 with lvr.lock():
                     self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
