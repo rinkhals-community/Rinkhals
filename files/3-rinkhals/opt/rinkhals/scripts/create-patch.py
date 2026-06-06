@@ -208,6 +208,17 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         patchJumpAddress = 0x150b38
         patchReturnAddress = 0x150bfc
         s1CaseAlreadySelected = True
+    elif modelCode == 'KS1' and version == '2.7.2.7':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Same hook as 2.7.2.1. The AcSettingDeviceUiInit callback was
+        # rebuilt for 2.7.2.7 (K3SysUi grew ~35KB from filament-hub / resume
+        # work) and moved by +0x1270 bytes, but the code at the relevant
+        # offsets is byte-identical: jump at +0x2fc into the callback,
+        # return at +0x3c0. Addresses below are sym + the same offsets used
+        # for 2.7.2.1.
+        patchJumpAddress = 0x151da8
+        patchReturnAddress = 0x151e6c
+        s1CaseAlreadySelected = True
 
     elif modelCode == 'KS1M' and version == '2.1.6':
         buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
