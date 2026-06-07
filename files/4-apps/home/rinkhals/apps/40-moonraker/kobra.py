@@ -1169,8 +1169,10 @@ class Kobra:
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
                         calibrate_script = [
-                            'MOVE_HEAT_POS',
+                            f'M104 S{extru_temp}', # Set hotend to 170
                             f'M140 S{bed_temp}', # Set bed to 60
+                            'G28', # Home all axes
+                            'MOVE_HEAT_POS',
                             f'M109 S{extru_temp}', # Wait hotend to 170
                             f'M190 S{bed_temp}', # Wait bed to 60
                             'WIPE_ENTER', # Move to wiping position
