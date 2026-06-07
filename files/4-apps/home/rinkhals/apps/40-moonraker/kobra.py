@@ -128,12 +128,12 @@ class Kobra:
             self.KOBRA_MODEL_CODE = environment.get('KOBRA_MODEL_CODE')
             self.KOBRA_VERSION = environment.get('KOBRA_VERSION')
             self.KOBRA_DEVICE_ID = environment.get('KOBRA_DEVICE_ID')
-            
+
             def load_tool_function(function_name):
                 def tool_function(*args):
                     return shell(f'. /useremain/rinkhals/.current/tools.sh && {function_name} ' + ' '.join([ str(a) for a in args ]))
                 return tool_function
-            
+
             self.get_app_property = load_tool_function('get_app_property')
         except:
             pass
@@ -144,7 +144,7 @@ class Kobra:
                 data = json.loads(json_data)
                 self.MQTT_USERNAME = data['username']
                 self.MQTT_PASSWORD = data['password']
-        
+
         # Monkey patch Moonraker for Kobra
         logging.info('Starting Kobra patching...')
 
@@ -261,7 +261,7 @@ class Kobra:
         flow_calibration = self.get_app_property('40-moonraker', 'mqtt_print_flow_calibration').lower() == 'true'
 
         max_attempts = 2
-        
+
         # payload = f"""{{
         #     "type": "print",
         #     "action": "start",
@@ -726,7 +726,7 @@ class Kobra:
         if self.is_goklipper_running():
 
             if 'print_stats' in status:
-                if 'state' in status['print_stats']: 
+                if 'state' in status['print_stats']:
                     # Convert Kobra state
                     state = status['print_stats']['state']
                     logging.info(f'[Kobra] Converted Kobra state {state}')
@@ -746,7 +746,7 @@ class Kobra:
                     # GoKlipper emits "standby" then "complete" 1-2 seconds later, causing Moonraker to report "cancelled"
                     if state.lower() == 'standby' and getattr(self, '_last_tracked_state', None) == 'printing':
                         state = 'printing' # Keep it printing for now
-                        
+
                         async def _apply_delayed_standby():
                             import asyncio
                             await asyncio.sleep(2.5)
@@ -785,7 +785,7 @@ class Kobra:
                 if 'total_layer' in status['virtual_sdcard']:
                     # Save layer count for later
                     self._total_layer = status['virtual_sdcard']['total_layer']
-                
+
                 if 'current_layer' in status['virtual_sdcard']:
                     current_layer = status['virtual_sdcard']['current_layer']
 
@@ -797,7 +797,7 @@ class Kobra:
 
                     status['print_stats']['info']['current_layer'] = current_layer
                     status['print_stats']['info']['total_layer'] = self._total_layer
-                
+
                 if 'file_path' in status['virtual_sdcard']:
                     self._set_exclude_object_file(status['virtual_sdcard']['file_path'])
                     # Remove path prefix from file path
@@ -883,7 +883,7 @@ class Kobra:
         logging.debug(f'  Before: {KlippyRequest.set_result}')
         setattr(KlippyRequest, 'set_result', wrap_set_result(KlippyRequest.set_result))
         logging.debug(f'  After: {KlippyRequest.set_result}')
-        
+
         def wrap_request(original_request):
             async def request(me, web_request: WebRequest) -> Any:
                 rpc_method = web_request.get_endpoint()
@@ -947,9 +947,9 @@ class Kobra:
                 logging.info('[Kobra] Intercepting sudo command for shutdown')
                 self._schedule_native_machine_action("poweroff")
                 return ""
-            
+
             return await original_exec_sudo_command(me, command, tries, timeout)
-            
+
         Machine.exec_sudo_command = wrap_exec_sudo_command
         logging.info('> Patched Machine.exec_sudo_command')
 
@@ -1114,12 +1114,12 @@ class Kobra:
             if self.is_goklipper_running():
                 self._total_layer = 0
                 logging.info(f'[Kobra] Print file: {filename}')
-                
+
                 if filename and self.is_using_mqtt():
                     logging.info(f'[Kobra] MQTT print file: {filename}')
                     self.mqtt_print_file(filename)
                     return None
-            
+
             if filename:
                 logging.info(f'[Kobra] Not MQTT print file: {filename}')
             else:
@@ -1222,6 +1222,8 @@ class Kobra:
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
                         calibrate_script = [
+                            f'M104 S{extru_temp}', # Set hotend to 170
+                            f'M140 S{bed_temp}', # Set bed to 60
                             # Home first. Without this the printer can reach
                             # BED_MESH_CALIBRATE un-homed, and GoKlipper then blocks
                             # forever at the first probe point instead of raising
@@ -1232,12 +1234,12 @@ class Kobra:
                             # 5,5; homed, the full 5x5 mesh probes and saves normally.
                             'G28',
                             'MOVE_HEAT_POS',
-                            f'M140 S{bed_temp}', # Set bed to 60
                             f'M109 S{extru_temp}', # Wait hotend to 170
                             f'M190 S{bed_temp}', # Wait bed to 60
                             'WIPE_ENTER', # Move to wiping position
                             'WIPE_NOZZLE', # Wipe nozzle
                             'WIPE_EXIT', # Exit wiping position
+                            'G28 Z', # Home Z again after heat and wipe for the best result
                             f'M109 S{extru_end_temp}', # Wait hotend to 140
                             'BED_MESH_CALIBRATE',
                             'TURN_OFF_HEATERS',
@@ -1256,7 +1258,7 @@ class Kobra:
                             message = 'GoKlipper only support one default bed mesh'
                             logging.error(message)
                             raise self.server.error(message)
-                
+
                     if script.lower() == 'help':
                         web_request.endpoint = 'gcode/help'
                         result = await original_request(me, web_request)
@@ -1345,7 +1347,7 @@ class Kobra:
                 rpc_method = web_request.get_endpoint()
                 if self.is_goklipper_running() and rpc_method == "objects/list":
                     logging.info('[Kobra] Injected objects list')
-                    
+
                     objects = [
                         "gcode_macro t0",
                         "gcode_macro t1",
@@ -1382,12 +1384,12 @@ class Kobra:
                     # For other models, insert motion_report at same position as before to avoid any regression
                     if self.KOBRA_MODEL_CODE != 'KS1M':
                         objects.insert(0, "motion_report")
-                    
+
                     web_request.endpoint = 'gcode/help'
                     result = await original_request(me, web_request)
                     for gcode in result:
                         objects.append(f"gcode_macro {gcode}")
-                    
+
                     if self.KOBRA_MODEL_CODE == 'KS1' or self.KOBRA_MODEL_CODE == 'KS1M':
                         objects.append("fan_generic air_filter_fan")
                         objects.append("fan_generic box_fan")

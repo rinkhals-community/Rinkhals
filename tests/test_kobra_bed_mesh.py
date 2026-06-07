@@ -38,13 +38,13 @@ def _find_calibrate_script():
                         break
                 entries.append(prefix.strip())
         return entries
-    return None
+    return []
 
 
 class BedMeshCalibrateScriptTests(unittest.TestCase):
     def setUp(self):
         self.script = _find_calibrate_script()
-        self.assertIsNotNone(self.script, "calibrate_script list not found in kobra.py")
+        self.assertTrue(self.script, "calibrate_script list not found in kobra.py")
 
     def test_script_homes_before_probing(self):
         """Regression guard for issue #85.
@@ -55,24 +55,52 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
         error at all - the printer simply sits there. Verified on a KS1
         (fw 2.7.2.7): homed, the same command probes the full 5x5 mesh.
         """
-        self.assertIn("G28", self.script, "calibration script must home the printer")
+        homing = [i for i, cmd in enumerate(self.script) if cmd.startswith("G28")]
+        self.assertTrue(homing, "calibration script must home the printer")
         self.assertIn("BED_MESH_CALIBRATE", self.script)
         self.assertLess(
-            self.script.index("G28"),
+            max(homing),
             self.script.index("BED_MESH_CALIBRATE"),
-            "homing must come before probing",
+            "all homing must come before probing",
         )
 
     def test_homing_precedes_any_positioning_move(self):
         """Wiping moves assume a known position, so they must follow homing."""
-        home_index = self.script.index("G28")
+        first_home = min(
+            i for i, cmd in enumerate(self.script) if cmd.startswith("G28")
+        )
         for command in ("WIPE_ENTER", "WIPE_NOZZLE", "WIPE_EXIT", "MOVE_HEAT_POS"):
             if command in self.script:
                 self.assertLess(
-                    home_index,
+                    first_home,
                     self.script.index(command),
                     f"{command} moves the toolhead and must come after homing",
                 )
+
+    def test_z_homed_after_temperature_reached(self):
+        """Z is re-homed only after the target temperatures are reached.
+
+        The bed warps as it heats, so a Z zero taken cold drifts. The script
+        homes X and Y first, waits for the hotend and bed to reach temperature
+        (M109 / M190), then re-homes Z so the mesh is probed against the hot
+        geometry.
+        """
+        z_home = min(
+            i for i, cmd in enumerate(self.script) if cmd.startswith("G28 Z")
+        )
+        self.assertTrue(
+            any(self.script[i].startswith("M190") for i in range(z_home)),
+            "bed must reach temperature (M190) before Z is homed",
+        )
+        self.assertTrue(
+            any(self.script[i].startswith("M109") for i in range(z_home)),
+            "hotend must reach temperature (M109) before Z is homed",
+        )
+        self.assertLess(
+            z_home,
+            self.script.index("BED_MESH_CALIBRATE"),
+            "Z homing must still precede probing",
+        )
 
     def test_script_still_saves_and_cools_down(self):
         """The tail of the sequence must be preserved."""
