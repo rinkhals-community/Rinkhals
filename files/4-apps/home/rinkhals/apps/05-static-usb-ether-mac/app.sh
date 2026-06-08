@@ -37,7 +37,7 @@ resolve_mac() {
     fi
 
     if [ -f /userdata/ethaddr.txt ]; then
-        local FACTORY_MAC=$(cat /userdata/ethaddr.txt | tr -d ' \t\n\r')
+        local FACTORY_MAC=$(cat /userdata/ethaddr.txt | tr -d ' \t\n\r' | tr 'A-F' 'a-f')
         if validate_mac "$FACTORY_MAC"; then
             increment_mac "$FACTORY_MAC"
             return
