@@ -18,27 +18,54 @@ find_usb_eth() {
     done
 }
 
+increment_mac() {
+    local MAC=$1
+    local LAST_BYTE=${MAC##*:}
+    local PREFIX=${MAC%:*}
+    local DEC=$((16#${LAST_BYTE}))
+    local NEW_DEC=$(( (DEC + 1) % 256 ))
+    local NEW_LAST=$(printf '%02x' $NEW_DEC)
+    echo "${PREFIX}:${NEW_LAST}"
+}
+
+resolve_mac() {
+    local MAC=$(get_app_property $APP_NAME mac_address)
+
+    if [ -n "$MAC" ]; then
+        echo "$MAC"
+        return
+    fi
+
+    if [ -f /userdata/ethaddr.txt ]; then
+        local FACTORY_MAC=$(cat /userdata/ethaddr.txt | tr -d ' \t\n\r')
+        if validate_mac "$FACTORY_MAC"; then
+            increment_mac "$FACTORY_MAC"
+            return
+        fi
+    fi
+}
+
 status() {
     report_status $APP_STATUS_STOPPED
 }
 
 start() {
-    local MAC=$(get_app_property $APP_NAME mac_address)
+    local IFACE=$(find_usb_eth)
+
+    if [ -z "$IFACE" ]; then
+        log "No USB Ethernet interface found, skipping"
+        return
+    fi
+
+    local MAC=$(resolve_mac)
 
     if [ -z "$MAC" ]; then
-        log "No MAC address configured, skipping"
+        log "No MAC address configured and no factory MAC found, skipping"
         return
     fi
 
     if ! validate_mac "$MAC"; then
         log "/!\ Invalid MAC address '$MAC', skipping"
-        return
-    fi
-
-    local IFACE=$(find_usb_eth)
-
-    if [ -z "$IFACE" ]; then
-        log "No USB Ethernet interface found, skipping"
         return
     fi
 
