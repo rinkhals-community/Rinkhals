@@ -1,0 +1,15 @@
+{
+    "$version": "1",
+
+    "name": "Static USB Ethernet MAC",
+    "description": "Override the MAC address of a USB Ethernet adapter",
+    "version": "1.0",
+
+    "properties": {
+        "mac_address": {
+            "display": "MAC address",
+            "type": "text",
+            "default": ""
+        }
+    }
+}
