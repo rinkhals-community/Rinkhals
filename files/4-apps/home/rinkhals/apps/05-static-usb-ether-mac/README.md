@@ -10,7 +10,14 @@ Override the MAC address of a USB Ethernet adapter connected to your printer. Us
 
 ## How It Works
 
-On startup, the app scans `/sys/class/net/eth*` to find the interface backed by a USB device (by checking `readlink -f /sys/class/net/<iface>/device` for a path containing `usb`). If a MAC address is configured and a USB Ethernet interface is found, it brings the interface down, applies the MAC with `ifconfig hw ether`, and brings it back up.
+On startup, the app scans `/sys/class/net/eth*` to find the interface backed by a USB device (by checking `readlink -f /sys/class/net/<iface>/device` for a path containing `usb`). 
+
+The MAC address is resolved in this order:
+
+1. **Custom MAC** — if you configured one via the app property, it is used as-is
+2. **Derived MAC** — otherwise, the app reads the factory WiFi MAC from `/userdata/ethaddr.txt`, computes its MD5 hash, and takes the first 12 hex digits as the new MAC. The first byte's low nibble is sanitized to produce a valid IEEE 802 **locally-administered unicast** address (bit 1 = 1, bit 0 = 0), so the second hex digit is always `2`, `6`, `A`, or `E`. This guarantees no collision with any real vendor-assigned OUI.
+
+Once resolved, the interface is brought down, the MAC is applied with `ifconfig hw ether`, and the interface is brought back up.
 
 The `05-` prefix ensures it runs before `10-hostname-dns`, so the MAC is set before DHCP and mDNS start.
 
@@ -18,22 +25,18 @@ The `05-` prefix ensures it runs before `10-hostname-dns`, so the MAC is set bef
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| MAC address | *(empty)* | MAC address to apply to the USB Ethernet adapter (format: `aa:bb:cc:dd:ee:ff`) |
+| MAC address | *(empty)* | Custom MAC address to apply to the USB Ethernet adapter (format: `aa:bb:cc:dd:ee:ff`). If empty, a deterministic MAC is derived from the factory WiFi MAC. |
 
-## Default MAC Address
+## Set a Custom MAC Address
 
-If no MAC is set via SSH. MAC-Address in /userdata/ethaddr.txt (+1) is used by default.
-
-## Set a Custom Static MAC Address
-
-SSH into the printer and run:
+If you want a specific MAC instead of the derived one, SSH into the printer and run:
 
 ```bash
 source /useremain/rinkhals/.current/tools.sh
 set_app_property 05-static-usb-ether-mac mac_address aa:bb:cc:dd:ee:ff
 ```
 
-The MAC address must be in colon-separated lowercase hexadecimal format (`xx:xx:xx:xx:xx:xx`). Invalid values are skipped and logged.
+The MAC address must be in colon-separated hexadecimal format (`xx:xx:xx:xx:xx:xx`). Invalid values are skipped and logged.
 
 Then restart the app (or reboot the printer):
 
@@ -42,10 +45,8 @@ Then restart the app (or reboot the printer):
 /useremain/home/rinkhals/apps/05-static-usb-ether-mac/app.sh start
 ```
 
-*note* restarting the app will likly freeze you ssh session
-
 ## View the Current MAC Address
-/useremain/dev/device_id 
+
 ```bash
 cat /sys/class/net/$(for iface in /sys/class/net/eth*; do
     iface=$(basename $iface)
@@ -56,4 +57,4 @@ done)/address
 
 ## Dependencies
 
-`ifconfig` from busybox/net-tools only — no additional packages required.
+`ifconfig` from busybox/net-tools and `md5sum` — no additional packages required.

@@ -18,16 +18,6 @@ find_usb_eth() {
     done
 }
 
-increment_mac() {
-    local MAC=$1
-    local LAST_BYTE=${MAC##*:}
-    local PREFIX=${MAC%:*}
-    local DEC=$((16#${LAST_BYTE}))
-    local NEW_DEC=$(( (DEC + 1) % 256 ))
-    local NEW_LAST=$(printf '%02x' $NEW_DEC)
-    echo "${PREFIX}:${NEW_LAST}"
-}
-
 resolve_mac() {
     local MAC=$(get_app_property $APP_NAME mac_address)
 
@@ -36,13 +26,23 @@ resolve_mac() {
         return
     fi
 
-    if [ -f /userdata/ethaddr.txt ]; then
-        local FACTORY_MAC=$(cat /userdata/ethaddr.txt | tr -d ' \t\n\r' | tr 'A-F' 'a-f')
-        if validate_mac "$FACTORY_MAC"; then
-            increment_mac "$FACTORY_MAC"
-            return
-        fi
+    if [ ! -f /userdata/ethaddr.txt ]; then
+        return
     fi
+
+    local FACTORY_MAC=$(cat /userdata/ethaddr.txt | tr -d ' \t\n\r' | tr 'A-F' 'a-f')
+    if ! validate_mac "$FACTORY_MAC"; then
+        return
+    fi
+
+    local HASH=$(echo -n "$FACTORY_MAC" | md5sum | cut -c 1-12)
+    local FIRST_BYTE_HIGH=${HASH:0:1}
+    local FIRST_BYTE_LOW=${HASH:1:1}
+    local LOW_VAL=$((16#${FIRST_BYTE_LOW}))
+    local NEW_LOW=$(( (LOW_VAL & 0xC) | 0x2 ))
+    local NEW_LOW_HEX=$(printf '%x' $NEW_LOW)
+
+    echo "${FIRST_BYTE_HIGH}${NEW_LOW_HEX}:${HASH:2:2}:${HASH:4:2}:${HASH:6:2}:${HASH:8:2}:${HASH:10:2}"
 }
 
 status() {
@@ -60,7 +60,7 @@ start() {
     local MAC=$(resolve_mac)
 
     if [ -z "$MAC" ]; then
-        log "No MAC address configured and no factory MAC found, skipping"
+        log "No MAC address configured and unable to derive one, skipping"
         return
     fi
 
