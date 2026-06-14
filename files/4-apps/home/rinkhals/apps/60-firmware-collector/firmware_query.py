@@ -77,11 +77,12 @@ def _read_current_version() -> str:
 
 
 def _build_ssl_context(cert_path: str) -> ssl.SSLContext:
+    # Security fix: Enable certificate verification and hostname checking to prevent MITM attacks.
+    # Removed insecure cipher override and enabled CERT_REQUIRED.
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.set_ciphers("ALL:@SECLEVEL=0")
     ctx.load_cert_chain(f"{cert_path}/deviceCrt", f"{cert_path}/devicePk", None)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.load_verify_locations(f"{cert_path}/caCrt")
     return ctx
 
@@ -90,18 +91,28 @@ def _build_mqtt_credentials(cloud_config, model_id: str, device_id: str):
     """Replicates the username/password derivation the Anycubic firmware uses."""
     device_key = cloud_config["deviceKey"]
     cert_path = cloud_config["certPath"]
+    ca_crt_path = f"{cert_path}/caCrt"
 
-    # The encryption call uses the printer's own openssl; we keep the same
-    # subshell invocation pattern as check_updates.py to avoid any divergence.
-    cmd = (
-        f'printf "{device_key}" | '
-        f'openssl rsautl -encrypt -inkey {cert_path}/caCrt -certin -pkcs | '
-        f'xxd -p -c 256'
+    # Security fix: Avoid using `sh -c` with string interpolation to prevent
+    # arbitrary command execution if config values contain shell metacharacters.
+    # Use `subprocess.Popen` with a list of arguments and pass data via stdin.
+    openssl_cmd = [
+        "openssl", "rsautl", "-encrypt", 
+        "-inkey", ca_crt_path, "-certin", "-pkcs"
+    ]
+    
+    openssl_proc = subprocess.Popen(
+        openssl_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
     )
-    encrypted = subprocess.check_output(["sh", "-c", cmd])
-    encrypted = encrypted.decode().strip()
-    encrypted = bytes.fromhex(encrypted)
-    encrypted_b64 = base64.b64encode(encrypted).decode()
+    encrypted_bytes, stderr = openssl_proc.communicate(input=device_key.encode("utf-8"))
+    
+    if openssl_proc.returncode != 0:
+        raise RuntimeError(f"openssl failed: {stderr.decode()}")
+
+    encrypted_b64 = base64.b64encode(encrypted_bytes).decode()
 
     taco = f"{device_id}{encrypted_b64}{device_id}"
     username = f"dev|fdm|{model_id}|{_md5(taco)}"
@@ -185,7 +196,7 @@ def query_anycubic_ota() -> dict:
     )
     if endpoint.scheme == "ssl":
         client.tls_set_context(_build_ssl_context(cloud_config["certPath"]))
-        client.tls_insecure_set(True)
+        # Security fix: Removed client.tls_insecure_set(True) to enforce TLS verification
 
     client.on_connect = on_connect
     client.on_connect_fail = on_connect_fail
