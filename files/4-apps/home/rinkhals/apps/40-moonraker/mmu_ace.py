@@ -1131,6 +1131,15 @@ class MmuAceController:
         ace = self.ace
         ace.units = []
         ace.tools = []
+
+        # Preserve any existing tool-to-gate map across status polls. This
+        # method runs on every ACE Hub status update (roughly every 20s), and
+        # unconditionally rebuilding ttg_map to the 1:1 default below silently
+        # discarded a user's custom mapping a few seconds after they set it
+        # (issue #49). We snapshot the current map here and, once the new
+        # topology is known, restore it if it still fits; otherwise we keep
+        # the freshly built default.
+        previous_ttg_map = list(ace.ttg_map)
         ace.ttg_map = []
 
         # Invalidate gate lookup cache when units change
@@ -1219,6 +1228,16 @@ class MmuAceController:
                 global_gate_index += 1
 
             self.ace.units.append(unit)
+
+        # Restore the previous tool-to-gate map if it still matches the
+        # current topology (same tool count, and every entry points at a gate
+        # that still exists). A custom mapping the user set via MMU_TTG_MAP
+        # therefore survives status polls, while an actual change in the
+        # number of gates (a unit added or removed) cleanly falls back to the
+        # 1:1 default that was just rebuilt above. See issue #49.
+        if (len(previous_ttg_map) == len(self.ace.ttg_map)
+                and all(0 <= gate_index < global_gate_index for gate_index in previous_ttg_map)):
+            self.ace.ttg_map = previous_ttg_map
 
         # Sync MMU status with ACE Hub current_filament state
         current_filament = filament_hub.get("current_filament", "")
