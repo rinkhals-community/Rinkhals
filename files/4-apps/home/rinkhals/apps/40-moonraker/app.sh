@@ -36,6 +36,7 @@ debug() {
     TMPDIR=/useremain/tmp HOME=/userdata/app/gk python ./moonraker/moonraker/moonraker.py -c /userdata/app/gk/printer_data/config/moonraker.generated.conf $@
 }
 stop() {
+    kill_by_name moonraker.sh
     kill_by_name moonraker.py
 }
 
