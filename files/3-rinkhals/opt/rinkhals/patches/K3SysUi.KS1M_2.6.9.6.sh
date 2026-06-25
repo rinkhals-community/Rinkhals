@@ -2,12 +2,12 @@
 
 # This script was automatically generated, don't modify it directly
 # Before MD5: 501e7f3c1acef958f3cd93be9a00a200
-# After MD5: 5d1e50ccbd5b833d08e42a6463a96a7c
+# After MD5: 7f1802db0a8fa39bfc8fce0133584df7
 
 TARGET=$1
 
 MD5=$(md5sum $TARGET | awk '{print $1}')
-if [ "$MD5" = "5d1e50ccbd5b833d08e42a6463a96a7c" ]; then
+if [ "$MD5" = "7f1802db0a8fa39bfc8fce0133584df7" ]; then
     echo $TARGET is already patched, skipping...
     exit 0
 fi
@@ -17,9 +17,9 @@ if [ "$MD5" != "501e7f3c1acef958f3cd93be9a00a200" ]; then
 fi
 
 PATCH_FILE=/tmp/patch-$RANDOM.bin
-echo 'azkA6g7woOEvdXNlcmVtYWluL3JpbmtoYWxzLy5jdXJyZW50L29wdC9yaW5raGFscy91aS9yaW5raGFscy11aS5zaCAmIGVjaG8gJCEgPiAvdG1wL3JpbmtoYWxzL3JpbmtoYWxzLXVpLnBpZAB0aW1lb3V0IC10IDIgc3RyYWNlIC1xcXEgLWV0cmFjZT1ub25lIC1wICQoY2F0IC90bXAvcmlua2hhbHMvcmlua2hhbHMtdWkucGlkKSAyPiAvZGV2L251bGxybSAtZiAvdG1wL3JpbmtoYWxzL3JpbmtoYWxzLXVpLnBpZAAAAJ/lAAAA6qTvFQDuTvvrZOMlggAAn+UAAADqCvAVAOhO++sPAFDj9///CgAAn+UAAADqZvAVAOJO++s4ABvlAACQ5QQg4wEQoOMwsf7rOAAb5QAAkAQQoOMes/7rocb/6lJpbmtoYWxzAA==' | base64 -d > $PATCH_FILE
+echo 'czkA6g7woOEvdXNlcmVtYWluL3JpbmtoYWxzLy5jdXJyZW50L29wdC9yaW5raGFscy91aS9yaW5raGFscy11aS5zaCAmIGVjaG8gJCEgPiAvdG1wL3JpbmtoYWxzL3JpbmtoYWxzLXVpLnBpZAB0aW1lb3V0IC10IDIgc3RyYWNlIC1xcXEgLWV0cmFjZT1ub25lIC1wICQoY2F0IC90bXAvcmlua2hhbHMvcmlua2hhbHMtdWkucGlkKSAyPiAvZGV2L251bGxybSAtZiAvdG1wL3JpbmtoYWxzL3JpbmtoYWxzLXVpLnBpZAAAAJ/lAAAA6qTvFQDuTvvrZOMlggAAn+UAAADqCvAVAOhO++sPAFDj9///CgAAn+UAAADqZvAVAOJO++s4ABvlAACQ5QQg4wEQoOMwsf7rOAAb5QAAkAQQoOMes/7rocb/6lJpbmtoYWxzAA==' | base64 -d > $PATCH_FILE
 
-dd if=$PATCH_FILE skip=0 ibs=1 of=$TARGET seek=1313496 obs=1 count=4 conv=notrunc # 0x140ad8 / 0x150ad8 > 0x6b3900ea
+dd if=$PATCH_FILE skip=0 ibs=1 of=$TARGET seek=1313464 obs=1 count=4 conv=notrunc # 0x140ab8 / 0x150ab8 > 0x733900ea
 dd if=$PATCH_FILE skip=4 ibs=1 of=$TARGET seek=1372064 obs=1 count=133 conv=notrunc # 0x14efa0 / 0x15efa0 > 0x0ef0a0e12f75736572656d61696e2f72696e6b68616c732f2e63757272656e742f6f70742f72696e6b68616c732f75692f72696e6b68616c732d75692e73682026206563686f202421203e202f746d702f72696e6b68616c732f72696e6b68616c732d75692e7069640074696d656f7574202d74203220737472616365202d717171202d65
 dd if=$PATCH_FILE skip=137 ibs=1 of=$TARGET seek=1372198 obs=1 count=63 conv=notrunc # 0x14f026 / 0x15f026 > 0x74726163653d6e6f6e65202d70202428636174202f746d702f72696e6b68616c732f72696e6b68616c732d75692e7069642920323e202f6465762f6e756c6c
 dd if=$PATCH_FILE skip=200 ibs=1 of=$TARGET seek=1372262 obs=1 count=36 conv=notrunc # 0x14f066 / 0x15f066 > 0x726d202d66202f746d702f72696e6b68616c732f72696e6b68616c732d75692e70696400
