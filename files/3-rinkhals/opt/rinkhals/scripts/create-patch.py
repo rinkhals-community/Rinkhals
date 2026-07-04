@@ -254,6 +254,18 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         patchJumpAddress = 0x150ab8
         patchReturnAddress = 0x150b7c
         s1CaseAlreadySelected = True
+    elif modelCode == 'KS1M' and version == '2.7.1.4':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Same menu layout and jump-table dispatch as 2.6.9.3/2.6.9.6 (rows:
+        # Printer Information, ACE Information, CN Code, Service Support,
+        # Export logs to U-disk). Verified directly against the jump table at
+        # callback+0x44: row 3 (Service Support) case body starts at
+        # 0x177cdc, with the shared switch epilogue at 0x177dcc. Confirmed by
+        # shape (short this-ptr + mov r1,#3 + nav call, matching rows 0-2)
+        # and by the string table order at the relabel site.
+        patchJumpAddress = 0x177cdc
+        patchReturnAddress = 0x177dcc
+        s1CaseAlreadySelected = True
 
     else:
         raise Exception('Unsupported model and version')
