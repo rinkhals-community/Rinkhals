@@ -1,13 +1,22 @@
 <script lang="ts">
 	import { onMount, onDestroy } from "svelte";
-	import { Box, Video, MonitorPlay, Activity, Cpu, HardDrive, Printer, Thermometer, ExternalLink, ArrowUpCircle } from "lucide-svelte";
+	import { Box, Video, MonitorPlay, Activity, HardDrive, Printer, Thermometer, ExternalLink, ArrowUpCircle } from "lucide-svelte";
 	import { firmwareStatus } from "$lib/firmwareStatus";
 
 	type AppInfo = { id: string; name: string; url?: string; port: string; icon: any; status: string; accent: string; };
 
 	let apps = $state<AppInfo[]>([]);
 	let loading = $state(true);
-	let metrics = $state<{uptime: string, cpuUsage: number, memUsage: number, diskUsage: number} | null>(null);
+	let metrics = $state<{
+		uptime: string,
+		cpuUsage: number,
+		memTotalMB: number,
+		memAvailableMB: number,
+		memInUseMB: number,
+		memCachedMB: number,
+		memFreeMB: number,
+		diskUsage: number
+	} | null>(null);
 	let printer = $state<{state: string, bedTemp: number, hotendTemp: number} | null>(null);
 
 	const appBlueprints: Record<string, Partial<AppInfo>> = {
@@ -137,8 +146,8 @@
 		{/if}
 	</header>
 
-	<!-- Metrics row -->
-	<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+	<!-- Metrics row: CPU + Storage -->
+	<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 		<div class="bg-canvas border border-line-soft rounded-xl p-4 flex items-center gap-4">
 			<div class="w-10 h-10 rounded-lg bg-brand-soft flex items-center justify-center">
 				<Activity size={20} class="text-brand" />
@@ -146,15 +155,6 @@
 			<div>
 				<p class="text-xs uppercase tracking-wider text-ink-faint">CPU</p>
 				<p class="text-lg font-semibold text-ink">{metrics ? `${metrics.cpuUsage}%` : "—"}</p>
-			</div>
-		</div>
-		<div class="bg-canvas border border-line-soft rounded-xl p-4 flex items-center gap-4">
-			<div class="w-10 h-10 rounded-lg bg-surface-warm flex items-center justify-center">
-				<Cpu size={20} class="text-accent" />
-			</div>
-			<div>
-				<p class="text-xs uppercase tracking-wider text-ink-faint">Memory</p>
-				<p class="text-lg font-semibold text-ink">{metrics ? `${metrics.memUsage}%` : "—"}</p>
 			</div>
 		</div>
 		<div class="bg-canvas border border-line-soft rounded-xl p-4 flex items-center gap-4">
@@ -166,6 +166,50 @@
 				<p class="text-lg font-semibold text-ink">{metrics ? `${metrics.diskUsage}%` : "—"}</p>
 			</div>
 		</div>
+	</div>
+
+	<!-- Memory: segmented bar. The dimension bracket spans the cached + free
+	     part so it's obvious that "available" (not "free") is the usable figure. -->
+	<div class="bg-canvas border border-line-soft rounded-xl p-4">
+		<div class="flex items-baseline justify-between">
+			<p class="text-xs uppercase tracking-wider text-ink-faint">Memory</p>
+			<p class="text-xs text-ink-faint">{metrics ? `${metrics.memTotalMB} MB total` : ""}</p>
+		</div>
+
+		{#if metrics}
+			{@const total = metrics.memTotalMB || 1}
+			{@const inUsePct = (metrics.memInUseMB / total) * 100}
+			{@const cachedPct = (metrics.memCachedMB / total) * 100}
+			{@const freePct = (metrics.memFreeMB / total) * 100}
+
+			<div class="mt-3 flex h-8 rounded-lg overflow-hidden bg-surface">
+				<div class="h-full" style="width: {inUsePct}%; background: var(--color-coral);"></div>
+				<div class="h-full" style="width: {cachedPct}%; background: repeating-linear-gradient(45deg, var(--color-accent) 0, var(--color-accent) 5px, var(--color-accent-hover) 5px, var(--color-accent-hover) 9px);"></div>
+				<div class="h-full border-l border-line-soft" style="width: {freePct}%;"></div>
+			</div>
+
+			<div class="mt-1.5" style="margin-left: {inUsePct}%; width: {cachedPct + freePct}%;">
+				<div class="h-2 border-l border-r border-b border-line"></div>
+				<p class="text-center text-sm font-semibold text-ink mt-1">{metrics.memAvailableMB} MB available</p>
+			</div>
+
+			<div class="flex flex-wrap gap-x-5 gap-y-1 mt-3 text-xs text-ink-muted">
+				<span class="inline-flex items-center gap-1.5">
+					<span class="w-3 h-3 rounded-sm" style="background: var(--color-coral);"></span>
+					In use {metrics.memInUseMB} MB
+				</span>
+				<span class="inline-flex items-center gap-1.5">
+					<span class="w-3 h-3 rounded-sm" style="background: var(--color-accent);"></span>
+					Cached {metrics.memCachedMB} MB
+				</span>
+				<span class="inline-flex items-center gap-1.5">
+					<span class="w-3 h-3 rounded-sm bg-surface border border-line-soft"></span>
+					Free {metrics.memFreeMB} MB
+				</span>
+			</div>
+		{:else}
+			<p class="text-lg font-semibold text-ink mt-2">—</p>
+		{/if}
 	</div>
 
 	<!-- Services -->

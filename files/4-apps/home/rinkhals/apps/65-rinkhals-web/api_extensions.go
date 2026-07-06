@@ -84,18 +84,31 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	uptimeStr := strings.Split(string(uptimeBytes), " ")[0]
 	
 	memBytes, _ := ioutil.ReadFile("/proc/meminfo")
-	var memTotal, memFree int
+	var memTotal, memFree, memAvailable int
 	for _, line := range strings.Split(string(memBytes), "\n") {
 		if strings.HasPrefix(line, "MemTotal:") {
 			fmt.Sscanf(line, "MemTotal: %d kB", &memTotal)
+		} else if strings.HasPrefix(line, "MemAvailable:") {
+			fmt.Sscanf(line, "MemAvailable: %d kB", &memAvailable)
 		} else if strings.HasPrefix(line, "MemFree:") {
 			fmt.Sscanf(line, "MemFree: %d kB", &memFree)
 		}
 	}
-	memUsage := 0
-	if memTotal > 0 {
-		memUsage = int(float64(memTotal-memFree) / float64(memTotal) * 100)
+	if memAvailable == 0 {
+		// Very old kernels lack MemAvailable; fall back to free.
+		memAvailable = memFree
 	}
+	// Round kB to MB and derive the three segments so they always sum to total:
+	//   in use = total - available   (committed, not reclaimable)
+	//   cached = available - free     (reclaimable page cache / slab)
+	//   free   = free                 (untouched)
+	// "available" (cached + free) is what an app can actually use, which is the
+	// number the dashboard shows: MemFree alone reads ~97% used and is misleading.
+	memTotalMB := (memTotal + 512) / 1024
+	memAvailableMB := (memAvailable + 512) / 1024
+	memFreeMB := (memFree + 512) / 1024
+	memInUseMB := memTotalMB - memAvailableMB
+	memCachedMB := memAvailableMB - memFreeMB
 
 	var stat syscall.Statfs_t
 	syscall.Statfs("/userdata", &stat)
@@ -110,10 +123,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"uptime":    uptimeStr,
-		"cpuUsage":  cpuUsage,
-		"memUsage":  memUsage,
-		"diskUsage": diskUsage,
+		"uptime":         uptimeStr,
+		"cpuUsage":       cpuUsage,
+		"memTotalMB":     memTotalMB,
+		"memAvailableMB": memAvailableMB,
+		"memInUseMB":     memInUseMB,
+		"memCachedMB":    memCachedMB,
+		"memFreeMB":      memFreeMB,
+		"diskUsage":      diskUsage,
 	})
 }
 
