@@ -4,7 +4,13 @@
 	import "../app.css";
 	import { LayoutDashboard, FolderOpen, Terminal, Settings, FileText, ScrollText, ShieldAlert, Sun, Moon, Monitor, Boxes, Cpu } from "lucide-svelte";
 	import { themePreference, resolvedTheme, cycleTheme, type ThemePreference } from "$lib/theme";
+	import TerminalPanel from "$lib/TerminalPanel.svelte";
 	let { children } = $props();
+
+	// The terminal panel is mounted here, once, for the lifetime of the app -
+	// see TerminalPanel.svelte for why. Routing to /terminal only flips this
+	// flag to swap CSS visibility; it never mounts/unmounts the panel.
+	let onTerminalRoute = $derived($page.url.pathname.startsWith("/terminal"));
 
 	const themeLabels: Record<ThemePreference, string> = {
 		system: "System theme",
@@ -127,8 +133,15 @@
 	</aside>
 
 	<main class="flex-1 flex flex-col h-screen overflow-hidden">
-		<div class="flex-1 overflow-auto bg-canvas p-8">
-			{@render children()}
+		<div class="flex-1 overflow-auto bg-canvas relative">
+			<div class="p-8 h-full {onTerminalRoute ? 'hidden' : ''}">
+				{@render children()}
+			</div>
+			<!-- Always mounted (never destroyed by routing); only hidden when not
+			     on /terminal. This is what keeps shells alive across navigation. -->
+			<div class="absolute inset-0 p-8 {onTerminalRoute ? '' : 'hidden'}">
+				<TerminalPanel active={onTerminalRoute} />
+			</div>
 		</div>
 	</main>
 </div>
