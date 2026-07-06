@@ -7,7 +7,7 @@
 
 	let apps = $state<AppInfo[]>([]);
 	let loading = $state(true);
-	let metrics = $state<{uptime: string, cpuLoad: string, memUsage: number, diskUsage: number} | null>(null);
+	let metrics = $state<{uptime: string, cpuUsage: number, memUsage: number, diskUsage: number} | null>(null);
 	let printer = $state<{state: string, bedTemp: number, hotendTemp: number} | null>(null);
 
 	const appBlueprints: Record<string, Partial<AppInfo>> = {
@@ -144,8 +144,8 @@
 				<Activity size={20} class="text-brand" />
 			</div>
 			<div>
-				<p class="text-xs uppercase tracking-wider text-ink-faint">CPU load</p>
-				<p class="text-lg font-semibold text-ink">{metrics?.cpuLoad ?? "—"}</p>
+				<p class="text-xs uppercase tracking-wider text-ink-faint">CPU</p>
+				<p class="text-lg font-semibold text-ink">{metrics ? `${metrics.cpuUsage}%` : "—"}</p>
 			</div>
 		</div>
 		<div class="bg-canvas border border-line-soft rounded-xl p-4 flex items-center gap-4">

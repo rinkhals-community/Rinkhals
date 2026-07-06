@@ -8,11 +8,73 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// readCPUTimes parses the aggregate "cpu" line of /proc/stat and returns the
+// total and idle jiffie counters (idle includes iowait).
+func readCPUTimes() (total, idle int64, ok bool) {
+	data, err := ioutil.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "cpu ") {
+			continue
+		}
+		fields := strings.Fields(line)[1:] // drop the "cpu" label
+		for i, f := range fields {
+			v, err := strconv.ParseInt(f, 10, 64)
+			if err != nil {
+				continue
+			}
+			total += v
+			if i == 3 || i == 4 { // idle, iowait
+				idle += v
+			}
+		}
+		return total, idle, true
+	}
+	return 0, 0, false
+}
+
+// cpuBusyPercent samples /proc/stat twice over the given window and returns the
+// aggregate CPU busy percentage (0-100, summed across all cores).
+//
+// We report this instead of the load average on purpose. This hardware keeps
+// ~11 kernel threads (the Realtek RTL8723DS wifi driver and Rockchip media
+// stack) permanently parked in uninterruptible sleep on driver semaphores.
+// Linux counts uninterruptible tasks in the load average, so loadavg sits
+// around ~11 even when the CPU is mostly idle - it does not reflect real work.
+// CPU utilization derived from /proc/stat is immune to that inflation.
+func cpuBusyPercent(window time.Duration) (int, bool) {
+	total1, idle1, ok1 := readCPUTimes()
+	if !ok1 {
+		return 0, false
+	}
+	time.Sleep(window)
+	total2, idle2, ok2 := readCPUTimes()
+	if !ok2 {
+		return 0, false
+	}
+	dTotal := total2 - total1
+	dIdle := idle2 - idle1
+	if dTotal <= 0 {
+		return 0, false
+	}
+	busy := float64(dTotal-dIdle) / float64(dTotal) * 100
+	if busy < 0 {
+		busy = 0
+	} else if busy > 100 {
+		busy = 100
+	}
+	return int(busy + 0.5), true
+}
 
 
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -42,12 +104,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		diskUsage = int(float64(stat.Blocks-stat.Bfree) / float64(stat.Blocks) * 100)
 	}
 
-	load, _ := ioutil.ReadFile("/proc/loadavg")
-	cpuLoad := strings.Split(string(load), " ")[0]
+	cpuUsage, ok := cpuBusyPercent(250 * time.Millisecond)
+	if !ok {
+		cpuUsage = 0
+	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"uptime":    uptimeStr,
-		"cpuLoad":   cpuLoad,
+		"cpuUsage":  cpuUsage,
 		"memUsage":  memUsage,
 		"diskUsage": diskUsage,
 	})
