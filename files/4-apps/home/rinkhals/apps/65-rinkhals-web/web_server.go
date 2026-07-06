@@ -497,11 +497,22 @@ func startWebServer() {
 
 	mux.Handle("/", http.FileServer(http.FS(uiFS)))
 
-	log.Println("Starting Rinkhals Web Portal on :8090")
+	log.Println("Starting Rinkhals Web Portal on :80 (and :8090 for backward compatibility)")
 
 	handler := corsMiddleware(basicAuthMiddleware(mux))
 
-	if err := http.ListenAndServe(":8090", handler); err != nil {
-		log.Fatalf("HTTP server failed: %v", err)
+	// The portal now owns port 80, so the printer's bare IP opens it directly.
+	// This replaces the per-connection socat redirect that Mainsail/Fluidd used
+	// to point port 80 at their own web servers. We run as root, so binding the
+	// privileged port is fine. :8090 is kept for one transition cycle so existing
+	// bookmarks (and the Vite dev workflow) keep working; it can be dropped later.
+	go func() {
+		if err := http.ListenAndServe(":8090", handler); err != nil {
+			log.Printf("HTTP server on :8090 failed: %v", err)
+		}
+	}()
+
+	if err := http.ListenAndServe(":80", handler); err != nil {
+		log.Fatalf("HTTP server on :80 failed: %v", err)
 	}
 }

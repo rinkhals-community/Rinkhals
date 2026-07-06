@@ -57,12 +57,19 @@ Or:
 - Your IP should be shown here
 
 
+## The Rinkhals web portal
+
+Open your browser to http://YOUR_PRINTER_IP (the printer's bare IP) to open the Rinkhals web portal. The default login is `admin` / `rinkhals`, and you will be prompted to set your own password. From the portal dashboard you can reach Mainsail, Fluidd and the other tools.
+
 ## To use Mainsail or Fluidd, the web interfaces
 
-Open your browser to http://YOUR_PRINTER_IP to open the web interface (Mainsail by default).
-From there you'll be able to control your printer.
+Mainsail is at http://YOUR_PRINTER_IP:4409 and Fluidd (when enabled) is at http://YOUR_PRINTER_IP:4408. From there you'll be able to control your printer.
 
 Please refer to Mainsail documentation for more information: [https://docs.mainsail.xyz](https://docs.mainsail.xyz)
+
+!!! note
+
+    Earlier builds opened Mainsail directly from the bare printer IP (port 80). That address now serves the Rinkhals web portal, and Mainsail/Fluidd live on ports 4409 and 4408. If you upload from a slicer, point it at Moonraker on port 7125 (see the [OrcaSlicer guide](orca-slicer-usage.md)).
 
 
 ## To directly print from Orca or OctoApp

@@ -66,7 +66,7 @@ On the Kobra series of 3D printer, it's possible to sideload .swu files to insta
 - The printer will reboot twice and beep both times.
     - If you have a Rinkhals icon in the settings tab then Rinkhals is installed.
     - If you don't have Rinkhals icon in the settings tab:
-        - First test if Moonsail is running on `http://YOUR_PRINTER_IP` if not then the installation failed.
+        - First test if the Rinkhals web portal is running on `http://YOUR_PRINTER_IP` (default login `admin` / `rinkhals`). If it doesn't load, the installation failed.
 
 
 ## How to uninstall Rinkhals
