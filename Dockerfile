@@ -108,9 +108,14 @@ FROM golang:1.24-alpine AS build-web-backend
 COPY ./files/4-apps/home/rinkhals/apps/65-rinkhals-web /app
 COPY --from=build-web-ui /web-portal/build /app/ui
 WORKDIR /app
-RUN apk update && apk add upx
+# Not UPX-packed on purpose. UPX shrinks the binary on disk but decompresses
+# the whole image into anonymous memory at startup, which on this no-swap
+# printer pins ~8 MB of unreclaimable RAM plus a ~3.7 MB decompression buffer.
+# Leaving it unpacked keeps code/rodata file-backed (shared, reclaimable under
+# pressure): measured ~12 MB PSS packed vs ~8 MB unpacked, with pinned anon
+# memory dropping from ~8.3 MB to ~1.4 MB. The ~6 MB of extra on-disk size is
+# negligible on /useremain.
 RUN GOOS=linux GOARCH=arm go build -ldflags="-s -w" -trimpath -v -o rinkhals-web
-RUN upx --lzma rinkhals-web || true
 
 ###############################################################
 # app-mainsail prepares Mainsail app files
