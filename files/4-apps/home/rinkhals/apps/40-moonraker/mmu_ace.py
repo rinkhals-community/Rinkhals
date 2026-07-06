@@ -662,6 +662,7 @@ class MmuAceController:
         self.ace.tools = []
         self.ace.ttg_map = []
         self._invalidate_gate_cache()
+        self._last_gate_fingerprint = ""  # force status push on next _set_ace_status
         self._handle_status_update(force=True)
 
     def _handle_status_update(self, force: bool = False, throttle: bool = False):
@@ -870,7 +871,15 @@ class MmuAceController:
                 klippy_apis: KlippyAPI = self.server.lookup_component("klippy_apis")
                 result = await klippy_apis.query_objects({ "filament_hub": None })
                 if not self._has_filament_hub_data(result):
-                    self._disable_ace("filament_hub object unavailable on this printer")
+                    self._disable_ace("ACE not connected at startup — will re-enable on reconnect")
+                    try:
+                        await self.printer.subscribe_objects(
+                            {"filament_hub": None},
+                            self._handle_mmu_ace_status_update
+                        )
+                        logging.info("[mmu_ace] Subscribed to filament_hub for reconnect detection")
+                    except Exception as sub_e:
+                        logging.warning(f"[mmu_ace] Could not subscribe for reconnect detection: {sub_e}")
                     return
                 success = True
             except Exception as e:
@@ -925,7 +934,10 @@ class MmuAceController:
             return
 
         try:
-            result = await self.printer.subscribe_objects({ "filament_hub": None }, self._handle_mmu_ace_status_update)
+            result = await self.printer.subscribe_objects(
+                {"filament_hub": None},
+                self._handle_mmu_ace_status_update
+            )
         except Exception as e:
             if self._is_no_ace_error(e):
                 self._disable_ace(str(e))
@@ -984,6 +996,7 @@ class MmuAceController:
                 return
 
             if "filament_hubs" not in filament_hub:
+                # Partial update: filament_hubs unchanged, only current_filament may have changed
                 current_filament = filament_hub.get("current_filament")
 
                 if current_filament is not None:
@@ -994,6 +1007,16 @@ class MmuAceController:
                         "Ignoring partial filament_hub update without current_filament: "
                         f"{list(filament_hub.keys())}"
                     )
+                return
+
+            filament_hubs = filament_hub["filament_hubs"]
+
+            if not isinstance(filament_hubs, list):
+                # filament_hubs=null: ACE cable disconnected at runtime.
+                # GoKlipper sends filament_hubs=[...] on reconnect.
+                # subscription callback handles re-enable automatically.
+                if self.ace.enabled:
+                    self._disable_ace("ACE cable disconnected (filament_hubs=null)")
                 return
 
             # Fetch temperature info for all gates with material
@@ -1228,6 +1251,11 @@ class MmuAceController:
                 global_gate_index += 1
 
             self.ace.units.append(unit)
+
+        # Re-enable if ACE reconnected while it was disabled on the _disable_ace()
+        if ace.units and not ace.enabled:
+            logging.info("[mmu_ace] ACE reconnected — re-enabling")
+            ace.enabled = True
 
         # Restore the previous tool-to-gate map if it still matches the
         # current topology (same tool count, and every entry points at a gate
