@@ -188,6 +188,18 @@ log "Copying Rinkhals files"
 mkdir -p $TARGET_PATH
 rm -rf $TARGET_PATH/*
 cp -r $SOURCE_PATH/rinkhals/* $TARGET_PATH
+CP_STATUS=$?
+
+# A truncated/interrupted copy here (seen in the wild on a KS1: the copy
+# finished in ~1s instead of the usual ~60s, silently missing home/rinkhals
+# and usr/bin/python) would otherwise still get promoted to .version and
+# rebooted into, bricking startup in a sad-tones reboot loop with no files
+# to show for it. Bail out through the existing error path instead, before
+# .disable-rinkhals is cleared or the previous install is pruned.
+if [ "$CP_STATUS" != "0" ] || [ ! -e "$TARGET_PATH/usr/bin/python" ] || [ ! -d "$TARGET_PATH/home/rinkhals" ] || [ ! -d "$TARGET_PATH/opt/rinkhals" ]; then
+    log "Rinkhals files did not copy correctly, aborting installation"
+    quit
+fi
 
 echo $RINKHALS_VERSION > $TARGET_PATH/.version
 
