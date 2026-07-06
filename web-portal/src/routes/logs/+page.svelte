@@ -8,11 +8,15 @@
     let logContainer: HTMLElement;
 
     let activeLog = $state('/useremain/rinkhals/rinkhals.log');
+    // gklib and gkapi write their live logs to /tmp (tmpfs) under Rinkhals; the
+    // /useremain/log/*.log copies are the stock Anycubic files and go stale once
+    // Rinkhals takes over. Moonraker's path is the bind-mounted printer_data log
+    // it actively writes. Rinkhals is the persistent boot log.
     const logFiles = [
         { name: "Rinkhals", path: "/useremain/rinkhals/rinkhals.log" },
-        { name: "Klipper (gklib)", path: "/useremain/log/gklib.log" },
+        { name: "Klipper (gklib)", path: "/tmp/gklib.log" },
         { name: "Moonraker", path: "/useremain/home/rinkhals/printer_data/logs/moonraker.log" },
-        { name: "GKAPI", path: "/useremain/log/gkapi.log" }
+        { name: "GKAPI", path: "/tmp/gkapi.log" }
     ];
 
     function connectWs() {
