@@ -42,6 +42,7 @@ fi
 # Play ok jingle to notify completion
 if [ "$MUTE_SOUNDS" = "0" ]; then
     B=/sys/class/pwm/pwmchip0/pwm0
+    SAVED_P=$(cat $B/period 2>/dev/null); SAVED_D=$(cat $B/duty_cycle 2>/dev/null)
     echo 0 > $B/enable; echo 0 > $B/duty_cycle
     echo 2551000 > $B/period; echo 1020400 > $B/duty_cycle; echo 1 > $B/enable
     usleep 120000; echo 0 > $B/enable; usleep 40000
@@ -51,6 +52,8 @@ if [ "$MUTE_SOUNDS" = "0" ]; then
     echo 0 > $B/duty_cycle
     echo 1517000 > $B/period; echo 606800 > $B/duty_cycle; echo 1 > $B/enable
     usleep 180000; echo 0 > $B/enable
+    # Restore pwm0 to the state K3SysUi set so the touchscreen key sound keeps working
+    echo 0 > $B/duty_cycle; [ -n "$SAVED_P" ] && echo $SAVED_P > $B/period; [ -n "$SAVED_D" ] && echo $SAVED_D > $B/duty_cycle
 fi
 
 sync 2> /dev/null
