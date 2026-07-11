@@ -519,6 +519,40 @@ class Kobra:
         logging.info(f'[Kobra] Normalized EXCLUDE_OBJECT name: {name} -> {normalized}')
         return script_new
 
+    def _normalize_print_file_script(self, script: str) -> str:
+        if not script:
+            return script
+
+        script_stripped = script.strip()
+        if not script_stripped.upper().startswith('SDCARD_PRINT_FILE'):
+            return script
+
+        # SDCARD_PRINT_FILE only takes FILENAME, so capture the rest of the
+        # line as the value (filenames may contain spaces).
+        match = re.match(r'(SDCARD_PRINT_FILE)\s+FILENAME=(.*)$', script_stripped, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return script
+
+        cmd = match.group(1)
+        value = match.group(2).strip()
+
+        # Strip any number of balanced surrounding double-quote pairs. Some
+        # slicers (seen with OrcaSlicer 2.4.2) send the filename already
+        # wrapped in quotes, which Moonraker then wraps again, so GoKlipper
+        # receives FILENAME=""name"" and reads the leading "" as an empty
+        # value ("missing FILENAME"). A genuine escaped quote inside the name
+        # is left alone because the backslash breaks the pair test.
+        normalized = value
+        while len(normalized) >= 2 and normalized[0] == '"' and normalized[-1] == '"':
+            normalized = normalized[1:-1]
+
+        if normalized == value:
+            return script
+
+        script_new = f'{cmd} FILENAME="{normalized}"'
+        logging.info(f'[Kobra] Normalized SDCARD_PRINT_FILE filename quoting: {value} -> {normalized}')
+        return script_new
+
     def _normalize_exclude_object_status(self, exclude_status: dict, objects: List[dict]):
         if not isinstance(exclude_status, dict):
             return
@@ -1020,6 +1054,7 @@ class Kobra:
                     script = web_request.get_str('script', "")
                     if script:
                         normalized_script = self._normalize_exclude_object_script(script)
+                        normalized_script = self._normalize_print_file_script(normalized_script)
                         if normalized_script != script:
                             web_request.get_args()['script'] = normalized_script
                             script = normalized_script
@@ -1036,6 +1071,11 @@ class Kobra:
         def wrap_run_gcode(original_run_gcode: KlippyAPI.run_gcode):
             async def run_gcode(me: KlippyAPI, script: str, default: Any = Sentinel.MISSING):
                 logging.debug(f"hook on run gcode: {script}")
+
+                # Normalize here (before delegate captures script and before
+                # handle_gcode parses it) so both the delegated non-MQTT
+                # forward and the shlex-based FILENAME parse see a clean name.
+                script = self._normalize_print_file_script(script)
 
                 async def delegate_run_gcode():
                     return await original_run_gcode(me, script, default)
