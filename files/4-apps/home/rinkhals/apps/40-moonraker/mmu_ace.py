@@ -1575,6 +1575,9 @@ class MmuAcePatcher:
         # safely on the first call (reinit() runs during __init__).
         self._auto_feed_task = None
 
+        # Last mmu/mmu_machine status for diff push
+        self._last_pushed_mmu_status: dict = {}
+
         self.reinit()
 
         # mmu test enpoints
@@ -1588,7 +1591,7 @@ class MmuAcePatcher:
         self.server.register_endpoint("/server/filament_hub/set_fan_speed", ['POST'], self._handle_set_fan_speed)
 
         # mmu status update notification
-        self.server.register_notification("mmu_ace:status_update")
+        self.server.register_notification("mmu_ace:status_update", "mmu_ace_status_update")
 
         # gcode handlers
         self.register_gcode_handler("MMU_GATE_MAP", self._on_gcode_mmu_gate_map)
@@ -2382,13 +2385,21 @@ class MmuAcePatcher:
     def get_status(self) -> dict:
         return asdict(self.ace_controller.get_status())
 
-    def patch_status(self, status: dict):
+    def patch_status(self, status: dict, is_subscription_update: bool = False):
 
         mmu_status = self.get_status()
 
+        # return the full, current status
+        if not is_subscription_update:
+            for key, value in mmu_status.items():
+                status[key] = value
+            return status
+
+        # Subscription-update when changed
         for key, value in mmu_status.items():
-            status[key] = value
-        # status = self._combine(mmu_status, status)
+            if self._last_pushed_mmu_status.get(key) != value:
+                status[key] = value
+                self._last_pushed_mmu_status[key] = value
 
         return status
 

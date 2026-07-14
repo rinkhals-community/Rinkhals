@@ -722,7 +722,7 @@ class Kobra:
         )
 
 
-    def patch_status(self, status):
+    def patch_status(self, status, is_subscription_update=False):
         if self.is_goklipper_running():
 
             if 'print_stats' in status:
@@ -818,14 +818,15 @@ class Kobra:
                     self._normalize_exclude_object_status(status['exclude_object'], objects)
 
         for patcher in self.status_patchers:
-            status = patcher(status)
+            status = patcher(status, is_subscription_update)
 
         if self.is_goklipper_running():
             self._maybe_force_end_excluded_object(status)
 
         return status
 
-    def register_status_patcher(self, patcher: Callable[[dict], dict]):
+    # patcher(status: dict, is_subscription_update: bool) -> dict
+    def register_status_patcher(self, patcher: Callable[[dict, bool], dict]):
         self.status_patchers.append(patcher)
 
     def register_print_data_patcher(self, patcher: Callable[[dict], dict]):
@@ -847,7 +848,7 @@ class Kobra:
 
         def wrap_send_status(original_send_status):
             def send_status(me, status, eventtime):
-                status = self.patch_status(status)
+                status = self.patch_status(status, is_subscription_update=True)
                 return original_send_status(me, status, eventtime)
             return send_status
 
@@ -861,7 +862,7 @@ class Kobra:
 
         def wrap__process_status_update(original__process_status_update):
             def _process_status_update(me, eventtime, status):
-                status = self.patch_status(status)
+                status = self.patch_status(status, is_subscription_update=True)
                 return original__process_status_update(me, eventtime, status)
             return _process_status_update
 
@@ -1374,7 +1375,9 @@ class Kobra:
                         "bed_mesh",
                         "bed_mesh default",
                         "bed_mesh \"default\"",
-                        "idle_timeout"
+                        "idle_timeout",
+                        "mmu",
+                        "mmu_machine"
                     ]
 
                     # For KS1M: Do not expose motion_report to avoid GoKlipper panic:
