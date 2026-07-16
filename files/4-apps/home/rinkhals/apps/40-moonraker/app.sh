@@ -17,7 +17,13 @@ start() {
     cd $APP_ROOT
 
     chmod +x moonraker.sh
-    ./moonraker.sh &
+    # Detach stdin/stdout/stderr from /dev/null. moonraker.sh stays resident
+    # (its restart loop waits on Moonraker), so if it inherited this shell's
+    # fds it would hold them open. When start is invoked from the on-screen
+    # menu (rinkhals-ui.py), which captures the command's output through a
+    # pipe, that keeps the pipe's write end open and hangs the UI (a frozen
+    # touchscreen). moonraker.sh writes everything to app-moonraker.log.
+    ./moonraker.sh </dev/null >/dev/null 2>&1 &
 }
 debug() {
     stop

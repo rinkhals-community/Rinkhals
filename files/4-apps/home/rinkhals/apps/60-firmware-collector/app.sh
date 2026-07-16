@@ -31,13 +31,20 @@ start() {
     # supervisor.sh owns scheduling and stays resident (a few hundred KB while
     # it sleeps) instead of a ~14 MB Python daemon. It spawns collector.py for
     # each check, which runs ~20s and exits, freeing its memory.
+    #
+    # Detach stdin/stdout/stderr from /dev/null. supervisor.sh is long-lived,
+    # so if it inherited this shell's fds it would keep them open for hours.
+    # When start is invoked from the on-screen menu (rinkhals-ui.py), which
+    # captures the command's output through a pipe, that would leave the pipe's
+    # write end open and hang the UI (a frozen touchscreen) until the app is
+    # stopped. supervisor.sh sends its own output to app-firmware-collector.log.
     INGEST_ENDPOINT="$INGEST_ENDPOINT" \
     INTERVAL_HOURS="$INTERVAL_HOURS" \
     DRY_RUN="$DRY_RUN" \
     KOBRA_MODEL_CODE="$KOBRA_MODEL_CODE" \
     RINKHALS_VERSION="$RINKHALS_VERSION" \
     RINKHALS_LOGS="$RINKHALS_LOGS" \
-        $APP_ROOT/supervisor.sh &
+        $APP_ROOT/supervisor.sh </dev/null >/dev/null 2>&1 &
 
     echo $! > "$PIDFILE"
 }
