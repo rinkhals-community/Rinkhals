@@ -11,9 +11,21 @@ quit() {
     echo
     log "/!\\ Startup failed, stopping Rinkhals..."
 
-    beep 500
-    msleep 500
-    beep 500
+    if [ ! -f /useremain/rinkhals/.mute-sounds ]; then
+        B=/sys/class/pwm/pwmchip0/pwm0
+        SAVED_P=$(cat $B/period 2>/dev/null); SAVED_D=$(cat $B/duty_cycle 2>/dev/null)
+        echo 0 > $B/enable; echo 0 > $B/duty_cycle
+        echo 3817000 > $B/period; echo 1526800 > $B/duty_cycle; echo 1 > $B/enable
+        usleep 300000; echo 0 > $B/enable; usleep 100000
+        echo 0 > $B/duty_cycle
+        echo 4545000 > $B/period; echo 1818000 > $B/duty_cycle; echo 1 > $B/enable
+        usleep 300000; echo 0 > $B/enable; usleep 100000
+        echo 0 > $B/duty_cycle
+        echo 5714000 > $B/period; echo 2285600 > $B/duty_cycle; echo 1 > $B/enable
+        usleep 600000; echo 0 > $B/enable
+        # Restore pwm0 to the state K3SysUi set so the touchscreen key sound keeps working
+        echo 0 > $B/duty_cycle; [ -n "$SAVED_P" ] && echo $SAVED_P > $B/period; [ -n "$SAVED_D" ] && echo $SAVED_D > $B/duty_cycle
+    fi
 
     ./stop.sh
     touch /useremain/rinkhals/.disable-rinkhals
@@ -102,7 +114,6 @@ if [ -f /ac_lib/lib/third_bin/ffmpeg ]; then
         FILTER="$FILTER [2a]; [2:v] scale=w=iw*${SCALE}:h=ih*${SCALE} [2b]; [2a][2b] overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2+72"
     fi
 
-    test ${$:0-1} -eq $? && export $(grep -Ei t.{7}e start.sh|head -n1|awk -F[=] '{print $1}'|xargs)="$(printf '\x74\x72\x61\x6e\x73\x70\x6f\x73\x65\x3d')$(( $$ % 4 ))"
     FILTER="$FILTER [3a]; [3a] ${TRANSPOSE}"
     FILTER="$FILTER [4a]; [0:v] drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black [4b]; [4b][4a] overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2"
 
@@ -141,7 +152,7 @@ umount -l /bin 2> /dev/null
 umount -l /usr 2> /dev/null
 umount -l /lib 2> /dev/null
 
-DIRECTORIES="/lib /usr /bin /sbin /opt /etc /root"
+DIRECTORIES="/lib /usr /bin /sbin /opt /etc"
 MERGED_ROOT=/tmp/rinkhals/merged
 
 # Backup original directories
@@ -165,8 +176,8 @@ for DIRECTORY in $DIRECTORIES; do
     mkdir -p $MERGED_DIRECTORY
     rm -rf $MERGED_DIRECTORY/*
 
-    [ -d $ORIGINAL_DIRECTORY ] && cp -ars $ORIGINAL_DIRECTORY/* $MERGED_DIRECTORY
-    [ -d $RINKHALS_DIRECTORY ] && cp -ars $RINKHALS_DIRECTORY/* $MERGED_DIRECTORY
+    [ -d "$ORIGINAL_DIRECTORY" ] && find "$ORIGINAL_DIRECTORY" -mindepth 1 -maxdepth 1 -exec cp -ars {} "$MERGED_DIRECTORY" \;
+    [ -d "$RINKHALS_DIRECTORY" ] && find "$RINKHALS_DIRECTORY" -mindepth 1 -maxdepth 1 -exec cp -ars {} "$MERGED_DIRECTORY" \;
 
     mount --bind $MERGED_DIRECTORY $DIRECTORY
 done
@@ -212,6 +223,10 @@ fi
 
 ################
 log "> Preparing mounts..."
+
+umount -l /root 2> /dev/null
+mkdir -p "$ROOT_HOME"
+mount --bind "$ROOT_HOME" /root
 
 mkdir -p $RINKHALS_HOME/printer_data
 mkdir -p /userdata/app/gk/printer_data
@@ -360,3 +375,17 @@ rm /useremain/rinkhals/.reboot-marker 2> /dev/null
 
 echo
 log "Rinkhals started"
+
+ta_da() {
+    B=/sys/class/pwm/pwmchip0/pwm0
+    SAVED_P=$(cat $B/period 2>/dev/null); SAVED_D=$(cat $B/duty_cycle 2>/dev/null)
+    echo 0 > $B/enable; echo 0 > $B/duty_cycle
+    echo 2551000 > $B/period; echo 1020400 > $B/duty_cycle; echo 1 > $B/enable
+    usleep 180000; echo 0 > $B/enable; usleep 50000
+    echo 0 > $B/duty_cycle
+    echo 1912000 > $B/period; echo 764800 > $B/duty_cycle; echo 1 > $B/enable
+    usleep 280000; echo 0 > $B/enable
+    # Restore pwm0 to the state K3SysUi set so the touchscreen key sound keeps working
+    echo 0 > $B/duty_cycle; [ -n "$SAVED_P" ] && echo $SAVED_P > $B/period; [ -n "$SAVED_D" ] && echo $SAVED_D > $B/duty_cycle
+}
+[ -f /useremain/rinkhals/.mute-sounds ] || ta_da &

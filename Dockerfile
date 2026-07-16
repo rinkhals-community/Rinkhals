@@ -95,6 +95,29 @@ RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     rm -rf /var/lib/apt/lists/*
 
 ###############################################################
+# build-web-ui builds the Svelte UI
+FROM node:22-bookworm AS build-web-ui
+COPY ./web-portal /web-portal
+WORKDIR /web-portal
+RUN npm ci
+RUN npm run build
+
+###############################################################
+# build-web-backend builds the Go backend
+FROM golang:1.24-alpine AS build-web-backend
+COPY ./files/4-apps/home/rinkhals/apps/65-rinkhals-web /app
+COPY --from=build-web-ui /web-portal/build /app/ui
+WORKDIR /app
+# Not UPX-packed on purpose. UPX shrinks the binary on disk but decompresses
+# the whole image into anonymous memory at startup, which on this no-swap
+# printer pins ~8 MB of unreclaimable RAM plus a ~3.7 MB decompression buffer.
+# Leaving it unpacked keeps code/rodata file-backed (shared, reclaimable under
+# pressure): measured ~12 MB PSS packed vs ~8 MB unpacked, with pinned anon
+# memory dropping from ~8.3 MB to ~1.4 MB. The ~6 MB of extra on-disk size is
+# negligible on /useremain.
+RUN GOOS=linux GOARCH=arm go build -ldflags="-s -w" -trimpath -v -o rinkhals-web
+
+###############################################################
 # app-mainsail prepares Mainsail app files
 FROM build-base AS app-mainsail
 COPY ./build/4-apps/25-mainsail/* /build/
@@ -192,6 +215,17 @@ COPY ./files/4-apps /bundle/rinkhals/
 COPY ./files/*.* /bundle/
 COPY ./build/prepare-bundle.sh /build/
 
+# Clean up rinkhals-web sources from the merged bundle and inject the
+# built Svelte UI + Go backend in their place. Must run before prepare-bundle.sh
+# so the rename/patches passes see the final artifacts.
+RUN rm -rf /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/ui/* \
+    && rm -f /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/*.go \
+    && rm -f /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/go.* \
+    && rm -f /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/update-layout.js \
+    && rm -f /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
+COPY --from=build-web-ui /web-portal/build/ /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/ui/
+COPY --from=build-web-backend /app/rinkhals-web /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
+RUN chmod +x /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
 ARG version="dev"
 RUN /build/prepare-bundle.sh /bundle "$version"
 

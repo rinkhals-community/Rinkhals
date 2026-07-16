@@ -231,6 +231,101 @@ class MmuAcePartialUpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status_updates, [])
 
 
+class MmuAceDisconnectReconnectTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def setUp(self):
+        self.original_create_task = self.module.asyncio.create_task
+        self.module.asyncio.create_task = lambda coro: DummyTask(coro)
+        self.server = DummyServer()
+        self.controller = self.module.MmuAceController(self.server, host=None)
+        self.controller.ace = self.module.MmuAce()
+        self.status_updates = []
+        self.controller._handle_status_update = lambda *args, **kwargs: self.status_updates.append(kwargs)
+
+    def tearDown(self):
+        self.module.asyncio.create_task = self.original_create_task
+
+    def _build_filament_hub(self, current_filament: str = ""):
+        return {
+            "current_filament": current_filament,
+            "filament_hubs": [
+                {
+                    "id": 0,
+                    "status": "ready",
+                    "temp": 25,
+                    "slots": [
+                        {"index": 0, "status": "ready", "sku": "", "type": "PLA", "color": [255, 255, 255], "rfid": 1, "source": 2},
+                        {"index": 1, "status": "empty", "sku": "", "type": "", "color": [0, 0, 0], "rfid": 1, "source": 3},
+                        {"index": 2, "status": "empty", "sku": "", "type": "", "color": [0, 0, 0], "rfid": 1, "source": 3},
+                        {"index": 3, "status": "empty", "sku": "", "type": "", "color": [0, 0, 0], "rfid": 1, "source": 3},
+                    ],
+                }
+            ],
+        }
+
+    async def test_disconnect_disables_ace(self):
+        self.controller.ace.enabled = True
+
+        await self.controller._handle_mmu_ace_status_update(
+            {"filament_hub": {"filament_hubs": None}},
+            0.0,
+        )
+
+        self.assertFalse(self.controller.ace.enabled)
+        self.assertEqual(self.status_updates, [{"force": True}])
+
+    async def test_disconnect_when_already_disabled_is_idempotent(self):
+        self.controller.ace.enabled = False
+
+        await self.controller._handle_mmu_ace_status_update(
+            {"filament_hub": {"filament_hubs": None}},
+            0.0,
+        )
+
+        self.assertFalse(self.controller.ace.enabled)
+        self.assertEqual(self.status_updates, [])
+
+    def test_reconnect_reenables_ace_in_set_ace_status(self):
+        self.controller.ace.enabled = False
+
+        self.controller._set_ace_status(self._build_filament_hub())
+
+        self.assertTrue(self.controller.ace.enabled)
+
+    def test_set_ace_status_does_not_reenable_when_already_enabled(self):
+        self.controller.ace.enabled = True
+
+        self.controller._set_ace_status(self._build_filament_hub())
+
+        self.assertTrue(self.controller.ace.enabled)
+
+    def test_disable_ace_resets_gate_fingerprint(self):
+        self.controller._last_gate_fingerprint = "gate0:PLA|gate1:ASA"
+
+        self.controller._disable_ace("test disconnect")
+
+        self.assertEqual(self.controller._last_gate_fingerprint, "")
+
+    def test_first_status_after_reconnect_is_not_suppressed_by_dedup(self):
+        # Simulate state just before reconnect: fingerprint has stale data
+        # identical to what the ACE will report on reconnect
+        self.controller._set_ace_status(self._build_filament_hub())
+        self.status_updates.clear()
+
+        # Cable pulled — fingerprint reset, ace disabled
+        self.controller._disable_ace("cable disconnected")
+        self.status_updates.clear()
+
+        # Cable replugged — same gate data as before disconnect
+        self.controller._set_ace_status(self._build_filament_hub())
+
+        # Must push an update even though data is identical to pre-disconnect
+        self.assertEqual(self.status_updates, [{"force": True}])
+
+
 class MmuRecoverTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):

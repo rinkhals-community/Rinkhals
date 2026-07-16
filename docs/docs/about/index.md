@@ -191,9 +191,9 @@ When enabled and started and if using LAN mode, this app will send metrics to th
 
 Metrics are be collected and sent every 30s. High level system metrics are also written to the app log in `/useremain/rinkhals/.current/logs/app-monitor.log`
 
-| rinkhals-monitor | |
+| 65-rinkhals-web | |
 |-|-|
-| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/rinkhals-monitor/app.json) |
+| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/65-rinkhals-web/app.json) |
 | Default state | Disabled |
 | CPU usage | 0 ~ ? |
 | Memory usage | 6 MB |

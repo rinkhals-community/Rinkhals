@@ -158,6 +158,7 @@ class Kobra:
         self.patch_mainsail()
         self.patch_ks1m_motion_report()
         self.patch_k2p_bug()
+        self.patch_klipper_restart()
         self.patch_ace_flush_control()
 
         logging.info('Completed Kobra patching! Yay!')
@@ -516,6 +517,40 @@ class Kobra:
         replacement = f'NAME={normalized}'
         script_new = re.sub(r'NAME=("[^"]+"|\S+)', replacement, script_stripped, count=1, flags=re.IGNORECASE)
         logging.info(f'[Kobra] Normalized EXCLUDE_OBJECT name: {name} -> {normalized}')
+        return script_new
+
+    def _normalize_print_file_script(self, script: str) -> str:
+        if not script:
+            return script
+
+        script_stripped = script.strip()
+        if not script_stripped.upper().startswith('SDCARD_PRINT_FILE'):
+            return script
+
+        # SDCARD_PRINT_FILE only takes FILENAME, so capture the rest of the
+        # line as the value (filenames may contain spaces).
+        match = re.match(r'(SDCARD_PRINT_FILE)\s+FILENAME=(.*)$', script_stripped, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return script
+
+        cmd = match.group(1)
+        value = match.group(2).strip()
+
+        # Strip any number of balanced surrounding double-quote pairs. Some
+        # slicers (seen with OrcaSlicer 2.4.2) send the filename already
+        # wrapped in quotes, which Moonraker then wraps again, so GoKlipper
+        # receives FILENAME=""name"" and reads the leading "" as an empty
+        # value ("missing FILENAME"). A genuine escaped quote inside the name
+        # is left alone because the backslash breaks the pair test.
+        normalized = value
+        while len(normalized) >= 2 and normalized[0] == '"' and normalized[-1] == '"':
+            normalized = normalized[1:-1]
+
+        if normalized == value:
+            return script
+
+        script_new = f'{cmd} FILENAME="{normalized}"'
+        logging.info(f'[Kobra] Normalized SDCARD_PRINT_FILE filename quoting: {value} -> {normalized}')
         return script_new
 
     def _normalize_exclude_object_status(self, exclude_status: dict, objects: List[dict]):
@@ -1019,6 +1054,7 @@ class Kobra:
                     script = web_request.get_str('script', "")
                     if script:
                         normalized_script = self._normalize_exclude_object_script(script)
+                        normalized_script = self._normalize_print_file_script(normalized_script)
                         if normalized_script != script:
                             web_request.get_args()['script'] = normalized_script
                             script = normalized_script
@@ -1035,6 +1071,11 @@ class Kobra:
         def wrap_run_gcode(original_run_gcode: KlippyAPI.run_gcode):
             async def run_gcode(me: KlippyAPI, script: str, default: Any = Sentinel.MISSING):
                 logging.debug(f"hook on run gcode: {script}")
+
+                # Normalize here (before delegate captures script and before
+                # handle_gcode parses it) so both the delegated non-MQTT
+                # forward and the shlex-based FILENAME parse see a clean name.
+                script = self._normalize_print_file_script(script)
 
                 async def delegate_run_gcode():
                     return await original_run_gcode(me, script, default)
@@ -1345,6 +1386,36 @@ class Kobra:
         def wrap__request_standard(original__request_standard):
             async def _request_standard(me, web_request, timeout = None):
                 result = await original__request_standard(me, web_request, timeout)
+
+                if self.is_goklipper_running() and isinstance(result, dict) and 'status' in result:
+                    status = result['status']
+
+                    # Normalise heaters.available_monitors / .available_sensors
+                    # to lists. GoKlipper returns these as JSON null when the
+                    # respective collection is empty, rather than as []. Upstream
+                    # Moonraker's data_store._init_sensors does:
+                    #   self.temp_monitors = heaters.get("available_monitors", [])
+                    #   sensors.extend(self.temp_monitors)
+                    # dict.get(key, default) only substitutes the default when
+                    # the key is ABSENT; an explicit null returns None, and
+                    # sensors.extend(None) raises
+                    #   TypeError: 'NoneType' object is not iterable
+                    # The exception aborts _init_sensors before it issues the
+                    # heater subscription, which leaves the data store with no
+                    # source of temperature deltas. Every subsequent client
+                    # that subscribes to status updates then waits indefinitely
+                    # for status pushes that never come, which surfaces as
+                    # Mainsail/Fluidd hanging permanently after a RESTART or
+                    # FIRMWARE_RESTART (issue #32). Upstream Klipper either
+                    # omits the key or returns [], so this latent bug never
+                    # fires on real Klipper - normalising here keeps the
+                    # response shape consistent with what upstream expects.
+                    if 'heaters' in status and isinstance(status['heaters'], dict):
+                        heaters = status['heaters']
+                        for k in ('available_monitors', 'available_sensors', 'available_heaters'):
+                            if k in heaters and heaters[k] is None:
+                                heaters[k] = []
+
                 if self.is_goklipper_running() and 'status' in result and 'configfile' in result['status']:
                     configfile = result['status']['configfile']
 
@@ -1438,6 +1509,9 @@ class Kobra:
         On every other model this whole method is a no-op: GoKlipper's
         motion_report works fine outside KS1M.
         """
+        if self.KOBRA_MODEL_CODE != 'KS1M':
+            return
+
         from .klippy_connection import KlippyConnection
         import math
 
@@ -1583,6 +1657,63 @@ class Kobra:
         setattr(KlippyConnection, '_process_status_update',
                 wrap__process_status_update(KlippyConnection._process_status_update))
         logging.debug(f'  After: {KlippyConnection._process_status_update}')
+
+    def patch_klipper_restart(self):
+        """
+        Intercept FIRMWARE_RESTART and RESTART.
+
+        GoKlipper's implementation of both gcodes deadlocks gklib internally:
+        the command is accepted, gklib logs `web hook do script: FIRMWARE_RESTART`,
+        and then gklib stops processing entirely. There are no further log
+        entries, no MCU reconnection, nothing. Moonraker's klippy_state stays
+        on `startup` indefinitely. Every klippy-touching RPC returns
+        "Method not found" until the printer is power-cycled (issue #32).
+
+        Because the deadlock is inside gklib itself - not in Moonraker, not in
+        our patches - there is no client-side recovery short of a full restart
+        of gklib. Killing gklib would let appCheck.sh respawn it but with the
+        stock printer.cfg (Rinkhals lives in rinkhals_gklib.cfg), which would
+        silently disable the Rinkhals layer until the next reboot.
+
+        The safest thing we can do is to refuse the command entirely so we
+        don't trigger the deadlock in the first place. Mainsail/Fluidd users
+        get an explanatory line in their console; the printer stays usable.
+
+        If they need to apply printer.cfg changes, a power-cycle is the
+        documented workaround. (`SHUTDOWN_MACHINE` or
+        `REBOOT_MACHINE` via the touch panel / power button still work.)
+
+        When stock Klipper is running we forward normally - this only fires
+        on GoKlipper.
+        """
+        async def handle_klipper_restart(args, delegate_run_gcode):
+            if not self.is_goklipper_running():
+                return await delegate_run_gcode()
+
+            message = (
+                '!! RESTART / FIRMWARE_RESTART is not supported on GoKlipper. '
+                'The command deadlocks gklib until the printer is power-cycled '
+                '(Rinkhals issue #32). To apply printer.cfg changes, reboot the '
+                'printer from the touch panel or power-cycle it.'
+            )
+            logging.warning('[Kobra] Refused RESTART/FIRMWARE_RESTART: %s', message)
+
+            # Surface the explanation in the Mainsail / Fluidd console.
+            # gcode_response is the standard channel for this kind of message;
+            # the leading '!!' makes Mainsail render it as a warning line.
+            try:
+                self.server.send_event(
+                    'server:gcode_response',
+                    message
+                )
+            except Exception as e:
+                logging.warning(f'[Kobra] Could not emit gcode_response: {e!r}')
+
+            return None
+
+        logging.info('> Patching FIRMWARE_RESTART / RESTART...')
+        self.register_gcode_handler('FIRMWARE_RESTART', handle_klipper_restart)
+        self.register_gcode_handler('RESTART', handle_klipper_restart)
 
     def patch_k2p_bug(self):
         from .klippy_apis import KlippyAPI

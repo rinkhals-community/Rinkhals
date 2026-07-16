@@ -3,6 +3,8 @@ export RINKHALS_VERSION=$(cat $RINKHALS_ROOT/.version)
 export RINKHALS_HOME=/useremain/home/rinkhals
 export RINKHALS_LOGS=/tmp/rinkhals
 
+export ROOT_HOME=/useremain/home/root
+
 export KOBRA_MODEL_ID=$(cat /userdata/app/gk/config/api.cfg | sed -nr 's/.*"modelId"\s*:\s*"([0-9]+)".*/\1/p')
 
 if [ "$KOBRA_MODEL_ID" == "20021" ]; then
@@ -39,10 +41,11 @@ beep() {
     echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
 }
 log() {
-    echo "${*}"
+    TS=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$TS]: ${*}"
 
     mkdir -p $RINKHALS_LOGS
-    echo "$(date): ${*}" >> $RINKHALS_LOGS/rinkhals.log
+    echo "[$TS]: ${*}" >> $RINKHALS_LOGS/rinkhals.log
 }
 quit() {
     exit 1
@@ -56,6 +59,7 @@ check_compatibility() {
 }
 is_supported_firmware() {
     SUPPORTED=0
+    [ "$KOBRA_MODEL_CODE" = "KS1M" ] && [ "$KOBRA_VERSION" = "2.7.1.4" ] && SUPPORTED=1
     [ "$KOBRA_MODEL_CODE" = "KS1M" ] && [ "$KOBRA_VERSION" = "2.6.9.6" ] && SUPPORTED=1
     [ "$KOBRA_MODEL_CODE" = "KS1M" ] && [ "$KOBRA_VERSION" = "2.6.9.3" ] && SUPPORTED=1
     [ "$KOBRA_MODEL_CODE" = "KS1M" ] && [ "$KOBRA_VERSION" = "2.6.6" ] && SUPPORTED=1
@@ -83,18 +87,35 @@ is_supported_firmware() {
     echo $SUPPORTED
 }
 
+get_swu_password() {
+    # Per-model SWU encryption password. Must match the stock firmware password
+    # for that model. The same table lives in build/prepare-version.sh
+    # (get_printer_swu_password) and opt/rinkhals/ui/common.py (extract_swu);
+    # keep all three in sync.
+    case "${1:-$KOBRA_MODEL_CODE}" in
+        K2P|K3|K3V2) echo "U2FsdGVkX19deTfqpXHZnB5GeyQ/dtlbHjkUnwgCi+w=" ;;
+        KS1|KS1M)    echo "U2FsdGVkX1+lG6cHmshPLI/LaQr9cZCjA8HZt6Y8qmbB7riY" ;;
+        K3M)         echo "4DKXtEGStWHpPgZm8Xna9qluzAI8VJzpOsEIgd8brTLiXs8fLSu3vRx8o7fMf4h6" ;;
+    esac
+}
 install_swu() {
     SWU_FILE=$(realpath $1)
     shift
 
     echo "> Extracting $SWU_FILE ..."
 
+    SWU_PASSWORD=$(get_swu_password)
+    if [ -z "$SWU_PASSWORD" ]; then
+        echo "> Unknown printer model ($KOBRA_MODEL_CODE); cannot determine SWU password"
+        return 1
+    fi
+
     mkdir -p /useremain/update_swu
     rm -rf /useremain/update_swu/*
 
     cd /useremain/update_swu
 
-    unzip -P U2FsdGVkX19deTfqpXHZnB5GeyQ/dtlbHjkUnwgCi+w= $SWU_FILE -d /useremain
+    unzip -P "$SWU_PASSWORD" $SWU_FILE -d /useremain
     if [ -f /useremain/update_swu/setup.tar.gz ]; then
         tar -xzf /useremain/update_swu/setup.tar.gz -C /useremain/update_swu
     elif [ -f /useremain/update_swu/setup.tar ]; then
