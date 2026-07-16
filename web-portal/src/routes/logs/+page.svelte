@@ -7,13 +7,17 @@
     let autoScroll = $state(true);
     let logContainer: HTMLElement;
 
-    let activeLog = $state('/useremain/rinkhals/rinkhals.log');
-    // gklib and gkapi write their live logs to /tmp (tmpfs) under Rinkhals; the
-    // /useremain/log/*.log copies are the stock Anycubic files and go stale once
-    // Rinkhals takes over. Moonraker's path is the bind-mounted printer_data log
-    // it actively writes. Rinkhals is the persistent boot log.
+    let activeLog = $state('/tmp/rinkhals/rinkhals.log');
+    // These are the live logs the running processes actually write, all under
+    // RINKHALS_LOGS=/tmp/rinkhals (tmpfs) except Moonraker:
+    //  - Rinkhals: tools.sh log() appends to /tmp/rinkhals/rinkhals.log for the
+    //    whole session. (/useremain/rinkhals/rinkhals.log is only the early boot
+    //    loader stub, written before tools.sh and then frozen, so it goes stale.)
+    //  - gklib/gkapi: live logs in /tmp; the /useremain/log/*.log copies are the
+    //    stock Anycubic files and go stale once Rinkhals takes over.
+    //  - Moonraker: the bind-mounted printer_data log it actively writes.
     const logFiles = [
-        { name: "Rinkhals", path: "/useremain/rinkhals/rinkhals.log" },
+        { name: "Rinkhals", path: "/tmp/rinkhals/rinkhals.log" },
         { name: "Klipper (gklib)", path: "/tmp/gklib.log" },
         { name: "Moonraker", path: "/useremain/home/rinkhals/printer_data/logs/moonraker.log" },
         { name: "GKAPI", path: "/tmp/gkapi.log" }
