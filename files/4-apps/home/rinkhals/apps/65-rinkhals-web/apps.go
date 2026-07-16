@@ -449,10 +449,20 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 
 	case sub == "enable" && r.Method == "POST":
-		runAppHelper(w, "enable_app", id)
+		// Enable is imperative: flip the flag AND start the app now. The
+		// start.sh app loop only reconciles enabled/disabled state at boot,
+		// so without starting here the app would not run until a reboot.
+		// Mirrors the catalog install path (enable_app && start_app).
+		q := shellQuote(id)
+		runAppCmd(w, fmt.Sprintf("enable_app %s && start_app %s", q, q))
 
 	case sub == "disable" && r.Method == "POST":
-		runAppHelper(w, "disable_app", id)
+		// Disable is imperative: flip the flag AND stop the running process
+		// now. disable_app only clears the flag; nothing reconciles at
+		// runtime, so a disabled app would otherwise keep running (and
+		// holding its RAM) until the next reboot.
+		q := shellQuote(id)
+		runAppCmd(w, fmt.Sprintf("disable_app %s && stop_app %s", q, q))
 
 	case sub == "action" && r.Method == "POST":
 		var req struct {
