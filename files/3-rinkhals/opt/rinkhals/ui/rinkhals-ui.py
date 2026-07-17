@@ -1300,6 +1300,33 @@ class RinkhalsUiApp(BaseApp):
             self.modal_store_install.button_done.add_flag(lv.OBJ_FLAG.HIDDEN)
             self.modal_store_install.button_done.add_event_cb(lambda e: self.hide_modal(), lv.EVENT_CODE.CLICKED, None)
 
+    def fetch_store_manifest(self, app_dir, ref, api_headers):
+        # Read the manifest at the release tag first so the version we show is
+        # the one bundled in the installable SWU. Apps added after the release
+        # won't exist at the tag, so fall back to the branch for display.
+        import requests
+        refs = [ref] + ([self.APP_STORE_BRANCH] if ref != self.APP_STORE_BRANCH else [])
+        for r in refs:
+            try:
+                url = f'https://raw.githubusercontent.com/{self.APP_STORE_REPO}/{r}/apps/{app_dir}/app.json'
+                resp = requests.get(url, headers=api_headers, timeout=5)
+                if resp.status_code == 200:
+                    return json.loads(resp.text, cls=JSONWithCommentsDecoder)
+            except Exception:
+                pass
+        return {}
+
+    def installed_app_version(self, app_dir):
+        # Returns (version, is_installed) for a locally installed app.
+        path = f'{RINKHALS_HOME}/apps/{app_dir}/app.json'
+        if not os.path.exists(path):
+            return '', False
+        try:
+            with open(path) as f:
+                return (json.load(f, cls=JSONWithCommentsDecoder).get('version') or ''), True
+        except Exception:
+            return '', True
+
     def show_app_store(self):
         if self.screen_store.panel_apps:
             self.screen_store.panel_apps.delete()
@@ -1329,6 +1356,17 @@ class RinkhalsUiApp(BaseApp):
                 entries = response.json()
                 app_dirs = [e for e in entries if e.get('type') == 'dir']
 
+                # Resolve the latest release tag and read manifests from it, so
+                # the versions shown match the SWUs that will install (branch
+                # HEAD can be ahead of the released build).
+                manifest_ref = self.APP_STORE_BRANCH
+                try:
+                    rel_resp = requests.get(f'https://api.github.com/repos/{self.APP_STORE_REPO}/releases/latest', headers=api_headers, timeout=10)
+                    if rel_resp.status_code == 200:
+                        manifest_ref = rel_resp.json().get('tag_name') or self.APP_STORE_BRANCH
+                except Exception:
+                    pass
+
                 with lvr.lock():
                     label_loading.add_flag(lv.OBJ_FLAG.HIDDEN)
 
@@ -1337,19 +1375,12 @@ class RinkhalsUiApp(BaseApp):
                     if not app_dir:
                         continue
 
-                    manifest_url = f'https://raw.githubusercontent.com/{self.APP_STORE_REPO}/{self.APP_STORE_BRANCH}/apps/{app_dir}/app.json'
-                    try:
-                        manifest_response = requests.get(manifest_url, headers=api_headers, timeout=5)
-                        if manifest_response.status_code == 200:
-                            app_manifest = json.loads(manifest_response.text, cls=JSONWithCommentsDecoder)
-                        else:
-                            app_manifest = {}
-                    except Exception:
-                        app_manifest = {}
+                    app_manifest = self.fetch_store_manifest(app_dir, manifest_ref, api_headers)
 
                     app_name = app_manifest.get('name') or app_dir
                     app_version = app_manifest.get('version') or ''
-                    is_installed = os.path.exists(f'{RINKHALS_HOME}/apps/{app_dir}/app.json')
+                    installed_version, is_installed = self.installed_app_version(app_dir)
+                    update_available = bool(is_installed and installed_version and app_version and installed_version != app_version)
 
                     with lvr.lock():
                         panel_app = lvr.panel(self.screen_store.panel_apps)
@@ -1372,7 +1403,7 @@ class RinkhalsUiApp(BaseApp):
                             label_installed = lvr.subtitle(panel_app)
                             label_installed.set_align(lv.ALIGN.RIGHT_MID)
                             label_installed.set_style_text_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
-                            label_installed.set_text('Installed')
+                            label_installed.set_text('Update' if update_available else 'Installed')
 
             except Exception as ex:
                 logging.error(f'App store fetch failed: {ex}')
@@ -1387,15 +1418,29 @@ class RinkhalsUiApp(BaseApp):
         app_name = app_manifest.get('name') or app_dir
         app_version = app_manifest.get('version') or ''
         app_description = app_manifest.get('description') or ''
-        is_installed = os.path.exists(f'{RINKHALS_HOME}/apps/{app_dir}/app.json')
+        installed_version, is_installed = self.installed_app_version(app_dir)
+        update_available = bool(is_installed and installed_version and app_version and installed_version != app_version)
 
         self.screen_store_app.label_title.set_text(ellipsis(app_name, 24))
-        self.screen_store_app.label_version.set_text(f'Version: {app_version}' if app_version else '')
+        if update_available:
+            self.screen_store_app.label_version.set_text(f'Version: {installed_version} -> {app_version}')
+        else:
+            self.screen_store_app.label_version.set_text(f'Version: {app_version}' if app_version else '')
         self.screen_store_app.label_description.set_text(app_description)
 
         self.screen_store_app.button_action.clear_event_cb()
 
-        if is_installed:
+        if update_available:
+            # Single action button, so Update takes priority over Remove while an
+            # update is pending. Reinstalling the SWU upgrades in place; the
+            # button reverts to Remove once installed == available.
+            self.screen_store_app.button_action.set_text('Update')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, d=app_dir, n=app_name: self.install_store_app(d, n),
+                lv.EVENT_CODE.CLICKED, None
+            )
+        elif is_installed:
             self.screen_store_app.button_action.set_text('Remove')
             self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
             self.screen_store_app.button_action.add_event_cb(
