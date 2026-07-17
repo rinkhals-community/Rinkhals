@@ -12,6 +12,10 @@ type HookTarget struct {
 	ThisInstructions       []uint32
 	IsS1Mode               bool
 	S1RowRegister          string
+	// CaseBody is set when Address points directly at the row-3 (Service
+	// Support) case body of a jump-table dispatch. The row is already selected,
+	// so the payload needs no row guard (and no setCurrentIndex re-dispatch).
+	CaseBody bool
 }
 
 // FindHookTargets generically discovers all valid UI hook injection sites
@@ -28,6 +32,11 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 	}
 
 	var results []*HookTarget
+	// Jump-table case-body hooks are the correct strategy for modern S1 firmware;
+	// when we find one we use ONLY it and ignore any guard-path matches (e.g. a
+	// vestigial General-page callback that still exists but no longer hosts the
+	// Service Support row). create-patch.py likewise hooks exactly one callback.
+	var caseBodyResults []*HookTarget
 
 	displayStatusBar, _, _ := p.FindSymbol("_ZN10MainWindow24BottomStatusBarUiDisplayEh")
 	if displayStatusBar == 0 {
@@ -54,6 +63,27 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 		}
 
 		s := NewScanner(p.fileData)
+
+		// Newer S1 firmware (KS1 2.7.0.7+, all KS1M 2.6.6+) dispatches the tapped
+		// row through a jump table. Prefer hooking the row-3 (Service Support)
+		// case body directly - no row guard - which is the correct strategy for
+		// these builds (the guard/bl-scan path below mis-fires on them, the KS1M
+		// #53 bug). Only falls through to the guard path if no jump table exists.
+		if isS1 {
+			if caseAddr, retAddr, ok := p.findJumpTableCaseBody(callbackAddr, callbackSize, 3); ok {
+				this := p.thisFromStackStore(offset)
+				if len(this) > 0 {
+					caseBodyResults = append(caseBodyResults, &HookTarget{
+						Address:          caseAddr,
+						ReturnAddress:    retAddr,
+						ThisInstructions: this,
+						IsS1Mode:         true,
+						CaseBody:         true,
+					})
+					continue
+				}
+			}
+		}
 
 		var patchJumpAddress uint64
 		var patchReturnAddress uint64
@@ -133,6 +163,11 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 				})
 			}
 		}
+	}
+
+	// A jump-table case-body hook, when present, is the authoritative one.
+	if len(caseBodyResults) > 0 {
+		return caseBodyResults, nil
 	}
 
 	if len(results) == 0 {

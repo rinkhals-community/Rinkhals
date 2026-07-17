@@ -37,7 +37,7 @@ func (p *Patcher) EmitSystemCall(address, stringAddr, systemAddr uint64) (uint64
 
 // BuildPayload writes the main hook assembly logic into the free space
 // and returns the starting address of the hook.
-func (p *Patcher) BuildPayload(space *PayloadSpace, returnAddr uint64, isS1 bool, s1RowRegister string, thisInstructions []uint32, setCurrentIndexAddress uint64) (uint64, error) {
+func (p *Patcher) BuildPayload(space *PayloadSpace, returnAddr uint64, isS1 bool, s1RowRegister string, thisInstructions []uint32, setCurrentIndexAddress uint64, caseBody bool) (uint64, error) {
 	system, _, err := p.FindSymbol("system")
 	if system == 0 {
 		system = p.FindPltSymbol("system")
@@ -67,15 +67,21 @@ func (p *Patcher) BuildPayload(space *PayloadSpace, returnAddr uint64, isS1 bool
 	}
 
 	address := space.AssemblyStart
+	var off uint64
 
-	// Push r0, r1 tightly (r0 is QStackedWidget*, r1 is index)
-	// e92d0003 = push {r0, r1}
-	off, _ := p.AddrToOffset(address)
-	p.Write32(off, 0xe92d0003)
-	address += 4
+	// Case-body hooks land inside the single row-3 case with nothing live to
+	// preserve; only the guard path pushes r0/r1 so it can re-dispatch other rows.
+	if !caseBody {
+		// Push r0, r1 tightly (r0 is QStackedWidget*, r1 is index)
+		// e92d0003 = push {r0, r1}
+		off, _ = p.AddrToOffset(address)
+		p.Write32(off, 0xe92d0003)
+		address += 4
+	}
 
-	// If we are on KS1 / KS1M, check the row index
-	if isS1 {
+	// If we are on KS1 / KS1M, check the row index. A case-body hook is already
+	// inside the row-3 case, so it needs no guard.
+	if isS1 && !caseBody {
 		// mov r0, r4
 		off, _ = p.AddrToOffset(address)
 		p.Write32(off, MovReg_Reg(0, 4))
@@ -194,9 +200,13 @@ func (p *Patcher) BuildPayload(space *PayloadSpace, returnAddr uint64, isS1 bool
 		p.Write32(off+4, BranchLink(address+4, acDisplayWaitHide))
 		address += 8
 	}
-	off, _ = p.AddrToOffset(address)
-	p.Write32(off, 0xe8bd0003)
-	address += 4
+	// Balance the push {r0, r1} from the guard path. Case-body hooks never
+	// pushed, so must not pop.
+	if !caseBody {
+		off, _ = p.AddrToOffset(address)
+		p.Write32(off, 0xe8bd0003)
+		address += 4
+	}
 
 	// Branch back to return address
 	off, _ = p.AddrToOffset(address)

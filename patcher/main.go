@@ -91,7 +91,7 @@ func main() {
 			log.Printf("Found Hook Injection Site at 0x%x", hookInfo.Address)
 
 			// Step 4: Generate Payload & Branches
-			payloadStart, err := p.BuildPayload(space, hookInfo.ReturnAddress, hookInfo.IsS1Mode, hookInfo.S1RowRegister, hookInfo.ThisInstructions, hookInfo.SetCurrentIndexAddress)
+			payloadStart, err := p.BuildPayload(space, hookInfo.ReturnAddress, hookInfo.IsS1Mode, hookInfo.S1RowRegister, hookInfo.ThisInstructions, hookInfo.SetCurrentIndexAddress, hookInfo.CaseBody)
 			if err != nil {
 				log.Fatalf("Failed to build assembly payload: %v", err)
 			}
