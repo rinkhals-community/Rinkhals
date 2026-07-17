@@ -237,8 +237,10 @@ COPY --from=build-web-ui /web-portal/build/ /bundle/rinkhals/home/rinkhals/apps/
 COPY --from=build-web-backend /app/rinkhals-web /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
 RUN chmod +x /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
 
-# Remove the old static patches logic entirely since we use the native dynamic patcher
-RUN rm -rf /bundle/rinkhals/opt/rinkhals/patches /bundle/rinkhals/opt/rinkhals/scripts/create-patch.py /bundle/rinkhals/opt/rinkhals/scripts/factory_mode_patch.py
+# Hybrid patching: keep the verified static patches in the bundle (start.sh
+# prefers them per model/version) and ship the dynamic patcher as the fallback
+# for firmware we don't have a static patch for. So we do NOT strip the patches
+# directory or create-patch.py here.
 
 # Rename busybox (to avoid conflict with stock) and update all symlinks
 RUN <<EOT

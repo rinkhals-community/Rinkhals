@@ -276,29 +276,41 @@ export LD_LIBRARY_PATH=/userdata/app/gk:$LD_LIBRARY_PATH
 TARGETS="gkapi K3SysUi"
 
 for TARGET in $TARGETS; do
+    # Hybrid patching:
+    #  - Prefer the verified, MD5-guarded static patch for this exact model/version
+    #    (known-good, hand-verified per firmware build).
+    #  - Fall back to the dynamic patcher only when we don't ship a static patch
+    #    for the running firmware (e.g. a brand-new Anycubic release).
+    TARGET_PATCH=/opt/rinkhals/patches/${TARGET}.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh
     PATCHER_BIN="/opt/rinkhals/bin/rinkhals-patcher"
 
-    if [ -f "$PATCHER_BIN" ]; then
-        # Little dance to patch binaries
-        # We should be able to delete the file after starting it, Linux will keep the inode alive until the process exits (https://stackoverflow.com/a/196910)
-        # But those binaries checks for their location, so moving does the trick instead
-        # Then directly restore the original file to keep everything tidy
+    if [ ! -f "$TARGET_PATCH" ] && [ ! -f "$PATCHER_BIN" ]; then
+        continue
+    fi
 
-        rm -rf $TARGET.original 2> /dev/null
-        mv $TARGET $TARGET.original
-        cp $TARGET.original $TARGET
-        
+    # Little dance to patch binaries
+    # We should be able to delete the file after starting it, Linux will keep the inode alive until the process exits (https://stackoverflow.com/a/196910)
+    # But those binaries checks for their location, so moving does the trick instead
+    # Then directly restore the original file to keep everything tidy
+    rm -rf $TARGET.original 2> /dev/null
+    mv $TARGET $TARGET.original
+    cp $TARGET.original $TARGET
+
+    if [ -f "$TARGET_PATCH" ]; then
+        # Verified static patch (self-guards on MD5; leaves the copy unpatched on mismatch)
+        $TARGET_PATCH $TARGET &> /dev/null
+    else
+        # Dynamic fallback for firmware without a static patch
         $PATCHER_BIN --binary $TARGET > /tmp/rinkhals-patcher-$TARGET.log 2>&1
-        
         if [ -f "${TARGET}.patched" ]; then
             mv ${TARGET}.patched $TARGET
         else
-            echo "Warning: failed to patch $TARGET" >> /tmp/rinkhals-patcher-$TARGET.log
+            echo "Warning: dynamic patch failed for $TARGET" >> /tmp/rinkhals-patcher-$TARGET.log
             mv $TARGET.original $TARGET
         fi
-
-        chmod +x $TARGET
     fi
+
+    chmod +x $TARGET
 done
 
 # Tweak processes priority to avoid MCU timing and more generally priting errors. (https://github.com/rinkhals-community/Rinkhals/issues/128)
