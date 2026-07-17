@@ -198,10 +198,14 @@ type ghRelease struct {
 	Assets  []ghReleaseAsset `json:"assets"`
 }
 
-// fetchManifest pulls apps/<name>/app.json from raw.githubusercontent.com.
+// fetchManifest pulls apps/<name>/app.json from raw.githubusercontent.com at
+// the given git ref (branch or tag). Empty ref falls back to catalogBranch.
 // raw isn't rate-limited so we hammer it freely.
-func fetchManifest(appName string) (*AppManifest, error) {
-	url := fmt.Sprintf("%s/%s/apps/%s/app.json", catalogRawBase, catalogBranch, appName)
+func fetchManifest(appName, ref string) (*AppManifest, error) {
+	if ref == "" {
+		ref = catalogBranch
+	}
+	url := fmt.Sprintf("%s/%s/apps/%s/app.json", catalogRawBase, ref, appName)
 	var m AppManifest
 	if err := httpGetJSON(url, &m); err != nil {
 		return nil, err
@@ -312,7 +316,15 @@ func rebuildCatalog() (*Catalog, error) {
 		if e.Type != "dir" {
 			continue
 		}
-		m, err := fetchManifest(e.Name)
+		// Read the manifest from the same point the installable SWU was built
+		// (the latest release tag) so the displayed version matches what will
+		// actually install. Apps with no release asset for this model are not
+		// installable, so they fall back to the branch HEAD manifest for display.
+		ref := catalogBranch
+		if _, ok := assetByApp[e.Name]; ok && rel.TagName != "" {
+			ref = rel.TagName
+		}
+		m, err := fetchManifest(e.Name, ref)
 		if err != nil {
 			// One bad manifest shouldn't take down the catalog; surface a stub.
 			apps = append(apps, CatalogApp{
