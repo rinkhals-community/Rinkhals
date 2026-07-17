@@ -232,22 +232,39 @@ class RinkhalsUiApp(BaseApp):
 
         if self.screen_main:
             self.screen_main.set_flex_flow(lv.FLEX_FLOW.COLUMN)
-            self.screen_main.set_flex_align(lv.FLEX_ALIGN.START, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
+            self.screen_main.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
             self.screen_main.set_style_pad_row(lvr.get_global_margin(), lv.STATE.DEFAULT)
 
-            button_apps = lvr.button(self.screen_main)
-            button_apps.set_width(lv.pct(100))
+            # Top row: Manage apps | App Store
+            panel_row1 = lvr.panel(self.screen_main, flex_flow=lv.FLEX_FLOW.ROW)
+            panel_row1.set_width(lv.pct(100))
+            panel_row1.set_style_pad_column(lvr.get_global_margin(), lv.STATE.DEFAULT)
+            panel_row1.set_style_pad_all(0, lv.STATE.DEFAULT)
+
+            button_apps = lvr.button(panel_row1)
+            button_apps.set_flex_grow(1)
             button_apps.set_text('Manage apps')
             button_apps.add_event_cb(lambda e: self.show_screen(self.screen_apps), lv.EVENT_CODE.CLICKED, None)
-            
-            button_ota = lvr.button(self.screen_main)
-            button_ota.set_width(lv.pct(100))
-            button_ota.set_text('Install & Updates')
+
+            button_store = lvr.button(panel_row1)
+            button_store.set_flex_grow(1)
+            button_store.set_text('App Store')
+            button_store.add_event_cb(lambda e: self.show_screen(self.screen_store), lv.EVENT_CODE.CLICKED, None)
+
+            # Bottom row: Updates | Settings
+            panel_row2 = lvr.panel(self.screen_main, flex_flow=lv.FLEX_FLOW.ROW)
+            panel_row2.set_width(lv.pct(100))
+            panel_row2.set_style_pad_column(lvr.get_global_margin(), lv.STATE.DEFAULT)
+            panel_row2.set_style_pad_all(0, lv.STATE.DEFAULT)
+
+            button_ota = lvr.button(panel_row2)
+            button_ota.set_flex_grow(1)
+            button_ota.set_text('Updates')
             button_ota.add_event_cb(lambda e: self.show_screen(self.screen_ota), lv.EVENT_CODE.CLICKED, None)
 
-            button_settings = lvr.button(self.screen_main)
-            button_settings.set_width(lv.pct(100))
-            button_settings.set_text('Advanced settings')
+            button_settings = lvr.button(panel_row2)
+            button_settings.set_flex_grow(1)
+            button_settings.set_text('Settings')
             button_settings.set_style_text_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
             button_settings.add_event_cb(lambda e: self.show_screen(self.screen_advanced), lv.EVENT_CODE.CLICKED, None)
 
@@ -430,12 +447,42 @@ class RinkhalsUiApp(BaseApp):
                 icon_back.add_event_cb(lambda e: self.show_screen(self.screen_main), lv.EVENT_CODE.CLICKED, None)
                 
                 title = lvr.title(title_bar)
-                title.set_text('Advanced settings')
+                title.set_text('Settings')
                 title.center()
 
                 panel_buttons = lvr.panel(self.screen_advanced, flex_flow=lv.FLEX_FLOW.COLUMN)
                 panel_buttons.set_size(lv.pct(100), lv.pct(100))
-                
+
+                MUTE_SOUNDS_FILE = '/useremain/rinkhals/.mute-sounds'
+
+                panel_sounds = lvr.panel(panel_buttons)
+                panel_sounds.set_width(lv.pct(100))
+                panel_sounds.set_style_pad_all(0, lv.STATE.DEFAULT)
+
+                label_sounds = lvr.button(panel_sounds)
+                label_sounds.set_width(lv.pct(100))
+                label_sounds.set_text('Sounds')
+                label_sounds.set_style_pad_left(lv.dpx(15), lv.STATE.DEFAULT)
+                label_sounds.set_style_pad_right(lv.dpx(4), lv.STATE.DEFAULT)
+                label_sounds.set_style_text_align(lv.TEXT_ALIGN.LEFT, lv.STATE.DEFAULT)
+
+                checkbox_sounds = lvr.checkbox(panel_sounds)
+                checkbox_sounds.align(lv.ALIGN.RIGHT_MID, -lv.dpx(5), 0)
+                checkbox_sounds.set_checked(not os.path.exists(MUTE_SOUNDS_FILE))
+
+                def toggle_sounds(e, checkbox=checkbox_sounds):
+                    try:
+                        if os.path.exists(MUTE_SOUNDS_FILE):
+                            os.remove(MUTE_SOUNDS_FILE)
+                        else:
+                            open(MUTE_SOUNDS_FILE, 'wb').close()
+                    except OSError as ex:
+                        logging.error('Failed to toggle sounds: %s', ex)
+                    checkbox.set_checked(not os.path.exists(MUTE_SOUNDS_FILE))
+
+                checkbox_sounds.add_event_cb(toggle_sounds, lv.EVENT_CODE.CLICKED, None)
+                label_sounds.add_event_cb(toggle_sounds, lv.EVENT_CODE.CLICKED, None)
+
                 button_reboot = lvr.button(panel_buttons)
                 button_reboot.set_width(lv.pct(100))
                 button_reboot.set_text('Reboot printer')
@@ -463,6 +510,8 @@ class RinkhalsUiApp(BaseApp):
             self.layout_ota_rinkhals()
         with lvr.lock():
             self.layout_ota_firmware()
+        with lvr.lock():
+            self.layout_app_store()
 
         with lvr.lock():
             self.modal_selection = lvr.modal(self.root_modal)
@@ -479,10 +528,13 @@ class RinkhalsUiApp(BaseApp):
                 self.modal_text_input.panel_content = None
 
     def show_screen(self, screen):
+        if screen is None:
+            return
         super().show_screen(screen)
 
         if screen == self.screen_main: self.show_main()
         elif screen == self.screen_apps: self.show_apps()
+        elif screen == self.screen_store: self.show_app_store()
     def show_main(self):
         self.screen_logo.label_model.set_text(f'Model: {KOBRA_MODEL}')
         self.screen_logo.label_firmware.set_text(f'Firmware: {KOBRA_VERSION}')
@@ -542,7 +594,14 @@ class RinkhalsUiApp(BaseApp):
 
                 checkbox_app = lvr.checkbox(panel_app)
                 checkbox_app.align(lv.ALIGN.RIGHT_MID, -lv.dpx(5), 0)
-                checkbox_app.add_event_cb(lambda e, app=app, enabled=enabled: toggle_app(app, not enabled), lv.EVENT_CODE.CLICKED, None)
+                # Query ground truth on each click. The previous implementation
+                # captured `enabled` via a keyword default, which only reflects
+                # state at widget-creation time. After the first click flipped
+                # the app, subsequent clicks kept sending the same command
+                # (because the closure's `enabled` never updated), so users
+                # saw the checkbox stay in whatever state the first click left
+                # it in until they backed out and re-entered the Apps screen.
+                checkbox_app.add_event_cb(lambda e, app=app: toggle_app(app, is_app_enabled(app) != '1'), lv.EVENT_CODE.CLICKED, None)
                 checkbox_app.set_checked(enabled)
                 lv.unlock()
 
@@ -1120,6 +1179,429 @@ class RinkhalsUiApp(BaseApp):
     def clear(self):
         if not USING_SIMULATOR:
             system(f'dd if=/dev/zero of=/dev/fb0 bs={self.screen_info.width * 4} count={self.screen_info.height}')
+
+    # App Store
+    APP_STORE_REPO = 'rinkhals-community/Rinkhals.Apps'
+    APP_STORE_BRANCH = 'master'
+
+    screen_store = None
+    screen_store_app = None
+    modal_store_install = None
+
+    def layout_app_store(self):
+        # App Store listing screen
+        self.screen_store = lvr.panel(self.root_screen, tag='screen_store')
+        if self.screen_store:
+            self.screen_store.add_flag(lv.OBJ_FLAG.HIDDEN)
+            self.screen_store.set_size(lv.pct(100), lv.pct(100))
+            self.screen_store.set_style_pad_all(0, lv.STATE.DEFAULT)
+            self.screen_store.set_style_pad_top(lvr.get_title_bar_height(), lv.STATE.DEFAULT)
+
+            title_bar = lvr.title_bar(self.screen_store)
+            title_bar.set_y(-lvr.get_title_bar_height())
+
+            title = lvr.title(title_bar)
+            title.set_text('App Store')
+            title.center()
+
+            icon_back = lvr.button_icon(title_bar)
+            icon_back.set_align(lv.ALIGN.LEFT_MID)
+            icon_back.set_text('\ue314')
+            icon_back.add_event_cb(lambda e: self.show_screen(self.screen_main), lv.EVENT_CODE.CLICKED, None)
+
+            icon_refresh = lvr.button_icon(title_bar)
+            icon_refresh.add_event_cb(lambda e: self.show_screen(self.screen_store), lv.EVENT_CODE.CLICKED, None)
+            icon_refresh.set_align(lv.ALIGN.RIGHT_MID)
+            icon_refresh.set_text('\ue5d5')
+
+            self.screen_store.panel_apps = None
+
+        # App Store app detail screen
+        self.screen_store_app = lvr.panel(self.root_screen, tag='screen_store_app')
+        if self.screen_store_app:
+            self.screen_store_app.add_flag(lv.OBJ_FLAG.HIDDEN)
+            self.screen_store_app.set_size(lv.pct(100), lv.pct(100))
+            self.screen_store_app.set_style_pad_all(0, lv.STATE.DEFAULT)
+            self.screen_store_app.set_style_pad_top(lvr.get_title_bar_height(), lv.STATE.DEFAULT)
+
+            title_bar = lvr.title_bar(self.screen_store_app)
+            title_bar.set_y(-lvr.get_title_bar_height())
+
+            icon_back = lvr.button_icon(title_bar)
+            icon_back.set_align(lv.ALIGN.LEFT_MID)
+            icon_back.set_text('\ue314')
+            icon_back.add_event_cb(lambda e: self.show_screen(self.screen_store), lv.EVENT_CODE.CLICKED, None)
+
+            self.screen_store_app.label_title = lvr.title(title_bar)
+            self.screen_store_app.label_title.center()
+
+            panel_app = lvr.panel(self.screen_store_app, flex_flow=lv.FLEX_FLOW.COLUMN, flex_align=lv.FLEX_ALIGN.CENTER)
+            panel_app.set_size(lv.pct(100), lv.pct(100))
+
+            self.screen_store_app.label_version = lvr.subtitle(panel_app)
+            self.screen_store_app.label_version.set_text('Version:')
+            self.screen_store_app.label_version.set_style_margin_ver(-lvr.get_global_margin() - lv.dpx(2), lv.STATE.DEFAULT)
+
+            self.screen_store_app.label_description = lvr.subtitle(panel_app)
+            self.screen_store_app.label_description.set_style_text_color(lvr.COLOR_TEXT, lv.STATE.DEFAULT)
+            self.screen_store_app.label_description.set_width(lv.pct(100))
+            self.screen_store_app.label_description.set_long_mode(lv.LABEL_LONG_MODE.WRAP)
+            self.screen_store_app.label_description.set_style_text_align(lv.TEXT_ALIGN.CENTER, lv.STATE.DEFAULT)
+
+            self.screen_store_app.button_action = lvr.button(panel_app)
+            self.screen_store_app.button_action.set_width(lv.pct(100))
+            self.screen_store_app.button_action.set_text('Install')
+
+        # Install progress modal
+        self.modal_store_install = lvr.modal(self.root_modal, tag='modal_store_install')
+        if self.modal_store_install:
+            self.modal_store_install.set_flex_flow(lv.FLEX_FLOW.COLUMN)
+            self.modal_store_install.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
+
+            self.modal_store_install.label_title = lvr.title(self.modal_store_install)
+            self.modal_store_install.label_title.set_width(lv.pct(100))
+            self.modal_store_install.label_title.set_height(lvr.get_font_title().get_line_height())
+            self.modal_store_install.label_title.set_style_pad_bottom(lvr.get_global_margin(), lv.STATE.DEFAULT)
+            self.modal_store_install.label_title.set_long_mode(lv.LABEL_LONG_MODE.DOTS)
+            self.modal_store_install.label_title.set_style_text_align(lv.TEXT_ALIGN.CENTER, lv.STATE.DEFAULT)
+
+            panel_progress_background = lvr.panel(self.modal_store_install)
+            panel_progress_background.set_size(lv.pct(100), lv.dpx(10))
+            panel_progress_background.set_style_pad_all(0, lv.STATE.DEFAULT)
+            panel_progress_background.set_style_bg_color(lv.color_lighten(lvr.COLOR_BACKGROUND, 48), lv.STATE.DEFAULT)
+            panel_progress_background.set_style_bg_opa(lv.OPA.COVER, lv.STATE.DEFAULT)
+            panel_progress_background.remove_flag(lv.OBJ_FLAG.SCROLLABLE)
+
+            self.modal_store_install.obj_progress_bar = lvr.panel(panel_progress_background)
+            self.modal_store_install.obj_progress_bar.set_align(lv.ALIGN.LEFT_MID)
+            self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
+            self.modal_store_install.obj_progress_bar.set_style_bg_opa(lv.OPA.COVER, lv.STATE.DEFAULT)
+            self.modal_store_install.obj_progress_bar.set_size(lv.pct(0), lv.pct(100))
+
+            self.modal_store_install.label_progress_text = lvr.label(self.modal_store_install)
+            self.modal_store_install.label_progress_text.set_text('')
+
+            panel_actions = lvr.panel(self.modal_store_install)
+            panel_actions.set_width(lv.pct(100))
+            panel_actions.set_flex_flow(lv.FLEX_FLOW.ROW)
+            panel_actions.set_flex_align(lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER, lv.FLEX_ALIGN.CENTER)
+            panel_actions.set_style_pad_column(lv.dpx(15), lv.STATE.DEFAULT)
+            panel_actions.set_style_pad_all(0, lv.STATE.DEFAULT)
+            panel_actions.set_style_pad_top(lvr.get_global_margin(), lv.STATE.DEFAULT)
+
+            self.modal_store_install.button_cancel = lvr.button(panel_actions)
+            self.modal_store_install.button_cancel.set_width(lv.pct(45))
+            self.modal_store_install.button_cancel.set_text('Cancel')
+            self.modal_store_install.button_cancel.add_event_cb(lambda e: self.hide_modal(), lv.EVENT_CODE.CLICKED, None)
+
+            self.modal_store_install.button_done = lvr.button(panel_actions)
+            self.modal_store_install.button_done.set_width(lv.pct(45))
+            self.modal_store_install.button_done.set_text('Done')
+            self.modal_store_install.button_done.add_flag(lv.OBJ_FLAG.HIDDEN)
+            self.modal_store_install.button_done.add_event_cb(lambda e: self.hide_modal(), lv.EVENT_CODE.CLICKED, None)
+
+    def fetch_store_manifest(self, app_dir, ref, api_headers):
+        # Read the manifest at the release tag first so the version we show is
+        # the one bundled in the installable SWU. Apps added after the release
+        # won't exist at the tag, so fall back to the branch for display.
+        import requests
+        refs = [ref] + ([self.APP_STORE_BRANCH] if ref != self.APP_STORE_BRANCH else [])
+        for r in refs:
+            try:
+                url = f'https://raw.githubusercontent.com/{self.APP_STORE_REPO}/{r}/apps/{app_dir}/app.json'
+                resp = requests.get(url, headers=api_headers, timeout=5)
+                if resp.status_code == 200:
+                    return json.loads(resp.text, cls=JSONWithCommentsDecoder)
+            except Exception:
+                pass
+        return {}
+
+    def installed_app_version(self, app_dir):
+        # Returns (version, is_installed) for a locally installed app.
+        path = f'{RINKHALS_HOME}/apps/{app_dir}/app.json'
+        if not os.path.exists(path):
+            return '', False
+        try:
+            with open(path) as f:
+                return (json.load(f, cls=JSONWithCommentsDecoder).get('version') or ''), True
+        except Exception:
+            return '', True
+
+    def show_app_store(self):
+        if self.screen_store.panel_apps:
+            self.screen_store.panel_apps.delete()
+        self.screen_store.panel_apps = lvr.panel(self.screen_store, flex_flow=lv.FLEX_FLOW.COLUMN)
+        self.screen_store.panel_apps.set_size(lv.pct(100), lv.pct(100))
+
+        label_loading = lvr.subtitle(self.screen_store.panel_apps)
+        label_loading.set_text('Loading...')
+        label_loading.set_style_text_align(lv.TEXT_ALIGN.CENTER, lv.STATE.DEFAULT)
+        label_loading.center()
+
+        def fetch_apps():
+            try:
+                import requests
+                api_headers = {'User-Agent': 'Rinkhals-AppStore/1.0'}
+                api_url = f'https://api.github.com/repos/{self.APP_STORE_REPO}/contents/apps'
+                response = requests.get(api_url, headers=api_headers, timeout=10)
+                if response.status_code != 200:
+                    if response.status_code == 403 and response.headers.get('X-RateLimit-Remaining') == '0':
+                        msg = 'Rate limit exceeded\nTry again in a few minutes'
+                    else:
+                        msg = f'Failed to load ({response.status_code})'
+                    with lvr.lock():
+                        label_loading.set_text(msg)
+                    return
+
+                entries = response.json()
+                app_dirs = [e for e in entries if e.get('type') == 'dir']
+
+                # Resolve the latest release tag and read manifests from it, so
+                # the versions shown match the SWUs that will install (branch
+                # HEAD can be ahead of the released build).
+                manifest_ref = self.APP_STORE_BRANCH
+                try:
+                    rel_resp = requests.get(f'https://api.github.com/repos/{self.APP_STORE_REPO}/releases/latest', headers=api_headers, timeout=10)
+                    if rel_resp.status_code == 200:
+                        manifest_ref = rel_resp.json().get('tag_name') or self.APP_STORE_BRANCH
+                except Exception:
+                    pass
+
+                with lvr.lock():
+                    label_loading.add_flag(lv.OBJ_FLAG.HIDDEN)
+
+                for entry in app_dirs:
+                    app_dir = entry.get('name')
+                    if not app_dir:
+                        continue
+
+                    app_manifest = self.fetch_store_manifest(app_dir, manifest_ref, api_headers)
+
+                    app_name = app_manifest.get('name') or app_dir
+                    app_version = app_manifest.get('version') or ''
+                    installed_version, is_installed = self.installed_app_version(app_dir)
+                    update_available = bool(is_installed and installed_version and app_version and installed_version != app_version)
+
+                    with lvr.lock():
+                        panel_app = lvr.panel(self.screen_store.panel_apps)
+                        panel_app.set_size(lv.pct(100), lv.dpx(70))
+                        panel_app.set_style_border_side(lv.BORDER_SIDE.BOTTOM, lv.STATE.DEFAULT)
+                        panel_app.set_state(lv.STATE.DISABLED, False)
+                        panel_app.add_event_cb(lambda e, d=app_dir, m=app_manifest: self.show_app_store_app(d, m), lv.EVENT_CODE.CLICKED, None)
+
+                        label_name = lvr.label(panel_app)
+                        label_name.set_align(lv.ALIGN.TOP_LEFT if app_version else lv.ALIGN.LEFT_MID)
+                        label_name.set_text(app_name)
+
+                        if app_version:
+                            label_ver = lvr.subtitle(panel_app)
+                            label_ver.set_align(lv.ALIGN.BOTTOM_LEFT)
+                            label_ver.set_style_text_color(lvr.COLOR_DISABLED, lv.STATE.DEFAULT)
+                            label_ver.set_text(f'v{app_version}')
+
+                        if is_installed:
+                            label_installed = lvr.subtitle(panel_app)
+                            label_installed.set_align(lv.ALIGN.RIGHT_MID)
+                            label_installed.set_style_text_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
+                            label_installed.set_text('Update' if update_available else 'Installed')
+
+            except Exception as ex:
+                logging.error(f'App store fetch failed: {ex}')
+                with lvr.lock():
+                    label_loading.set_text(f'Error loading apps')
+
+        run_async(fetch_apps)
+
+    def show_app_store_app(self, app_dir, app_manifest):
+        self.show_screen(self.screen_store_app)
+
+        app_name = app_manifest.get('name') or app_dir
+        app_version = app_manifest.get('version') or ''
+        app_description = app_manifest.get('description') or ''
+        installed_version, is_installed = self.installed_app_version(app_dir)
+        update_available = bool(is_installed and installed_version and app_version and installed_version != app_version)
+
+        self.screen_store_app.label_title.set_text(ellipsis(app_name, 24))
+        if update_available:
+            self.screen_store_app.label_version.set_text(f'Version: {installed_version} -> {app_version}')
+        else:
+            self.screen_store_app.label_version.set_text(f'Version: {app_version}' if app_version else '')
+        self.screen_store_app.label_description.set_text(app_description)
+
+        self.screen_store_app.button_action.clear_event_cb()
+
+        if update_available:
+            # Single action button, so Update takes priority over Remove while an
+            # update is pending. Reinstalling the SWU upgrades in place; the
+            # button reverts to Remove once installed == available.
+            self.screen_store_app.button_action.set_text('Update')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, d=app_dir, n=app_name: self.install_store_app(d, n),
+                lv.EVENT_CODE.CLICKED, None
+            )
+        elif is_installed:
+            self.screen_store_app.button_action.set_text('Remove')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, d=app_dir, n=app_name: self.show_text_dialog(
+                    f'Remove {n}?\n\nThis will delete all app files.',
+                    action='Remove',
+                    action_color=lvr.COLOR_DANGER,
+                    callback=lambda: self.remove_store_app(d)
+                ),
+                lv.EVENT_CODE.CLICKED, None
+            )
+        else:
+            self.screen_store_app.button_action.set_text('Install')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_TEXT, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, d=app_dir, n=app_name: self.install_store_app(d, n),
+                lv.EVENT_CODE.CLICKED, None
+            )
+
+    def install_store_app(self, app_dir, app_name):
+        with lvr.lock():
+            self.modal_store_install.label_title.set_text(f'Installing {app_name}')
+            self.modal_store_install.obj_progress_bar.set_width(lv.pct(0))
+            self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
+            self.modal_store_install.label_progress_text.set_text('Starting...')
+            self.modal_store_install.button_cancel.remove_flag(lv.OBJ_FLAG.HIDDEN)
+            self.modal_store_install.button_done.add_flag(lv.OBJ_FLAG.HIDDEN)
+
+        self.show_modal(self.modal_store_install)
+
+        def do_install():
+            api_headers = {'User-Agent': 'Rinkhals-AppStore/1.0'}
+            swu_path = f'/tmp/rinkhals-appstore/{app_dir}.swu'
+
+            # Map the printer model to the Rinkhals.Apps SWU asset group, mirroring
+            # rinkhals-web's modelToAssetGroup so both installers pick the same build.
+            asset_group = {
+                'K2P': 'k2p-k3', 'K3': 'k2p-k3', 'K3V2': 'k2p-k3',
+                'K3M': 'k3m',
+                'KS1': 'ks1', 'KS1M': 'ks1',
+            }.get((KOBRA_MODEL_CODE or '').strip().upper())
+
+            if not asset_group:
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                    self.modal_store_install.label_progress_text.set_text(f'Unsupported model ({KOBRA_MODEL_CODE})')
+                return
+
+            try:
+                import requests
+
+                # Resolve the model-aware SWU asset from the latest Rinkhals.Apps release,
+                # so the TouchUI installs exactly the same build and version as rinkhals-web
+                # (avoiding the version skew of copying raw branch files).
+                with lvr.lock():
+                    self.modal_store_install.label_progress_text.set_text('Finding release...')
+
+                release_url = f'https://api.github.com/repos/{self.APP_STORE_REPO}/releases/latest'
+                r = requests.get(release_url, headers=api_headers, timeout=10)
+                if r.status_code != 200:
+                    raise Exception(f'HTTP {r.status_code} fetching latest release')
+
+                asset_name = f'app-{app_dir}-{asset_group}.swu'
+                download_url = next((a.get('browser_download_url')
+                                     for a in r.json().get('assets', [])
+                                     if a.get('name') == asset_name), None)
+
+                if not download_url:
+                    with lvr.lock():
+                        self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                        self.modal_store_install.label_progress_text.set_text(f'No build for {KOBRA_MODEL_CODE}')
+                    return
+
+                # Download the SWU
+                os.makedirs(os.path.dirname(swu_path), exist_ok=True)
+                with lvr.lock():
+                    self.modal_store_install.label_progress_text.set_text('Downloading...')
+
+                with requests.get(download_url, headers=api_headers, timeout=120, stream=True) as swu_response:
+                    swu_response.raise_for_status()
+                    total = int(swu_response.headers.get('Content-Length') or 0)
+                    downloaded = 0
+                    with open(swu_path, 'wb') as f:
+                        for chunk in swu_response.iter_content(chunk_size=65536):
+                            if self.modal_store_install.has_flag(lv.OBJ_FLAG.HIDDEN):
+                                logging.info('App store install canceled.')
+                                if os.path.exists(swu_path):
+                                    os.remove(swu_path)
+                                return
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                with lvr.lock():
+                                    self.modal_store_install.obj_progress_bar.set_width(lv.pct(int(downloaded / total * 90)))
+
+                # Install through tools.sh install_swu, the same path rinkhals-web and the
+                # USB-stick installer use (model-aware password + update.sh). shell() only
+                # returns stdout, so append a sentinel to recover the exit code.
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_width(lv.pct(95))
+                    self.modal_store_install.label_progress_text.set_text('Installing...')
+                    self.modal_store_install.button_cancel.add_flag(lv.OBJ_FLAG.HIDDEN)
+
+                output = shell(f'. /useremain/rinkhals/.current/tools.sh && install_swu "{swu_path}"; echo "RINKHALS_RC=$?"')
+
+                if os.path.exists(swu_path):
+                    os.remove(swu_path)
+
+                installed_ok = 'RINKHALS_RC=0' in output and os.path.exists(f'{RINKHALS_HOME}/apps/{app_dir}/app.json')
+                if not installed_ok:
+                    logging.error(f'App store install_swu failed: {output}')
+                    with lvr.lock():
+                        self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                        self.modal_store_install.label_progress_text.set_text('Install failed')
+                    return
+
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_width(lv.pct(100))
+                    self.modal_store_install.label_progress_text.set_text('Installed successfully')
+                    self.modal_store_install.button_cancel.add_flag(lv.OBJ_FLAG.HIDDEN)
+                    self.modal_store_install.button_done.remove_flag(lv.OBJ_FLAG.HIDDEN)
+                    # Refresh detail screen so button shows Remove immediately
+                    self.screen_store_app.button_action.clear_event_cb()
+                    self.screen_store_app.button_action.set_text('Remove')
+                    self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                    self.screen_store_app.button_action.add_event_cb(
+                        lambda e, d=app_dir, n=app_name: self.show_text_dialog(
+                            f'Remove {n}?\n\nThis will delete all app files.',
+                            action='Remove',
+                            action_color=lvr.COLOR_DANGER,
+                            callback=lambda: self.remove_store_app(d)
+                        ),
+                        lv.EVENT_CODE.CLICKED, None
+                    )
+
+            except Exception as ex:
+                if os.path.exists(swu_path):
+                    os.remove(swu_path)
+                logging.error(f'App store install failed: {ex}')
+                with lvr.lock():
+                    self.modal_store_install.obj_progress_bar.set_style_bg_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+                    self.modal_store_install.label_progress_text.set_text(f'Failed')
+
+        run_async(do_install)
+
+    def remove_store_app(self, app_dir):
+        import shutil
+        app_path = f'{RINKHALS_HOME}/apps/{app_dir}'
+
+        try:
+            if get_app_status(app_dir) != 'stopped':
+                stop_app(app_dir)
+            disable_app(app_dir)
+
+            if os.path.exists(app_path):
+                shutil.rmtree(app_path)
+
+            self.show_screen(self.screen_store)
+        except Exception as ex:
+            logging.error(f'App store remove failed: {ex}')
+            self.show_text_dialog(f'Failed to remove app:\n{ex}')
 
 
 if __name__ == '__main__':

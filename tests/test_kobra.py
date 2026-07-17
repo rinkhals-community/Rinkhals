@@ -72,10 +72,26 @@ def _build_machine_module():
             self.server = DummyServer()
             self.original_calls = []
 
+        async def exec_sudo_command(self, command: str):
+            self.original_calls.append(command)
+            return f"original:{command}"
+
         async def _handle_machine_request(self, web_request):
             endpoint = web_request.get_endpoint()
-            self.original_calls.append(endpoint)
-            return f"original:{endpoint}"
+            virt_id = self.system_info.get("virtualization", {}).get("virt_identifier", "none")
+            if endpoint == "/machine/reboot":
+                if self.inside_container:
+                    raise self.server.error(f"Cannot reboot from within a {virt_id} container")
+                await self.exec_sudo_command("systemctl reboot")
+                return "ok"
+            elif endpoint == "/machine/shutdown":
+                if self.inside_container:
+                    raise self.server.error(f"Cannot shutdown from within a {virt_id} container")
+                await self.exec_sudo_command("systemctl poweroff")
+                return "ok"
+            else:
+                self.original_calls.append(endpoint)
+                return f"original:{endpoint}"
 
         async def exec_sudo_command(self, command: str, tries: int = 1, timeout=2.):
             self.original_calls.append(f"exec_sudo_command:{command}")

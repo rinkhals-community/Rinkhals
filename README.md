@@ -14,7 +14,7 @@ By using Rinkhals, you will keep all stock Anycubic features (print screen, Anyc
 - Prints from Orca will show the print screen
 - SSH access for customization (user: **root**, password: **rockchip**)
 - OTA Rinkhals updates
-- [Apps system](https://github.com/rinkhals-community/Rinkhals.apps) (OctoEverywhere, Cloudflare, Tailscale, ...)
+- [Apps system](https://github.com/rinkhals-community/Rinkhals.Apps) (OctoEverywhere, Cloudflare, Tailscale, ...)
 
 Latest version will likely support the two latest firmwares from Anycubic, unless specified. For older firmware please check older releases or our [firmware archive](https://rinkhals.firmwareforge.org).
 Here are the supported GoKlipper / K3-family printers and firmwares with the latest Rinkhals release:
@@ -22,10 +22,10 @@ Here are the supported GoKlipper / K3-family printers and firmwares with the lat
 | -- | -- | -- |
 | Kobra 3 (+ combo) | `2.4.5` `2.4.6.7` |
 | Kobra 2 Pro | `3.1.2.3` `3.1.4` | Only with mainboard [Trigorilla Spe **B** v1.0.x](https://1coderookie.github.io/Kobra2ProInsights/hardware/mainboard/#trigorilla_spe_b_v10x-stock-new-revision). `3.1.4` seems to be buggy for some people |
-| Kobra S1 (+ combo) | `2.7.0.9` `2.7.2.1` |
+| Kobra S1 (+ combo) | `2.7.0.9` `2.7.2.7` |
 | Kobra 3 Max (+ combo) | `2.5.1.7` `2.5.2.8` |
 | Kobra 3 V2 (+ combo) | `1.1.0.4` `1.1.2.8` |
-| Kobra S1 Max (+ combo) | `2.6.6` `2.6.9.3` |
+| Kobra S1 Max (+ combo) | `2.6.9.6` `2.7.1.4` |
 
 The K4-family currently has a separate status:
 
@@ -89,15 +89,17 @@ For more information about installation, firmware updates and details about spec
 
 After installation, Rinkhals provides a touch UI accessible from the printer screen when you tap the Settings icon, then tap Rinkhals.
 
-This UI allows you to manage installed apps, trigger an OTA update, reboot your printer and much more. This will allow you to customize your experience and keep the printer memory as low as needed based on your needs.
+The main menu gives you quick access to four areas arranged in a 2×2 grid:
+- **Manage apps** — enable, disable, start and stop individual apps
+- **App Store** — browse and install community apps directly from the printer screen (see below)
+- **Updates** — check for and apply OTA Rinkhals updates
+- **Settings** — advanced options, reboot controls and system information
 
 <p align="center">
-    <!-- <img width="192" src="./.github/images/screenshot-settings.png"> -->
     <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-main.png">
     <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-apps.png">
-    <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-apps-moonraker.png">
+    <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-app-store.png">
     <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-updates.png">
-    <!-- <img width="192" src="./.github/images/screenshot-rinkhals-advanced.png"> -->
 </p>
 
 ## Rinkhals Installer
@@ -112,11 +114,22 @@ You can find more information in [the documentation](https://rinkhals-community.
 > Those printers are quite weak in terms of CPU and Memory. Every additional app / feature and client you connect to the web interface will make the experience slower and might end up in crashes.<br />
 > Having said that, running your printer with Moonraker, 1\~2 apps and 1\~2 connected clients should work fine.
 
-An apps system is provided in Rinkhals. It allows for the users to easily add some features to their printer. Some default ones are provided and other are available on separate repos like:
-- https://github.com/rinkhals-community/Rinkhals.apps (Tailscale, Cloudflare, OctoApp companion, some progress on vanilla Klipper, ...)
+An apps system is provided in Rinkhals. It allows for the users to easily add some features to their printer. Some default ones ship with every release (Moonraker, Mainsail, Fluidd, mjpg-streamer, Remote display via VNC, Hostname/mDNS, the opt-in Firmware Collector, and the Rinkhals monitor for MQTT) and additional community apps are available on separate repos like:
+- https://github.com/rinkhals-community/Rinkhals.Apps (Tailscale, Cloudflare Tunnel, OctoApp, OctoEverywhere, NFS mount, stunnel, vanilla Klipper, and more)
 - https://github.com/basvd/Rinkhals.WebUI (a web interface for Rinkhals)
 
-Instructions on how to install or develop apps are on the other repo as well.
+The default apps are listed in detail under [Features and built-in apps](https://rinkhals-community.github.io/Rinkhals/about/#features-and-built-in-apps) in the documentation. Instructions on how to install or develop apps live in the Rinkhals.Apps repository.
+
+### App Store
+
+The Rinkhals Touch UI includes a built-in **App Store** that lets you browse, install and remove community apps without leaving the printer screen. Apps are sourced directly from [rinkhals-community/Rinkhals.Apps](https://github.com/rinkhals-community/Rinkhals.Apps) on GitHub.
+
+<p align="center">
+    <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-app-store.png">
+    <img width="192" src="./docs/docs/assets/rinkhals-ui/ui-app-store-detail.png">
+</p>
+
+To use it, open the Rinkhals Touch UI and tap **App Store**. The store will fetch the latest app list, show version info and flag already-installed apps. Tap any app to see its description, then tap **Install** or **Remove** as needed.
 
 
 <p align="center">
@@ -152,4 +165,5 @@ Special thanks to those people for providing the base research and helping suppo
 - **evil_santa**, **CalmFrog**, **basvd**, **_René**, **RadioRadio** and more for Kobra 3 Max support.
 - **AndrewS** for ethernet adapters USB testing and Kobra X firmware dump.
 - **Ac_K** for passwords and technical discovery of Kobra X.
+- **clutchthrower** for the built-in App Store in the Touch UI.
 - Anycubic for the cool printer and the few OSS items. (https://github.com/ANYCUBIC-3D/Kobra)

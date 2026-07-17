@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<script>
+			// Apply theme before first paint to avoid a flash of the wrong palette.
+			(function () {
+				try {
+					var stored = localStorage.getItem("rinkhals-theme");
+					var pref = stored === "light" || stored === "dark" || stored === "system"
+						? stored
+						: "system";
+					var resolved = pref;
+					if (pref === "system") {
+						resolved = window.matchMedia("(prefers-color-scheme: dark)").matches
+							? "dark"
+							: "light";
+					}
+					document.documentElement.setAttribute("data-theme", resolved);
+				} catch (e) {
+					document.documentElement.setAttribute("data-theme", "light");
+				}
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

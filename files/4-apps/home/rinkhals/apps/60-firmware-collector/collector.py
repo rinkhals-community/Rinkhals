@@ -1,31 +1,32 @@
 """
-Firmware collector daemon (opt-in).
+Firmware collector, one-shot (opt-in).
 
-Loop:
-  1. Sleep with random jitter so opted-in printers don't all hit Anycubic
-     at the same minute every day.
-  2. Test general internet reachability (cheap TCP connect). If offline,
-     log and skip this cycle. Some users run their printer LAN-only.
-  3. Ask Anycubic via MQTT (using this printer's own device cert) whether
+Runs a single discovery cycle and exits. Scheduling (startup jitter, the
+daily interval, per-cycle jitter) lives in supervisor.sh, not here: a shell
+loop sleeps between checks for a few hundred KB instead of keeping a ~14 MB
+Python interpreter (interpreter + paho.mqtt + ssl) resident 24/7 just to
+wait. Each check spawns this script, which runs for ~20s and frees all of
+its memory on exit.
+
+One cycle:
+  1. Test general internet reachability (cheap TCP connect). If offline,
+     log and skip. Some users run their printer LAN-only.
+  2. Ask Anycubic via MQTT (using this printer's own device cert) whether
      a firmware newer than the currently installed version exists.
-  4. If a newer version is reported, send a small notification to the
+  3. If a newer version is reported, send a small notification to the
      Rinkhals community ingest endpoint containing only the public URL
      and version metadata. Never sends device certs, account info, or
      any personal data.
-  5. Sleep INTERVAL_HOURS (default 24) and repeat.
 
 All network operations have explicit timeouts so a hung Anycubic or
-ingest server can't wedge the daemon.
+ingest server can't wedge the check.
 """
 
 import json
 import logging
 import os
-import random
-import signal
 import socket
 import sys
-import time
 import urllib.error
 import urllib.request
 
@@ -35,7 +36,6 @@ import firmware_query
 INGEST_ENDPOINT = os.environ.get(
     "INGEST_ENDPOINT", "https://ingest.firmwareforge.org/v1/notify"
 )
-INTERVAL_HOURS = float(os.environ.get("INTERVAL_HOURS", "24") or "24")
 DRY_RUN = (os.environ.get("DRY_RUN", "False") or "False").lower() == "true"
 KOBRA_MODEL_CODE = os.environ.get("KOBRA_MODEL_CODE", "unknown")
 RINKHALS_VERSION = os.environ.get("RINKHALS_VERSION", "unknown")
@@ -48,14 +48,6 @@ REACHABILITY_HOST = "1.1.1.1"
 REACHABILITY_PORT = 443
 REACHABILITY_TIMEOUT_SECONDS = 5
 
-# Initial random delay before the first query. Spreads load when many
-# printers boot at the same time after a community-wide update.
-STARTUP_JITTER_SECONDS = (60, 30 * 60)  # 1 min to 30 min
-
-# Per-cycle jitter added to INTERVAL_HOURS. Plus or minus up to 1 hour
-# so we don't synchronize over time.
-CYCLE_JITTER_SECONDS = 60 * 60
-
 INGEST_REQUEST_TIMEOUT = 30
 
 
@@ -66,15 +58,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("firmware-collector")
-
-
-_stop_requested = False
-
-
-def _handle_signal(signum, frame):
-    global _stop_requested
-    log.info("Signal %s received, will exit after current cycle", signum)
-    _stop_requested = True
 
 
 def _has_internet() -> bool:
@@ -196,46 +179,20 @@ def _cycle():
     _send_notification(payload)
 
 
-def _sleep(seconds: float):
-    """Sleep but wake early on signal."""
-    deadline = time.time() + seconds
-    while time.time() < deadline and not _stop_requested:
-        time.sleep(min(30, deadline - time.time()))
-
-
 def main():
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
-
-    interval_seconds = INTERVAL_HOURS * 3600
-
-    startup_delay = random.uniform(*STARTUP_JITTER_SECONDS)
+    """Run one discovery cycle and exit. supervisor.sh calls this on a schedule."""
     log.info(
-        "Daemon started. Model=%s, interval=%.1fh, dry_run=%s, ingest=%s",
+        "Running one check. Model=%s, dry_run=%s, ingest=%s",
         KOBRA_MODEL_CODE,
-        INTERVAL_HOURS,
         DRY_RUN,
         INGEST_ENDPOINT,
     )
-    log.info("Initial jitter: sleeping %.0fs before first query", startup_delay)
-    _sleep(startup_delay)
-
-    while not _stop_requested:
-        try:
-            _cycle()
-        except Exception as exc:
-            log.exception("Unexpected error in cycle: %s", exc)
-
-        if _stop_requested:
-            break
-
-        jitter = random.uniform(-CYCLE_JITTER_SECONDS, CYCLE_JITTER_SECONDS)
-        next_sleep = max(60, interval_seconds + jitter)
-        log.info("Sleeping %.0fs until next cycle", next_sleep)
-        _sleep(next_sleep)
-
-    log.info("Daemon exiting")
+    _cycle()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log.exception("Unexpected error: %s", exc)
+        sys.exit(1)

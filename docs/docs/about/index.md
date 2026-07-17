@@ -71,6 +71,22 @@ On the K3M, the root password is not yet known.
 System apps are normal Rinkhals apps that are bundled in every Rinkhals release. They can still be enabled or disabled depending on your preference, and they can be overriden by adding a user app with the same name.
 
 
+#### Hostname & DNS
+
+This app sets a custom hostname for the printer and advertises it on the local network. Useful when you have multiple Kobra printers and need to tell them apart.
+
+On startup it sets the system hostname, runs a lightweight mDNS responder so the printer is reachable as `<hostname>.local` from any device on the network, and restarts `udhcpc` with the hostname so the router registers it for short-name resolution.
+
+When no custom hostname is configured, one is auto-generated from the printer model and device ID, for example `kobra-k3-a1b2` or `kobra-ks1-f3e9`, so each printer gets a unique name without manual setup.
+
+| 10-hostname-dns | |
+|-|-|
+| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/10-hostname-dns/app.json) |
+| Default state | Enabled |
+| CPU usage | Negligible |
+| Memory usage | ~1 MB |
+
+
 #### Moonraker
 
 Moonraker is an API gateway for Klipper. It exposes Klipper information and interactions to 3rd party clients using web API and websockets.
@@ -175,9 +191,31 @@ When enabled and started and if using LAN mode, this app will send metrics to th
 
 Metrics are be collected and sent every 30s. High level system metrics are also written to the app log in `/useremain/rinkhals/.current/logs/app-monitor.log`
 
-| rinkhals-monitor | |
+| 65-rinkhals-web | |
 |-|-|
-| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/rinkhals-monitor/app.json) |
+| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/65-rinkhals-web/app.json) |
 | Default state | Disabled |
 | CPU usage | 0 ~ ? |
 | Memory usage | 6 MB |
+
+
+#### Firmware Collector (opt-in)
+
+This app helps the community catch new Anycubic firmware releases faster. It is **disabled by default** and you must enable it explicitly before it does anything.
+
+When enabled, once per day the app:
+
+1. Tests basic internet reachability. If the printer cannot reach the internet (for example because it is configured in LAN-only mode), the app logs a message and waits until the next cycle.
+2. Asks Anycubic's OTA server whether a firmware newer than the one currently installed exists for this printer model. This uses the printer's own existing Anycubic device certificate, the same way the touchscreen "Check for updates" button does.
+3. If Anycubic announces a newer firmware version, the app sends a small notification to the Rinkhals community firmware archive at `https://ingest.firmwareforge.org/v1/notify`.
+
+Only `model_code`, `model_id`, and `current_version` are transmitted, and only when a new firmware version is announced. **No certificates, account information, or personal data are ever sent.** A `Dry run` mode is available for users who want to verify behaviour without uploading.
+
+The notification feeds the same `firmware-fetcher` task that maintains the [community firmware archive](https://rinkhals.firmwareforge.org), helping the project produce Rinkhals patches for new Anycubic releases sooner.
+
+| 60-firmware-collector | |
+|-|-|
+| App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/60-firmware-collector/app.json) |
+| Default state | Disabled (opt-in) |
+| CPU usage | Negligible |
+| Memory usage | ~3 MB |

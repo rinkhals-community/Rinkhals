@@ -19,6 +19,16 @@ When enabled, the app once per day:
    small notification to the Rinkhals community firmware archive at
    `https://ingest.firmwareforge.org/v1/notify`.
 
+## Resource usage
+
+The check itself is a short-lived Python script (`collector.py`) that runs
+for about 20 seconds once a day and then exits, freeing all of its memory.
+Scheduling is handled by a tiny shell loop (`supervisor.sh`), which is the
+only part that stays resident between checks and costs a few hundred KB
+rather than keeping a Python interpreter (roughly 14 MB) parked in memory
+around the clock. The printer's busybox has no cron, so the app schedules
+itself this way.
+
 ## What it sends
 
 Only these fields, only when a new firmware is announced:

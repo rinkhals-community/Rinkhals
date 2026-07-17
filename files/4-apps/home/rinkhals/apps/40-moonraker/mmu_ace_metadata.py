@@ -63,10 +63,16 @@ def parse_gcode_file(file_path):
         "total_toolchanges": total_toolchanges,
     }
 
+# Lines emitted by newer OrcaSlicer versions that Anycubic's Go firmware
+# (gklib) cannot parse — causes slice-bounds panic (error 10111).
+GCODE_STRIP_PREFIXES = ("; filament_colour_type",)
+
 def process_file(input_filename, output_filename, tools_used, total_toolchanges):
     with open(input_filename, 'r') as infile, open(output_filename, 'w') as outfile:
         outfile.write(f'{MMU_ACE_FINGERPRINT}\n')
         for line in infile:
+            if line.lstrip().startswith(GCODE_STRIP_PREFIXES):
+                continue
             outfile.write(line)
         # Append referenced tools metadata
         outfile.write("; referenced_tools = %s\n" % ",".join(map(str, tools_used)))

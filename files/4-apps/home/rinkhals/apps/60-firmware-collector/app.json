@@ -9,7 +9,8 @@
         "ingest_endpoint": {
             "display": "Ingest endpoint URL",
             "type": "text",
-            "default": "https://ingest.firmwareforge.org/v1/notify"
+            "default": "https://ingest.firmwareforge.org/v1/notify",
+            "advanced": true
         },
         "check_interval_hours": {
             "display": "Check interval (hours)",
@@ -20,7 +21,8 @@
             "display": "Dry run (log only, no upload)",
             "type": "enum",
             "options": ["False", "True"],
-            "default": "False"
+            "default": "False",
+            "advanced": true
         }
     }
 }

@@ -662,6 +662,7 @@ class MmuAceController:
         self.ace.tools = []
         self.ace.ttg_map = []
         self._invalidate_gate_cache()
+        self._last_gate_fingerprint = ""  # force status push on next _set_ace_status
         self._handle_status_update(force=True)
 
     def _handle_status_update(self, force: bool = False, throttle: bool = False):
@@ -870,7 +871,15 @@ class MmuAceController:
                 klippy_apis: KlippyAPI = self.server.lookup_component("klippy_apis")
                 result = await klippy_apis.query_objects({ "filament_hub": None })
                 if not self._has_filament_hub_data(result):
-                    self._disable_ace("filament_hub object unavailable on this printer")
+                    self._disable_ace("ACE not connected at startup — will re-enable on reconnect")
+                    try:
+                        await self.printer.subscribe_objects(
+                            {"filament_hub": None},
+                            self._handle_mmu_ace_status_update
+                        )
+                        logging.info("[mmu_ace] Subscribed to filament_hub for reconnect detection")
+                    except Exception as sub_e:
+                        logging.warning(f"[mmu_ace] Could not subscribe for reconnect detection: {sub_e}")
                     return
                 success = True
             except Exception as e:
@@ -925,7 +934,10 @@ class MmuAceController:
             return
 
         try:
-            result = await self.printer.subscribe_objects({ "filament_hub": None }, self._handle_mmu_ace_status_update)
+            result = await self.printer.subscribe_objects(
+                {"filament_hub": None},
+                self._handle_mmu_ace_status_update
+            )
         except Exception as e:
             if self._is_no_ace_error(e):
                 self._disable_ace(str(e))
@@ -984,6 +996,7 @@ class MmuAceController:
                 return
 
             if "filament_hubs" not in filament_hub:
+                # Partial update: filament_hubs unchanged, only current_filament may have changed
                 current_filament = filament_hub.get("current_filament")
 
                 if current_filament is not None:
@@ -994,6 +1007,16 @@ class MmuAceController:
                         "Ignoring partial filament_hub update without current_filament: "
                         f"{list(filament_hub.keys())}"
                     )
+                return
+
+            filament_hubs = filament_hub["filament_hubs"]
+
+            if not isinstance(filament_hubs, list):
+                # filament_hubs=null: ACE cable disconnected at runtime.
+                # GoKlipper sends filament_hubs=[...] on reconnect.
+                # subscription callback handles re-enable automatically.
+                if self.ace.enabled:
+                    self._disable_ace("ACE cable disconnected (filament_hubs=null)")
                 return
 
             # Fetch temperature info for all gates with material
@@ -1131,6 +1154,15 @@ class MmuAceController:
         ace = self.ace
         ace.units = []
         ace.tools = []
+
+        # Preserve any existing tool-to-gate map across status polls. This
+        # method runs on every ACE Hub status update (roughly every 20s), and
+        # unconditionally rebuilding ttg_map to the 1:1 default below silently
+        # discarded a user's custom mapping a few seconds after they set it
+        # (issue #49). We snapshot the current map here and, once the new
+        # topology is known, restore it if it still fits; otherwise we keep
+        # the freshly built default.
+        previous_ttg_map = list(ace.ttg_map)
         ace.ttg_map = []
 
         # Invalidate gate lookup cache when units change
@@ -1219,6 +1251,21 @@ class MmuAceController:
                 global_gate_index += 1
 
             self.ace.units.append(unit)
+
+        # Re-enable if ACE reconnected while it was disabled on the _disable_ace()
+        if ace.units and not ace.enabled:
+            logging.info("[mmu_ace] ACE reconnected — re-enabling")
+            ace.enabled = True
+
+        # Restore the previous tool-to-gate map if it still matches the
+        # current topology (same tool count, and every entry points at a gate
+        # that still exists). A custom mapping the user set via MMU_TTG_MAP
+        # therefore survives status polls, while an actual change in the
+        # number of gates (a unit added or removed) cleanly falls back to the
+        # 1:1 default that was just rebuilt above. See issue #49.
+        if (len(previous_ttg_map) == len(self.ace.ttg_map)
+                and all(0 <= gate_index < global_gate_index for gate_index in previous_ttg_map)):
+            self.ace.ttg_map = previous_ttg_map
 
         # Sync MMU status with ACE Hub current_filament state
         current_filament = filament_hub.get("current_filament", "")
@@ -2405,8 +2452,6 @@ class MmuAcePatcher:
         if self.ace.enabled and "ams_settings" not in print_data:
 
             mapping = []
-            paint_index = 0  # paint_index counts the order of colors in the object (starts at 0)
-
             for tool_index, tool in enumerate(self.ace.tools):
                 gate_index = self.ace.ttg_map[tool_index]
 
@@ -2437,14 +2482,14 @@ class MmuAcePatcher:
                 # paint_index = order of colors in object (0, 1, 2, ...)
                 # ams_index = physical gate number (can be any gate)
                 mapping.append({
-                    "paint_index": paint_index,
+                    "paint_index": tool_index,
                     "ams_index": gate_index,
                     "paint_color": gate.color,
                     "ams_color": gate.color,
                     "material_type": gate.material
                 })
 
-                logging.info(f"Mapping: paint_index {paint_index} (T{tool_index}) → ams_index {gate_index} ({gate.filament_name})")
+                logging.info(f"Mapping: paint_index {tool_index} (T{tool_index}) → ams_index {gate_index} ({gate.filament_name})")
 
                 # Add backup gates from endless spool groups
                 if gate_index < len(self.ace.endless_spool_groups):
@@ -2466,16 +2511,14 @@ class MmuAcePatcher:
                             if backup_gate:
                                 # Add backup gate with same paint_index (same color) but different ams_index (gate)
                                 mapping.append({
-                                    "paint_index": paint_index,
+                                    "paint_index": tool_index,
                                     "ams_index": backup_gate_index,
                                     "paint_color": backup_gate.color,
                                     "ams_color": backup_gate.color,
                                     "material_type": backup_gate.material
                                 })
-                                logging.info(f"Endless Spool: paint_index {paint_index} (T{tool_index}) can use Gate {backup_gate_index} as backup for Gate {gate_index} (group {endless_spool_group})")
+                                logging.info(f"Endless Spool: paint_index {tool_index} (T{tool_index}) can use Gate {backup_gate_index} as backup for Gate {gate_index} (group {endless_spool_group})")
 
-                # Increment paint_index for the next color in the object
-                paint_index += 1
 
             if not mapping:
                 logging.info("No ACE gate mapping available, skipping AMS settings injection")

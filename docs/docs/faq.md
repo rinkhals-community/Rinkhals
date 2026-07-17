@@ -13,6 +13,25 @@ GoKlipper (1) is not starting properly, it's most likely due to a printer config
 
 Please check the information in [I got 11407 or my printer doesn't boot anymore](about/printer-configuration.md#i-got-11407-or-my-printer-doesnt-boot-anymore)
 
+## The load average is huge (10+) - is the printer overloaded?
+
+Almost certainly not. The single-core CPU on these printers is typically idle 30-50% of the time even when the load average reads 10-13. The number looks alarming because Linux's load average counts a category of processes that don't actually use the CPU.
+
+A handful of kernel threads on this hardware are permanently parked in **uninterruptible-sleep (D state)** waiting on hardware semaphores:
+
+- **5 Realtek WiFi driver threads** (`RTW_XMIT_THREAD`, `RTW_RECV_THREAD`, `RTW_CMD_THREAD`, `RTWHALXT` x2) from the out-of-tree `RTL8723DS` vendor driver. They block on a kernel semaphore until a packet or command arrives.
+- **6 Anycubic vision pipeline threads** (`vmcu`, `vsys`, `vpss`, `vrga`, `vrgn`, `vlog`) from the stock kernel modules that drive the camera and AI failure-detection hardware. They block on hardware events.
+
+Linux counts both **R** (runnable) and **D** (uninterruptible-sleep) tasks toward the load average. On a desktop, D-state usually means a process is stuck on disk I/O, which is real work. On this printer, D-state is the resting state of those 11 kernel threads, so they contribute a permanent floor of ~11 to the load average regardless of what the system is actually doing.
+
+When evaluating whether the printer is under real pressure, look at:
+
+- **`top` idle %** - the CPU usage panel. If you have meaningful idle time, the CPU is not saturated.
+- **The 4th field of `/proc/loadavg`** - it reads `running/total`. On a single core, sustained values above 2 or 3 in the `running` count indicate genuine queueing.
+- **`free`** - this device ships with very little RAM headroom. Real performance issues here usually come from memory pressure, not CPU load.
+
+There is no practical way to remove these kernel threads. The Realtek driver is a closed-source vendor driver that would need to be replaced with the upstream `rtw88` driver and rebuilt against the kernel; the Anycubic vision threads are part of proprietary modules with no source available, and disabling them would break the camera and failure detection. The load number is misleading on this hardware by design, but the system itself is fine.
+
 ## I'm getting "Timer too close" errors during prints
 This is often caused by MCU starvation when GoKlipper receives too many small, high-resolution G-Code segments combined with rapid Dynamic Cooling fan adjustments (frequent `M106` / `M160` commands). 
 
