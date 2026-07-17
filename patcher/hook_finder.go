@@ -37,6 +37,11 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 	// vestigial General-page callback that still exists but no longer hosts the
 	// Service Support row). create-patch.py likewise hooks exactly one callback.
 	var caseBodyResults []*HookTarget
+	// jumpTableDetected records that this is jump-table S1 firmware. On such
+	// firmware the guard path mis-fires (the KS1M #53 bug), so if we can't
+	// produce a validated case-body hook we refuse to patch rather than falling
+	// back to the guard path.
+	var jumpTableDetected bool
 
 	displayStatusBar, _, _ := p.FindSymbol("_ZN10MainWindow24BottomStatusBarUiDisplayEh")
 	if displayStatusBar == 0 {
@@ -69,19 +74,30 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 		// case body directly - no row guard - which is the correct strategy for
 		// these builds (the guard/bl-scan path below mis-fires on them, the KS1M
 		// #53 bug). Only falls through to the guard path if no jump table exists.
+		//
+		// Gated + validated: only when the "Service Support" string was actually
+		// relabeled (there is a row to repurpose) AND the case at the assumed row
+		// is a legitimate short setCurrentIndex nav case. The row index isn't
+		// derivable from the string, so this fails safe on an unexpected layout.
 		if isS1 {
 			if caseAddr, retAddr, ok := p.findJumpTableCaseBody(callbackAddr, callbackSize, 3); ok {
-				this := p.thisFromStackStore(offset)
-				if len(this) > 0 {
-					caseBodyResults = append(caseBodyResults, &HookTarget{
-						Address:          caseAddr,
-						ReturnAddress:    retAddr,
-						ThisInstructions: this,
-						IsS1Mode:         true,
-						CaseBody:         true,
-					})
-					continue
+				// This IS jump-table firmware. Hook only via the case body; never
+				// fall through to the guard path for it (that mis-fires). Emit the
+				// hook only when gated (Service Support was relabeled) AND the case
+				// shape validates; otherwise skip safely.
+				jumpTableDetected = true
+				if p.serviceSupportRelabeled && p.isSettingsNavCase(caseAddr, qStackedWidgetSetCurrentIndex, 16) {
+					if this := p.thisFromStackStore(offset); len(this) > 0 {
+						caseBodyResults = append(caseBodyResults, &HookTarget{
+							Address:          caseAddr,
+							ReturnAddress:    retAddr,
+							ThisInstructions: this,
+							IsS1Mode:         true,
+							CaseBody:         true,
+						})
+					}
 				}
+				continue
 			}
 		}
 
@@ -168,6 +184,13 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 	// A jump-table case-body hook, when present, is the authoritative one.
 	if len(caseBodyResults) > 0 {
 		return caseBodyResults, nil
+	}
+
+	// Jump-table firmware, but no validated case-body hook (missing Service
+	// Support string or an unexpected case shape). Fail safe: refuse to patch
+	// rather than using the guard path, which mis-fires on jump-table layouts.
+	if jumpTableDetected {
+		return nil, fmt.Errorf("jump-table S1 firmware but no validated case-body hook (gate/shape check failed); refusing to patch")
 	}
 
 	if len(results) == 0 {

@@ -108,6 +108,39 @@ func (p *Patcher) thisFromStackStore(callbackOffset uint64) []uint32 {
 	}
 }
 
+// isSettingsNavCase validates that a jump-table case body is a legitimate
+// settings page-nav case: a SHORT body that calls QStackedWidget::setCurrentIndex
+// before branching to the switch epilogue. The row index (3) is not derivable
+// from the "Service Support" string (it isn't referenced by any locatable code -
+// the labels come from Qt translation/resources), so this shape check is our
+// fail-safe: if the case at the assumed row isn't a nav case (an unexpected menu
+// layout), we refuse to hook it rather than corrupting the binary.
+func (p *Patcher) isSettingsNavCase(caseAddr, setCurrentIndex uint64, maxInst int) bool {
+	if setCurrentIndex == 0 {
+		return false // can't confirm a page switch without the symbol
+	}
+	s := NewScanner(p.fileData)
+	off, err := p.AddrToOffset(caseAddr)
+	if err != nil {
+		return false
+	}
+	sawNav := false
+	for i := 0; i < maxInst; i++ {
+		cur := off + uint64(i*4)
+		vma := caseAddr + uint64(i*4)
+		inst := s.ReadInstruction(cur)
+		if inst == BranchLink(vma, setCurrentIndex) {
+			sawNav = true
+		}
+		// First unconditional B ends the case. Require the nav call to have
+		// appeared before it, and the whole case to fit in the window.
+		if (inst & 0xFF000000) == 0xEA000000 {
+			return sawNav
+		}
+	}
+	return false // no short exit found -> not a simple nav case
+}
+
 // findCaseExit disassembles forward from a switch case body and returns the
 // target of the first unconditional branch (B, condition AL) - the point where
 // the case rejoins the shared switch epilogue. This is where our payload returns

@@ -15,6 +15,10 @@ type Patcher struct {
 	binaryPath string
 	fileData   []byte
 	elfFile    *elf.File
+	// serviceSupportRelabeled is set once the "Service Support" menu string has
+	// been replaced with "Rinkhals". The jump-table case-body hook is gated on
+	// it: no Service Support row means nothing to repurpose, so we don't hook.
+	serviceSupportRelabeled bool
 }
 
 func main() {
@@ -67,6 +71,7 @@ func main() {
 		if err != nil {
 			log.Printf("Warning: 'Service Support' string patch failed: %v", err)
 		} else {
+			p.serviceSupportRelabeled = true
 			log.Printf("Successfully replaced 'Service Support' with 'Rinkhals'")
 		}
 
