@@ -167,7 +167,16 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 			}
 
 			if len(thisInstructions) > 0 {
-				var s1RowRegister string = "r1"
+				// Derive which register holds the row() result for the guard's
+				// "cmp <reg>, #3". It varies per firmware (r3 on the General
+				// page, r1 on early Device-page builds); hardcoding was wrong for
+				// the General-page ones. Fall back to r1 if it can't be derived.
+				s1RowRegister := "r1"
+				if isS1 {
+					if reg, ok := p.deriveRowRegister(callbackAddr, callbackSize); ok {
+						s1RowRegister = reg
+					}
+				}
 
 				results = append(results, &HookTarget{
 					Address:                patchJumpAddress,
@@ -198,6 +207,42 @@ func (p *Patcher) FindHookTargets() ([]*HookTarget, error) {
 	}
 
 	return results, nil
+}
+
+// deriveRowRegister finds which register the guard must compare against #3 - the
+// one holding QModelIndex::row()'s result. The compiler emits
+// "bl QModelIndex::row; mov rX, r0", so we locate the row() call and read the
+// destination of the following mov. This replaces the hardcoded r1, which was
+// only correct for early Device-page builds (the General page uses r3).
+func (p *Patcher) deriveRowRegister(callbackAddr, callbackSize uint64) (string, bool) {
+	row, _, _ := p.FindSymbol("_ZNK11QModelIndex3rowEv")
+	if row == 0 {
+		row = p.FindPltSymbol("_ZNK11QModelIndex3rowEv")
+	}
+	if row == 0 {
+		return "", false
+	}
+	s := NewScanner(p.fileData)
+	base, err := p.AddrToOffset(callbackAddr)
+	if err != nil {
+		return "", false
+	}
+	for cur := base; cur+4 <= base+callbackSize; cur += 4 {
+		vma := callbackAddr + (cur - base)
+		if s.ReadInstruction(cur) != BranchLink(vma, row) {
+			continue
+		}
+		// row() returns in r0; the next 1-2 instructions stash it with
+		// "mov rX, r0" (Rm=0, no shift -> 0xE1A0_X000).
+		for k := uint64(1); k <= 2; k++ {
+			next := s.ReadInstruction(cur + k*4)
+			if (next & 0xFFFF0FFF) == 0xE1A00000 {
+				return fmt.Sprintf("r%d", (next>>12)&0xF), true
+			}
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // FindStrR0Fp searches for "str r0, [fp, #-xx]"
