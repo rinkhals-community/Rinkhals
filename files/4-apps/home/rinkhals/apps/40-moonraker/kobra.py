@@ -1218,6 +1218,15 @@ class Kobra:
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
                         calibrate_script = [
+                            # Home first. Without this the printer can reach
+                            # BED_MESH_CALIBRATE un-homed, and GoKlipper then blocks
+                            # forever at the first probe point instead of raising
+                            # "Must home axis first" the way mainline Klipper does -
+                            # Moonraker forwards gcode with no timeout, so the UI just
+                            # sits there with no error (issue #85). Verified on a KS1
+                            # (fw 2.7.2.7): un-homed the printer stalls at mesh_min
+                            # 5,5; homed, the full 5x5 mesh probes and saves normally.
+                            'G28',
                             'MOVE_HEAT_POS',
                             f'M140 S{bed_temp}', # Set bed to 60
                             f'M109 S{extru_temp}', # Wait hotend to 170
