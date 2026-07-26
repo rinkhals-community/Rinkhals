@@ -231,7 +231,11 @@ class Kobra:
             with open('/useremain/dev/remote_ctrl_mode', 'r') as f:
                 remote_mode = f.read().strip()
             if remote_mode != self._remote_mode:
-                logging.info(f'[Kobra] Remote control mode is: {self._remote_mode}')
+                # Log the mode we just read, not the one we are replacing - logging
+                # the old value made debug bundles report the wrong mode (e.g. "cloud"
+                # while /useremain/dev/remote_ctrl_mode said "lan"), which sends issue
+                # triage down the wrong print path.
+                logging.info(f'[Kobra] Remote control mode is: {remote_mode}')
                 if remote_mode != 'lan':
                     self.server.add_warning(f'Your Kobra printer is not in LAN mode, prints won\'t be shown on the printer screen', warn_id='kobra_lan_mode')
                 else:
@@ -951,7 +955,12 @@ class Kobra:
 
         def wrap_set_active_spool(original_set_active_spool):
             def set_active_spool(me, spool_id = None, SPOOL_ID = None):
-                if spool_id is None:
+                # Only substitute when the caller actually passed SPOOL_ID (the
+                # SET_ACTIVE_SPOOL SPOOL_ID=n remote method this wrapper exists for).
+                # set_active_spool(None) is a legitimate deactivate that Moonraker
+                # itself issues when the active spool 404s; the previous
+                # unconditional int(SPOOL_ID) turned that into a TypeError.
+                if spool_id is None and SPOOL_ID is not None:
                     logging.info('[Kobra] Injected SPOOL_ID')
                     spool_id = int(SPOOL_ID)
                 return original_set_active_spool(me, spool_id)
