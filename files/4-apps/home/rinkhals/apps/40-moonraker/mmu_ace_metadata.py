@@ -31,12 +31,17 @@ def gcode_processed_already(file_path):
         line = in_file.readline()
         return mmu_regex.match(line)
 
+# Lines emitted by newer OrcaSlicer versions that Anycubic's Go firmware
+# (gklib) cannot parse — causes slice-bounds panic (error 10111).
+GCODE_STRIP_PREFIXES = ("; filament_colour_type",)
+
 def parse_gcode_file(file_path):
     slicer_regex = re.compile(SLICER_REGEX, re.IGNORECASE)
     slicer = None
 
     tools_used = set()
     total_toolchanges = 0
+    needs_strip = False
 
     with open(file_path, 'r') as in_file:
         for line in in_file:
@@ -45,7 +50,11 @@ def parse_gcode_file(file_path):
                 match = slicer_regex.match(line)
                 if match:
                     slicer = match.group(1) or match.group(2)
-    
+            # Detect lines gklib cannot parse. This pass already walks the whole
+            # file, so checking here is free and saves an extra read.
+            if not needs_strip and line.lstrip().startswith(GCODE_STRIP_PREFIXES):
+                needs_strip = True
+
     if slicer in AUTHORZIED_SLICERS:
         tools_regex = re.compile(TOOL_DISCOVERY_REGEX, re.IGNORECASE)
 
@@ -61,21 +70,25 @@ def parse_gcode_file(file_path):
         "slicer": slicer,
         "tools_used": sorted(tools_used),
         "total_toolchanges": total_toolchanges,
+        "needs_strip": needs_strip,
     }
 
-# Lines emitted by newer OrcaSlicer versions that Anycubic's Go firmware
-# (gklib) cannot parse — causes slice-bounds panic (error 10111).
-GCODE_STRIP_PREFIXES = ("; filament_colour_type",)
-
 def process_file(input_filename, output_filename, tools_used, total_toolchanges):
+    # Only stamp MMU metadata for genuinely multi-tool files. For a single-tool
+    # file we are here purely to strip lines gklib cannot parse, so the content
+    # is otherwise left byte-for-byte alone (no fingerprint, no tools comment).
+    write_mmu_metadata = bool(tools_used)
+
     with open(input_filename, 'r') as infile, open(output_filename, 'w') as outfile:
-        outfile.write(f'{MMU_ACE_FINGERPRINT}\n')
+        if write_mmu_metadata:
+            outfile.write(f'{MMU_ACE_FINGERPRINT}\n')
         for line in infile:
             if line.lstrip().startswith(GCODE_STRIP_PREFIXES):
                 continue
             outfile.write(line)
         # Append referenced tools metadata
-        outfile.write("; referenced_tools = %s\n" % ",".join(map(str, tools_used)))
+        if write_mmu_metadata:
+            outfile.write("; referenced_tools = %s\n" % ",".join(map(str, tools_used)))
 
 def main(config: Dict[str, Any], metadata) -> None:
     logging.debug("main setup_anycubic_slicer metadata extraction")
@@ -100,10 +113,18 @@ def main(config: Dict[str, Any], metadata) -> None:
                 slicer = parse_result["slicer"]
                 tools_used = parse_result["tools_used"]
                 total_toolchanges = parse_result["total_toolchanges"]
+                needs_strip = parse_result["needs_strip"]
                 metadata.logger.info("Reading placeholders took %.2fs. Detected gcode by slicer: %s" % (time.time() - start, slicer))
                 metadata.logger.info("Detected tools: %s" % tools_used)
 
-                if tools_used is not None and len(tools_used) > 0:
+                # Rewrite when there are tools to record OR when the file carries a
+                # line gklib cannot parse. The strip used to live behind the
+                # tools_used gate, which made it dead code for every single-tool
+                # file - i.e. it never ran for the prints most likely to hit it.
+                if needs_strip:
+                    metadata.logger.info("Found gcode lines gklib cannot parse, stripping them")
+
+                if needs_strip or (tools_used is not None and len(tools_used) > 0):
                     process_file(file_path, tmp_file, tools_used, total_toolchanges)
 
                     # Move temporary file back in place
