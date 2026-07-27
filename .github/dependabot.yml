@@ -1,0 +1,51 @@
+version: 2
+
+# Dependabot had no config at all, so it fell back to the repository default
+# branch (master) and opened every update against it. master is release-only
+# here - everything lands on develop first - so those PRs all had to be
+# retargeted by hand before they could be merged. target-branch fixes that.
+updates:
+  # Web portal frontend. Its build output is bundled into the firmware image
+  # shipped to printers, so runtime dependency updates here reach real devices.
+  - package-ecosystem: npm
+    directory: /web-portal
+    target-branch: develop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # These share package-lock.json, so separate PRs conflict with each other
+      # and have to be merged one at a time with a rebase in between. Grouping
+      # the routine ones keeps that to a single lockfile change.
+      dev-dependencies:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Major bumps here have meant a bundler swap (vite 7 -> 8 moved us from
+      # rollup+esbuild to rolldown), which changes the JavaScript we ship and
+      # needs a deliberate decision plus a build and browser test. Security
+      # updates are unaffected by ignore rules and still come through.
+      - dependency-name: vite
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@sveltejs/vite-plugin-svelte"
+        update-types:
+          - version-update:semver-major
+
+  # Go backend for the web portal.
+  - package-ecosystem: gomod
+    directory: /files/4-apps/home/rinkhals/apps/65-rinkhals-web
+    target-branch: develop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  # Actions used by the release and docs workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
