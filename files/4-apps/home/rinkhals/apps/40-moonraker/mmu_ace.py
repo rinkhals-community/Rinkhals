@@ -627,6 +627,11 @@ class MmuAceController:
 
         self._last_gate_fingerprint: str = ""
 
+        # Optional callback invoked at the end of _disable_ace(). Wired
+        # by MmuAcePatcher to also clear its subscription diff cache,
+        # since that cache lives on the patcher, not the controller.
+        self._on_ace_disabled: Optional[Callable[[], None]] = None
+
         # Start periodic cache cleanup task (runs every 60 seconds)
         # Removes expired temperature cache entries to prevent slow memory leak
         asyncio.create_task(self._periodic_cache_cleanup())
@@ -664,6 +669,9 @@ class MmuAceController:
         self._invalidate_gate_cache()
         self._last_gate_fingerprint = ""  # force status push on next _set_ace_status
         self._handle_status_update(force=True)
+
+        if self._on_ace_disabled is not None:
+            self._on_ace_disabled()
 
     def _handle_status_update(self, force: bool = False, throttle: bool = False):
         """Send status update notification with debouncing or throttling.
@@ -1567,6 +1575,7 @@ class MmuAcePatcher:
 
         host = config.get("host", None)
         self.ace_controller = MmuAceController(self.server, host)
+        self.ace_controller._on_ace_disabled = self._reset_mmu_status_cache
 
         # Tracks the single in-flight auto-feed poller (issue #464). patch_print_data
         # runs inside kobra.py's network retry loop, so without tracking, a retried
@@ -2358,6 +2367,11 @@ class MmuAcePatcher:
             self._auto_feed_task.cancel()
             self._auto_feed_task = None
 
+        # Clear the MMU status diff cache too, so the first push after a
+        # reinit forwards a full snapshot instead of diffing against
+        # values captured before the reset (see patch_status()).
+        self._reset_mmu_status_cache()
+
         self.ace = MmuAce()
         self.ace_controller.set_ace(self.ace)
 
@@ -2385,6 +2399,15 @@ class MmuAcePatcher:
     def get_status(self) -> dict:
         return asdict(self.ace_controller.get_status())
 
+    def _reset_mmu_status_cache(self):
+        """Clear the subscription diff cache (see patch_status()).
+        Called from reinit() and wired as MmuAceController's
+        ACE-disable callback so that whichever path resets ACE
+        state, the next status push forwards a full MMU snapshot
+        instead of comparing against values captured before the
+        reset."""
+        self._last_pushed_mmu_status = {}
+
     def patch_status(self, status: dict, is_subscription_update: bool = False):
 
         mmu_status = self.get_status()
@@ -2393,6 +2416,14 @@ class MmuAcePatcher:
         if not is_subscription_update:
             for key, value in mmu_status.items():
                 status[key] = value
+                # Keep the diff cache in sync even on the non-subscription
+                # (query) path. Without this, a query response can hand a
+                # client a value the subscription-diff cache never learns
+                # about; if the state later reverts, the next subscribed
+                # push compares against the stale pre-query cache, finds
+                # no difference, and the client is stuck showing the
+                # queried value indefinitely.
+                self._last_pushed_mmu_status[key] = value
             return status
 
         # Subscription-update when changed

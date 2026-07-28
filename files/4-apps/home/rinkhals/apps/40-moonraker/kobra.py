@@ -112,7 +112,7 @@ class Kobra:
 
     # GCode handlers
     gcode_handlers: dict[str, FlexCallback] = {}
-    status_patchers: List[Callable[[dict], dict]] = []
+    status_patchers: List[Callable[[dict, bool], dict]] = []
     print_data_patchers: List[Callable[[dict], dict]] = []
 
     def __init__(self, config):
@@ -860,6 +860,25 @@ class Kobra:
         setattr(KlippyAPI, 'send_status', wrap_send_status(KlippyAPI.send_status))
         logging.debug(f'  After: {KlippyAPI.send_status}')
 
+        # NOTE: ordering invariant for MMU status diffing (MmuAcePatcher.patch_status).
+        # patch_status() runs TWICE per GoKlipper status push: once here in
+        # the outer wrapper below, before delegating to the original
+        # handler, and again inside wrap_send_status's KlippyAPI.send_status
+        # above, since KlippyAPI is the host Subscribable that
+        # original__process_status_update fans the update out to for each
+        # connected client.
+        #
+        # The call in the outer wrapper below MUST run BEFORE delegating to
+        # original__process_status_update. That first call folds only the
+        # changed MMU keys into the shared `status` dict AND syncs the diff
+        # cache, so every subsequent send_status() call for each fanned-out
+        # subscriber sees an up-to-date cache (and correctly contributes no
+        # further changes), while still handing every subscriber the same
+        # already-patched `status` object. If this call were moved to run
+        # only inside send_status, or moved to after delegating here, only
+        # the first subscriber's send_status call would observe the diff
+        # and sync the cache -- every other subscriber in the same fan-out
+        # would silently receive a status frame with the MMU keys missing.
         def wrap__process_status_update(original__process_status_update):
             def _process_status_update(me, eventtime, status):
                 status = self.patch_status(status, is_subscription_update=True)
@@ -1436,6 +1455,27 @@ class Kobra:
         logging.debug(f'  Before: {KlippyConnection.request}')
         setattr(KlippyConnection, 'request', wrap_request(KlippyConnection.request))
         logging.debug(f'  After: {KlippyConnection.request}')
+
+        def wrap__request_standard(original__request_standard):
+            async def _request_standard(me, web_request, timeout=None):
+                args = web_request.get_args()
+
+                # gklib doesn't implement these, so never forward them.
+                # Unlike bed_mesh above, no synthesise-back is needed:
+                # patch_status merges mmu/mmu_machine onto every status.
+                if (self.is_goklipper_running() and
+                        isinstance(args, dict) and
+                        isinstance(args.get('objects'), dict) and
+                        web_request.get_endpoint() in ('objects/query', 'objects/subscribe')):
+                    args['objects'].pop('mmu', None)
+                    args['objects'].pop('mmu_machine', None)
+
+                return await original__request_standard(me, web_request, timeout)
+            return _request_standard
+
+        logging.debug(f'  Before: {KlippyConnection._request_standard}')
+        setattr(KlippyConnection, '_request_standard', wrap__request_standard(KlippyConnection._request_standard))
+        logging.debug(f'  After: {KlippyConnection._request_standard}')
 
     def patch_mainsail(self):
         from .klippy_connection import KlippyConnection

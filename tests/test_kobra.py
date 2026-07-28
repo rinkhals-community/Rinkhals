@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -132,9 +133,33 @@ def _build_klippy_connection_module():
                 }
             return {"original": endpoint}
 
+        # patch_objects_list wraps _request_standard too (MMU stripping), so the
+        # fake must expose it even for tests that only exercise objects/list.
+        @staticmethod
+        async def _request_standard(me, web_request, timeout=None):
+            return {"status": {}}
+
+    class KlippyRequest:
+        @staticmethod
+        def set_result(me, result):
+            pass
+
     klippy_connection_module.KlippyConnection = KlippyConnection
+    klippy_connection_module.KlippyRequest = KlippyRequest
     sys.modules[KLIPPY_CONNECTION_NAME] = klippy_connection_module
     return klippy_connection_module
+
+
+class FakeObjectsWebRequest:
+    def __init__(self, endpoint: str, args: dict):
+        self._endpoint = endpoint
+        self._args = args
+
+    def get_endpoint(self):
+        return self._endpoint
+
+    def get_args(self):
+        return self._args
 
 
 def load_kobra_module():
@@ -333,6 +358,108 @@ class KobraObjectsListPatchTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertNotIn("chamber_temp", objects)
+
+
+class KobraMmuObjectStrippingTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_kobra_module()
+
+    def setUp(self):
+        self.klippy_connection_module = _build_klippy_connection_module()
+        self.kobra = self.module.Kobra.__new__(self.module.Kobra)
+        # Cache is valid for the next 100s, so is_goklipper_running()
+        # short-circuits on the cached PID without scanning /proc.
+        self.kobra._goklipper_next_check = time.time() + 100
+
+    async def _install_fake_and_patch(self, goklipper_pid):
+        self.kobra._goklipper_pid = goklipper_pid
+
+        captured = {}
+
+        async def fake_request_standard(me, web_request, timeout=None):
+            captured['objects'] = dict(web_request.get_args()['objects'])
+            return {"status": {}}
+
+        self.klippy_connection_module.KlippyConnection._request_standard = fake_request_standard
+        self.kobra.patch_objects_list()
+        return captured
+
+    async def test_mmu_and_mmu_machine_stripped_when_goklipper_running(self):
+        captured = await self._install_fake_and_patch(goklipper_pid=12345)
+
+        web_request = FakeObjectsWebRequest(
+            "objects/subscribe",
+            {"objects": {"mmu": None, "mmu_machine": None, "toolhead": None}},
+        )
+        result = await self.klippy_connection_module.KlippyConnection._request_standard(
+            None, web_request
+        )
+
+        self.assertNotIn('mmu', captured['objects'])
+        self.assertNotIn('mmu_machine', captured['objects'])
+        self.assertIn('toolhead', captured['objects'])
+        self.assertEqual(result, {"status": {}})
+
+    async def test_mmu_objects_not_stripped_when_goklipper_not_running(self):
+        captured = await self._install_fake_and_patch(goklipper_pid=None)
+
+        web_request = FakeObjectsWebRequest(
+            "objects/subscribe",
+            {"objects": {"mmu": None, "mmu_machine": None}},
+        )
+        await self.klippy_connection_module.KlippyConnection._request_standard(None, web_request)
+
+        self.assertIn('mmu', captured['objects'])
+        self.assertIn('mmu_machine', captured['objects'])
+
+    async def test_mmu_objects_not_stripped_for_unrelated_endpoint(self):
+        captured = await self._install_fake_and_patch(goklipper_pid=12345)
+
+        web_request = FakeObjectsWebRequest(
+            "some/other/endpoint",
+            {"objects": {"mmu": None}},
+        )
+        await self.klippy_connection_module.KlippyConnection._request_standard(None, web_request)
+
+        self.assertIn('mmu', captured['objects'])
+
+
+class KobraStatusPatcherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_kobra_module()
+
+    def setUp(self):
+        self.kobra = self.module.Kobra.__new__(self.module.Kobra)
+        # Kobra.status_patchers is a mutable CLASS-level default list;
+        # shadow it with a fresh instance list so this test doesn't
+        # leak patchers into other tests/instances.
+        self.kobra.status_patchers = []
+
+    def test_registered_patcher_receives_status_and_is_subscription_update(self):
+        received = []
+
+        def patcher(status, is_subscription_update):
+            received.append((status, is_subscription_update))
+            return status
+
+        self.kobra.register_status_patcher(patcher)
+        self.kobra.patch_status({"foo": "bar"}, is_subscription_update=True)
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], {"foo": "bar"})
+        self.assertIs(received[0][1], True)
+
+    def test_patch_status_defaults_is_subscription_update_to_false(self):
+        received = []
+        self.kobra.register_status_patcher(
+            lambda status, is_sub: (received.append(is_sub), status)[1]
+        )
+
+        self.kobra.patch_status({})
+
+        self.assertEqual(received, [False])
 
 
 if __name__ == "__main__":

@@ -166,6 +166,18 @@ class MmuAceControllerSyncTests(unittest.TestCase):
         self.assertEqual(status.mmu.filament_pos, self.module.FILAMENT_POS_UNLOADED)
         self.assertTrue(status.mmu.active_filament.empty)
 
+    def test_disable_ace_invokes_registered_reset_callback(self):
+        calls = []
+        self.controller._on_ace_disabled = lambda: calls.append(True)
+
+        self.controller._disable_ace("test reason")
+
+        self.assertEqual(calls, [True])
+
+    def test_disable_ace_without_callback_does_not_raise(self):
+        self.controller._on_ace_disabled = None
+        self.controller._disable_ace("test reason")  # must not raise
+
 
 class MmuAcePartialUpdateTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
@@ -390,6 +402,73 @@ class MmuRecoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refresh_calls, [{"force": True}])
         self.assertEqual(len(responses), 1)
         self.assertIn("ACE status refreshed", responses[0])
+
+
+class MmuAcePatchStatusTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def _make_patcher(self, mmu_status):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        patcher._last_pushed_mmu_status = {}
+        patcher.get_status = lambda: mmu_status
+        return patcher
+
+    def test_non_subscription_returns_full_snapshot_and_updates_cache(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+
+        status = patcher.patch_status({}, is_subscription_update=False)
+
+        self.assertEqual(status, {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        # Regression check for the lost-update hole: the non-subscription
+        # path must also populate the diff cache.
+        self.assertEqual(
+            patcher._last_pushed_mmu_status,
+            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
+        )
+
+    def test_subscription_suppresses_unchanged_and_emits_changed(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        patcher._last_pushed_mmu_status = {"mmu": {"gate": 0}, "mmu_machine": {"num_units": 1}}
+
+        status = patcher.patch_status({}, is_subscription_update=True)
+
+        self.assertEqual(status, {"mmu": {"gate": 1}})
+        self.assertEqual(
+            patcher._last_pushed_mmu_status,
+            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
+        )
+
+    def test_query_between_subscription_pushes_does_not_leave_stale_cache(self):
+        """Reproduces the review's lost-update scenario: baseline X,
+        MMU changes to Y, a client queries and is served Y, MMU
+        reverts to X -- the next subscribed push must still emit the
+        reverted value X instead of finding a false non-diff."""
+        patcher = self._make_patcher({"mmu": {"gate": 0}})
+
+        # Baseline subscribed push (X).
+        patcher.patch_status({}, is_subscription_update=True)
+
+        # MMU changes to Y; a client issues a query (non-subscription).
+        patcher.get_status = lambda: {"mmu": {"gate": 1}}
+        patcher.patch_status({}, is_subscription_update=False)
+
+        # MMU reverts to X; the next subscribed push must not be empty.
+        patcher.get_status = lambda: {"mmu": {"gate": 0}}
+        status = patcher.patch_status({}, is_subscription_update=True)
+
+        self.assertEqual(status, {"mmu": {"gate": 0}})
+
+    def test_reinit_resets_mmu_status_cache(self):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        patcher._auto_feed_task = None
+        patcher._last_pushed_mmu_status = {"mmu": {"gate": 5}}
+        patcher.ace_controller = types.SimpleNamespace(set_ace=lambda ace: None)
+
+        patcher.reinit()
+
+        self.assertEqual(patcher._last_pushed_mmu_status, {})
 
 
 if __name__ == "__main__":
