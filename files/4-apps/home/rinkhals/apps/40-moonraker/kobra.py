@@ -1388,6 +1388,21 @@ class Kobra:
                         objects.append("fan_generic air_filter_fan")
                         objects.append("fan_generic box_fan")
 
+                        # The chamber heater is a first-class GoKlipper heater on the S1 family
+                        # ([chamber_temp] in the stock printer.cfg, PID controlled, max_temp 65),
+                        # and it is already reported in heaters.available_heaters. It was simply
+                        # never added to this list, so Mainsail/Fluidd never subscribed to it and
+                        # users had no chamber temperature readout or setpoint in the web UI.
+                        objects.append("chamber_temp")
+
+                    if self.KOBRA_MODEL_CODE == 'KS1M':
+                        # S1 Max also defines a chamber circulation fan, an external exhaust fan
+                        # and a mainboard controller fan. All three respond to objects/query but
+                        # were not exposed.
+                        objects.append("fan_generic chamber_fan")
+                        objects.append("fan_generic exhaust_fan")
+                        objects.append("controller_fan controller_fan")
+
                     return { "objects": objects }
                 return await original_request(me, web_request)
             return request
