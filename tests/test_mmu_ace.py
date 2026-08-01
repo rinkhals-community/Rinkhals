@@ -138,6 +138,17 @@ class MmuAceControllerSyncTests(unittest.TestCase):
         self.assertEqual(status.mmu.filament_pos, self.module.FILAMENT_POS_LOADED)
         self.assertFalse(status.mmu.active_filament.empty)
 
+    def test_refresh_handles_missing_or_empty_color_without_crashing(self):
+        hub = self._build_filament_hub("")
+        hub["filament_hubs"][0]["slots"][0]["color"] = []
+        del hub["filament_hubs"][0]["slots"][1]["color"]
+
+        self.controller._set_ace_status(hub)
+
+        gates = self.controller.ace.units[0].gates
+        self.assertEqual(gates[0].color, [0, 0, 0, 255])
+        self.assertEqual(gates[1].color, [0, 0, 0, 255])
+
     def test_refresh_clears_loaded_gate_when_hardware_reports_empty(self):
         self.controller.ace.loaded_gate = 1
         self.controller.ace.gate = 1
