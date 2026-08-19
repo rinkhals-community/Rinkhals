@@ -1197,7 +1197,7 @@ class MmuAceController:
                 gate.index = index
                 gate.material = type
                 gate.filament_name = type
-                gate.color = rgb_to_rgba(color)
+                gate.color = rgb_to_rgba(color) if color and len(color) >= 3 else [0, 0, 0, 255]
                 gate.rfid = rfid
                 gate.source = source
                 gate.status = GATE_AVAILABLE if status == "ready" else GATE_EMPTY if status == "empty" or status == "runout" else GATE_UNKNOWN
