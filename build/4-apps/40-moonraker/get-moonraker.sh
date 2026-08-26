@@ -21,5 +21,12 @@ mkdir -p $MOONRAKER_DIRECTORY/moonraker
 rm -rf $MOONRAKER_DIRECTORY/moonraker/*
 cp -pr "$WORK"/moonraker/*/* $MOONRAKER_DIRECTORY/moonraker
 
+# Apply Rinkhals spoolman compatibility fix directly in Moonraker source.
+# See: https://github.com/utkabobr/DuckPro-Kobra3/issues/54#issuecomment-2540040852
+SPOOLMAN_FILE="$MOONRAKER_DIRECTORY/moonraker/moonraker/components/spoolman.py"
+if [ -f "$SPOOLMAN_FILE" ] && ! grep -q "SPOOL_ID: Union\[int, None\]" "$SPOOLMAN_FILE"; then
+	perl -0pi -e 's/def set_active_spool\(self, spool_id: Union\[int, None\]\) -> None:\n        assert spool_id is None or isinstance\(spool_id, int\)/def set_active_spool(self, spool_id: Union[int, None] = None, SPOOL_ID: Union[int, None] = None) -> None:\n        if spool_id is None and SPOOL_ID is not None:\n            spool_id = int(str(SPOOL_ID).lstrip("="))\n        assert spool_id is None or isinstance(spool_id, int)/' "$SPOOLMAN_FILE"
+fi
+
 VERSION=$(echo $MOONRAKER_COMMIT | cut -c1-7)
 sed -i "s/\"version\": *\"[^\"]*\"/\"version\": \"${VERSION}\"/" $MOONRAKER_DIRECTORY/app.json
