@@ -3,7 +3,9 @@ name: Auto release on tag
 on:
   push:
     tags:
-      - '*'
+      # Release tags only (YYYYMMDD_NN, optionally _test). A bare '*' meant any
+      # stray tag published a draft release with all 12 SWU assets attached.
+      - '20*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
