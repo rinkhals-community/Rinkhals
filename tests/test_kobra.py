@@ -1,8 +1,10 @@
+import copy
 import importlib.util
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -13,6 +15,7 @@ COMMON_NAME = "testsupport.moonraker.common"
 UTILS_NAME = "testsupport.moonraker.utils"
 POWER_NAME = "testsupport.moonraker.components.power"
 MACHINE_NAME = "testsupport.moonraker.components.machine"
+KLIPPY_CONNECTION_NAME = "testsupport.moonraker.components.klippy_connection"
 
 
 class DummyTask:
@@ -47,11 +50,15 @@ class DummyServer:
 
 
 class DummyWebRequest:
-    def __init__(self, endpoint: str):
-        self._endpoint = endpoint
+    def __init__(self, endpoint: str, args=None):
+        self.endpoint = endpoint
+        self._args = args or {}
 
     def get_endpoint(self):
-        return self._endpoint
+        return self.endpoint
+
+    def get_args(self):
+        return self._args
 
 
 def _ensure_package(name: str):
@@ -96,6 +103,38 @@ def _build_machine_module():
     machine_module.Machine = Machine
     sys.modules[MACHINE_NAME] = machine_module
     return machine_module
+
+
+def _build_klippy_connection_module():
+    klippy_connection_module = types.ModuleType(KLIPPY_CONNECTION_NAME)
+
+    class KlippyConnection:
+        def __init__(self, available_heaters=None, heater_error=None):
+            self.available_heaters = available_heaters or []
+            self.heater_error = heater_error
+            self.requests = []
+
+        async def request(self, web_request):
+            endpoint = web_request.get_endpoint()
+            self.requests.append((endpoint, copy.deepcopy(web_request.get_args())))
+
+            if endpoint == "gcode/help":
+                return {"TEST_MACRO": "test"}
+            if endpoint == "objects/query":
+                if self.heater_error is not None:
+                    raise self.heater_error
+                return {
+                    "status": {
+                        "heaters": {
+                            "available_heaters": self.available_heaters,
+                        }
+                    }
+                }
+            return {"original": endpoint}
+
+    klippy_connection_module.KlippyConnection = KlippyConnection
+    sys.modules[KLIPPY_CONNECTION_NAME] = klippy_connection_module
+    return klippy_connection_module
 
 
 def load_kobra_module():
@@ -191,6 +230,109 @@ class KobraMachineRebootPatchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(scheduled, [])
         self.assertEqual(machine.original_calls, [])
+
+
+class KobraEnvironmentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_kobra_module()
+
+    @mock.patch.object(
+        load_kobra_module().subprocess,
+        "check_output",
+        return_value=b"20029|KS1M|2.7.1.4|device-id\n",
+    )
+    def test_reads_firmware_version_from_tools(self, _check_output):
+        self.assertEqual(
+            self.module._read_env_from_tools(),
+            {
+                "KOBRA_MODEL_ID": "20029",
+                "KOBRA_MODEL_CODE": "KS1M",
+                "KOBRA_VERSION": "2.7.1.4",
+                "KOBRA_DEVICE_ID": "device-id",
+            },
+        )
+
+
+class KobraObjectsListPatchTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_kobra_module()
+
+    def setUp(self):
+        self.klippy_connection_module = _build_klippy_connection_module()
+        self.kobra = self.module.Kobra.__new__(self.module.Kobra)
+        self.kobra.is_goklipper_running = lambda: True
+
+    async def _objects_for(self, model, version, available_heaters=None, heater_error=None):
+        self.kobra.KOBRA_MODEL_CODE = model
+        self.kobra.KOBRA_VERSION = version
+        self.kobra.patch_objects_list()
+        connection = self.klippy_connection_module.KlippyConnection(
+            available_heaters=available_heaters,
+            heater_error=heater_error,
+        )
+        result = await connection.request(DummyWebRequest("objects/list"))
+        return result["objects"], connection.requests
+
+    async def test_ks1_without_reported_chamber_does_not_expose_it(self):
+        objects, requests = await self._objects_for(
+            "KS1",
+            "2.7.2.7",
+            available_heaters=["heater_bed", "extruder"],
+        )
+
+        self.assertNotIn("chamber_temp", objects)
+        self.assertNotIn("controller_fan controller_fan", objects)
+        self.assertEqual(
+            requests[-1],
+            (
+                "objects/query",
+                {"objects": {"heaters": ["available_heaters"]}},
+            ),
+        )
+
+    async def test_other_model_exposes_chamber_when_reported(self):
+        objects, _requests = await self._objects_for(
+            "K3",
+            "2.4.6.7",
+            available_heaters=["heater_bed", "chamber_temp", "extruder"],
+        )
+
+        self.assertIn("chamber_temp", objects)
+
+    async def test_verified_ks1m_exposes_reported_chamber_and_fans(self):
+        objects, _requests = await self._objects_for(
+            "KS1M",
+            "2.7.1.4",
+            available_heaters=["heater_bed", "chamber_temp", "extruder"],
+        )
+
+        self.assertIn("chamber_temp", objects)
+        self.assertIn("fan_generic chamber_fan", objects)
+        self.assertIn("fan_generic exhaust_fan", objects)
+        self.assertIn("controller_fan controller_fan", objects)
+
+    async def test_older_ks1m_exposes_reported_chamber_but_not_unverified_fans(self):
+        objects, _requests = await self._objects_for(
+            "KS1M",
+            "2.6.9.3",
+            available_heaters=["heater_bed", "chamber_temp", "extruder"],
+        )
+
+        self.assertIn("chamber_temp", objects)
+        self.assertNotIn("fan_generic chamber_fan", objects)
+        self.assertNotIn("fan_generic exhaust_fan", objects)
+        self.assertNotIn("controller_fan controller_fan", objects)
+
+    async def test_heater_discovery_failure_does_not_advertise_chamber(self):
+        objects, _requests = await self._objects_for(
+            "KS1M",
+            "2.7.1.4",
+            heater_error=RuntimeError("query failed"),
+        )
+
+        self.assertNotIn("chamber_temp", objects)
 
 
 if __name__ == "__main__":

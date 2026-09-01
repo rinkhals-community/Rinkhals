@@ -266,6 +266,18 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         patchJumpAddress = 0x177cdc
         patchReturnAddress = 0x177dcc
         s1CaseAlreadySelected = True
+    elif modelCode == 'KS1M' and version == '2.7.2.1':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Same jump-table dispatch as 2.6.9.3/2.6.9.6/2.7.1.4. Read straight off
+        # the table: callback is at 0x17b7f8, the dispatch (cmp r3,#4 /
+        # addls pc,pc,r3,lsl#2) sits at 0x17b840, so the table base is 0x17b848
+        # and entry 3 (Service Support) branches to 0x17baf4. That case body has
+        # the expected shape - short this-ptr load, mov r1,#3 for the page index,
+        # then the nav call - and ends with b 0x17bbe4 into the shared switch
+        # epilogue, which is our return address.
+        patchJumpAddress = 0x17baf4
+        patchReturnAddress = 0x17bbe4
+        s1CaseAlreadySelected = True
 
     else:
         raise Exception('Unsupported model and version')

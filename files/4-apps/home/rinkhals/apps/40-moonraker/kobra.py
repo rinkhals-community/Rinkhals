@@ -47,14 +47,15 @@ def _read_env_from_tools() -> dict:
     """
     try:
         # Source tools.sh and print only the vars we need
-        cmd = '. /useremain/rinkhals/.current/tools.sh && echo "$KOBRA_MODEL_ID|$KOBRA_MODEL_CODE|$KOBRA_DEVICE_ID"'
+        cmd = '. /useremain/rinkhals/.current/tools.sh && echo "$KOBRA_MODEL_ID|$KOBRA_MODEL_CODE|$KOBRA_VERSION|$KOBRA_DEVICE_ID"'
         result = subprocess.check_output(['sh', '-c', cmd], stderr=subprocess.DEVNULL)
         parts = result.decode('utf-8').strip().split('|')
-        if len(parts) == 3:
+        if len(parts) == 4:
             return {
                 'KOBRA_MODEL_ID': parts[0],
                 'KOBRA_MODEL_CODE': parts[1],
-                'KOBRA_DEVICE_ID': parts[2]
+                'KOBRA_VERSION': parts[2],
+                'KOBRA_DEVICE_ID': parts[3]
             }
     except:
         pass
@@ -87,6 +88,7 @@ class Kobra:
     # Environment
     KOBRA_MODEL_ID = None
     KOBRA_MODEL_CODE = None
+    KOBRA_VERSION = None
     KOBRA_DEVICE_ID = None
     MQTT_USERNAME = None
     MQTT_PASSWORD = None
@@ -124,6 +126,7 @@ class Kobra:
 
             self.KOBRA_MODEL_ID = environment.get('KOBRA_MODEL_ID')
             self.KOBRA_MODEL_CODE = environment.get('KOBRA_MODEL_CODE')
+            self.KOBRA_VERSION = environment.get('KOBRA_VERSION')
             self.KOBRA_DEVICE_ID = environment.get('KOBRA_DEVICE_ID')
             
             def load_tool_function(function_name):
@@ -231,7 +234,11 @@ class Kobra:
             with open('/useremain/dev/remote_ctrl_mode', 'r') as f:
                 remote_mode = f.read().strip()
             if remote_mode != self._remote_mode:
-                logging.info(f'[Kobra] Remote control mode is: {self._remote_mode}')
+                # Log the mode we just read, not the one we are replacing - logging
+                # the old value made debug bundles report the wrong mode (e.g. "cloud"
+                # while /useremain/dev/remote_ctrl_mode said "lan"), which sends issue
+                # triage down the wrong print path.
+                logging.info(f'[Kobra] Remote control mode is: {remote_mode}')
                 if remote_mode != 'lan':
                     self.server.add_warning(f'Your Kobra printer is not in LAN mode, prints won\'t be shown on the printer screen', warn_id='kobra_lan_mode')
                 else:
@@ -951,9 +958,15 @@ class Kobra:
 
         def wrap_set_active_spool(original_set_active_spool):
             def set_active_spool(me, spool_id = None, SPOOL_ID = None):
-                if spool_id is None:
+                # Only substitute when the caller actually passed SPOOL_ID (the
+                # SET_ACTIVE_SPOOL SPOOL_ID=n remote method this wrapper exists for).
+                # set_active_spool(None) is a legitimate deactivate that Moonraker
+                # itself issues when the active spool 404s; the previous
+                # unconditional int(SPOOL_ID) turned that into a TypeError.
+                if spool_id is None and SPOOL_ID is not None:
                     logging.info('[Kobra] Injected SPOOL_ID')
-                    spool_id = int(SPOOL_ID)
+                    # Strip leading = in case macro passed SPOOL_ID with syntax S=5 vs S5
+                    spool_id = int(str(SPOOL_ID).lstrip('='))
                 return original_set_active_spool(me, spool_id)
             return set_active_spool
 
@@ -1209,6 +1222,15 @@ class Kobra:
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
                         calibrate_script = [
+                            # Home first. Without this the printer can reach
+                            # BED_MESH_CALIBRATE un-homed, and GoKlipper then blocks
+                            # forever at the first probe point instead of raising
+                            # "Must home axis first" the way mainline Klipper does -
+                            # Moonraker forwards gcode with no timeout, so the UI just
+                            # sits there with no error (issue #85). Verified on a KS1
+                            # (fw 2.7.2.7): un-homed the printer stalls at mesh_min
+                            # 5,5; homed, the full 5x5 mesh probes and saves normally.
+                            'G28',
                             'MOVE_HEAT_POS',
                             f'M140 S{bed_temp}', # Set bed to 60
                             f'M109 S{extru_temp}', # Wait hotend to 170
@@ -1369,6 +1391,38 @@ class Kobra:
                     if self.KOBRA_MODEL_CODE == 'KS1' or self.KOBRA_MODEL_CODE == 'KS1M':
                         objects.append("fan_generic air_filter_fan")
                         objects.append("fan_generic box_fan")
+
+                    # Asking for the existing heaters object is safe and lets the printer tell us
+                    # whether chamber_temp exists on this exact model and firmware. Do not infer
+                    # it from a model family: KS1 2.7.2.7, for example, reports no chamber heater,
+                    # and subscribing to an absent object can panic GoKlipper.
+                    try:
+                        web_request.endpoint = 'objects/query'
+                        args = web_request.get_args()
+                        args.clear()
+                        args['objects'] = { 'heaters': ['available_heaters'] }
+                        heater_result = await original_request(me, web_request)
+                        available_heaters = heater_result.get('status', {}).get(
+                            'heaters', {}
+                        ).get('available_heaters', [])
+                        if (isinstance(available_heaters, list) and
+                                'chamber_temp' in available_heaters):
+                            objects.append("chamber_temp")
+                    except Exception as e:
+                        # Fail closed. A missing chamber tile is preferable to advertising an
+                        # unverified object that a client will immediately subscribe to.
+                        logging.warning(
+                            f'[Kobra] Could not discover available heaters: {e!r}'
+                        )
+
+                    if (self.KOBRA_MODEL_CODE == 'KS1M' and
+                            self.KOBRA_VERSION == '2.7.1.4'):
+                        # These three fans are verified on KS1M 2.7.1.4 only. In particular,
+                        # exhaust_fan was introduced in that firmware; exposing it on older
+                        # releases risks a fatal subscription to an object GoKlipper lacks.
+                        objects.append("fan_generic chamber_fan")
+                        objects.append("fan_generic exhaust_fan")
+                        objects.append("controller_fan controller_fan")
 
                     return { "objects": objects }
                 return await original_request(me, web_request)
