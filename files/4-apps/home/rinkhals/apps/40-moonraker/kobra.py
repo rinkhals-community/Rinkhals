@@ -965,7 +965,8 @@ class Kobra:
                 # unconditional int(SPOOL_ID) turned that into a TypeError.
                 if spool_id is None and SPOOL_ID is not None:
                     logging.info('[Kobra] Injected SPOOL_ID')
-                    spool_id = int(SPOOL_ID)
+                    # Strip leading = in case macro passed SPOOL_ID with syntax S=5 vs S5
+                    spool_id = int(str(SPOOL_ID).lstrip('='))
                 return original_set_active_spool(me, spool_id)
             return set_active_spool
 
