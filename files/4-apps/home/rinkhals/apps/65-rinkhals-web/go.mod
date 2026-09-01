@@ -1,6 +1,6 @@
 module thedju.net/rinkhals-web
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/creack/pty v1.1.24
@@ -11,9 +11,9 @@ require (
 require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/tklauser/numcpus v0.8.0 // indirect
-	golang.org/x/net v0.44.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
 
 require (
