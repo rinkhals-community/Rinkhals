@@ -29,20 +29,14 @@ start() {
         echo $PID > /tmp/rinkhals/mainsail.pid
     fi
 
-    socat TCP-LISTEN:80,reuseaddr,fork TCP:localhost:4409 &> /dev/null &
-    PID=$!
-    if [ "$?" == 0 ]; then
-        echo $PID > /tmp/rinkhals/mainsail-80.pid
-    fi
+    # Port 80 is now served by the Rinkhals web portal (65-rinkhals-web), so the
+    # old socat redirect from :80 to Mainsail's :4409 has been removed. Mainsail
+    # stays reachable on http://<printer-ip>:4409.
 }
 stop() {
     PID=$(cat /tmp/rinkhals/mainsail.pid 2> /dev/null)
     kill_by_id $PID
     rm /tmp/rinkhals/mainsail.pid 2> /dev/null
-
-    PID=$(cat /tmp/rinkhals/mainsail-80.pid 2> /dev/null)
-    kill_by_id $PID
-    rm /tmp/rinkhals/mainsail-80.pid 2> /dev/null
 }
 
 case "$1" in

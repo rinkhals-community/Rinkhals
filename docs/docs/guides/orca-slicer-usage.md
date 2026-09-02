@@ -28,7 +28,11 @@ Click the **Connection** button in the printer section on the left side.
 
 ![Connection Button](https://raw.githubusercontent.com/Rickeetz/Rinkhals/master/docs/docs/assets/orca-guide/Connection.png)
 
-Enter the local IP address of your printer and click the **Test** button.
+In the **Hostname, IP or URL** field, enter your printer's address including the Moonraker port: `http://YOUR_PRINTER_IP:7125`. Leave the API Key empty. Click the **Test** button.
+
+!!! warning Use port 7125, not the bare IP
+
+    OrcaSlicer's OctoPrint host type defaults to port 80. On Rinkhals, port 80 (the bare printer IP) now serves the password-protected Rinkhals web portal, so pointing OrcaSlicer at just the IP will fail to connect. Moonraker exposes an OctoPrint-compatible API directly on port 7125, so connect there instead. Mainsail (port 4409) and Fluidd (port 4408) proxy to the same Moonraker API if you prefer to use one of those addresses.
 
 !!! note Tip
 
@@ -47,8 +51,9 @@ If you encounter this error:
 
 ![Cannot Connect Error](https://raw.githubusercontent.com/Rickeetz/Rinkhals/master/docs/docs/assets/orca-guide/Cannot-Connect-Port80-Orca.png)
 
-Make sure your computer is connected to the same network as your printer. 
-Also, ensure you are using Fluidd or Mainsail as a WebUI and have the necessary apps for those services activated.
+- Make sure your computer is connected to the same network as your printer.
+- Make sure the address includes the Moonraker port, `:7125`. The bare printer IP now serves the password-protected Rinkhals web portal, not the printer API, so a connection to just the IP (port 80) will fail like this.
+- Make sure Moonraker is running (the 40-moonraker app is enabled).
 
 Click **OK** on the settings screen.
 

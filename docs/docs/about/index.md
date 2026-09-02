@@ -34,8 +34,10 @@ Additionally, Kobra X SWU updates appear to require certificate validation. Unti
 
 TLDR:
 - SSH on port 22 (root: rockchip except for K3M)
-- Mainsail on port 80 and 4409
+- Rinkhals web portal on port 80 (the printer's bare IP) and port 8090
+- Mainsail on port 4409
 - Fluidd on port 4408
+- Moonraker API on port 7125 (use this for OrcaSlicer and other slicer/automation uploads)
 
 
 ## Features and built-in apps
@@ -113,25 +115,20 @@ By default, those settings are all disabled for every print. This behavior can b
 
 Mainsail is a web interface for Klipper-based printers. It connects to Moonraker over web API and websocket to expose live control and metrics.
 
-It's a SPA (Single Page Application) served using [Lighttpd](https://www.lighttpd.net) web server. Replication on port 80 is done using socat to keep memory consumption as low as possible.
+It's a SPA (Single Page Application) served using [Lighttpd](https://www.lighttpd.net) web server on port 4409.
 
 Lighttpd is also configured to expose up to 4 cameras proxying to mjpg-streamer. Cameras are accessible using /webcam or /webcam0 for the first one, then /webcam1, /webcam2 and /webcam3 for the other.
 
 !!! note
 
-    Port 80 is dynamically allocated depending on the order of app startup.
-    By default during their startup, Mainsail and Fluidd will try to use port 80. This is made to ensure that you can expose multiple frontends while choosing which one is using port 80.
-
-!!! tip
-
-    It is possible to expose another interface on port 80.
-    Make sure that your custom app open and listens to port 80 before Mainsail and/or Fluidd by using a name prefix with a number below 25.
+    Port 80 (the printer's bare IP) is served by the Rinkhals web portal (65-rinkhals-web), which links to Mainsail, Fluidd and the other tools from its dashboard.
+    Earlier builds redirected port 80 to Mainsail or Fluidd using a per-connection socat process; that redirect has been removed in favor of the web portal owning port 80 directly. Mainsail and Fluidd are now reached on their own ports (4409 and 4408).
 
 | 25-mainsail | |
 |-|-|
 | App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/25-mainsail/app.json) |
 | Default state | Enabled |
-| Port | 4409, 80* |
+| Port | 4409 |
 | CPU usage | 0 ~ 3 % |
 | Memory usage | 1 ~ 4 MB |
 
@@ -146,7 +143,7 @@ Please refer to Mainsail documentation above as the behavior is exactly the same
 |-|-|
 | App manifest | [app.json](https://github.com/rinkhals-community/Rinkhals/blob/master/files/4-apps/home/rinkhals/apps/26-fluidd/app.json) |
 | Default state | Enabled |
-| Port | 4409, 80* |
+| Port | 4408 |
 | CPU usage | 0 ~ 3 % |
 | Memory usage | 1 ~ 4 MB |
 
