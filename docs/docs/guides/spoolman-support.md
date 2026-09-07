@@ -21,12 +21,12 @@ gcode:
 
 [gcode_macro M555]
 gcode:
-    SET_SPOOL SPOOL_ID={{ params.S }}
+    SET_SPOOL spool_id={{ params.S }}
 ```
 
 and per filament in Orca on in the filament start code
 
 ```gcode
 ; filament start gcode
-M555 S=5
+M555 S5
 ```
