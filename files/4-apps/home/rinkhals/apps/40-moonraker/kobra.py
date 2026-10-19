@@ -1255,6 +1255,84 @@ class Kobra:
         logging.info('> Routing EXCLUDE_OBJECT to native endpoint...')
         self.register_gcode_handler('EXCLUDE_OBJECT', handle_gcode_exclude_object)
 
+    # Models where re-homing Z once the bed is hot has been checked: Felixoid on a
+    # K3 running 2.4.6.7 (#127). Add the S1 and S1 Max once a calibration has been
+    # run on each and G28 Z is confirmed to move to safe_z_home first.
+    HOT_Z_REHOME_MODELS = ('K3',)
+
+    def build_calibrate_script(self, commands, bed_temp, extru_temp, extru_end_temp):
+        """Build the bed mesh calibration sequence for this printer.
+
+        commands is the set of command names the printer reports through
+        gcode/help, or None if that could not be read. When it is None the
+        sequence is exactly what we sent before, so a printer that can't answer
+        gcode/help is no worse off.
+
+        When it is known:
+        - nothing is sent that the printer does not have. MOVE_HEAT_POS only
+          exists on the K3 family; the S1 family uses TO_THROW_POSITION, and the
+          S1 Max has no WIPE_EXIT (#101).
+        - on the S1 family the nozzle cools down parked on the silicone pad
+          (WIPE_STOP) instead of at the wiper exit, so it can't ooze (#101).
+        - the per-model choices otherwise match what we sent before, so the K3
+          family and the Kobra 2 Pro only lose commands they never had, plus a
+          hot Z re-home on HOT_Z_REHOME_MODELS (#127).
+        """
+        s1_family = self.KOBRA_MODEL_CODE in ('KS1', 'KS1M')
+
+        if commands is None:
+            script = [
+                'G28', 'MOVE_HEAT_POS',
+                f'M140 S{bed_temp}', f'M109 S{extru_temp}', f'M190 S{bed_temp}',
+                'WIPE_ENTER', 'WIPE_NOZZLE', 'WIPE_EXIT',
+                f'M109 S{extru_end_temp}',
+                'BED_MESH_CALIBRATE', 'TURN_OFF_HEATERS', 'M106 S0', 'SAVE_CONFIG',
+            ]
+            if not s1_family:
+                script.remove('WIPE_ENTER')
+                script.remove('WIPE_EXIT')
+            return script
+
+        def available(*names):
+            return [name for name in names if name in commands]
+
+        # Home first. Without this the printer can reach BED_MESH_CALIBRATE
+        # un-homed, and GoKlipper then blocks forever at the first probe point
+        # instead of raising "Must home axis first" the way mainline Klipper
+        # does - Moonraker forwards gcode with no timeout, so the UI just sits
+        # there with no error (issue #85). Verified on a KS1 (fw 2.7.2.7).
+        script = ['G28']
+
+        # Heating position: the K3 family has MOVE_HEAT_POS, the S1 family has
+        # TO_THROW_POSITION (the purge chute) instead.
+        if 'MOVE_HEAT_POS' in commands:
+            script.append('MOVE_HEAT_POS')
+        elif s1_family and 'TO_THROW_POSITION' in commands:
+            script.append('TO_THROW_POSITION')
+
+        script += [f'M140 S{bed_temp}', f'M109 S{extru_temp}', f'M190 S{bed_temp}']
+
+        if s1_family:
+            # Wipe, then park on the silicone pad for the cooldown wait, then
+            # leave the wiper. WIPE_STOP ends at X75 Y273 on the S1 (X125.5 Y370
+            # on the S1 Max); WIPE_EXIT used to leave the nozzle at X83 Y250
+            # through the cooldown, where it oozed (#101). The S1 Max has no
+            # WIPE_EXIT, so it probes straight from the pad as it did before.
+            script += available('WIPE_ENTER', 'WIPE_NOZZLE', 'WIPE_STOP')
+            script.append(f'M109 S{extru_end_temp}')
+            script += available('WIPE_EXIT')
+        else:
+            script += available('WIPE_NOZZLE')
+            script.append(f'M109 S{extru_end_temp}')
+
+        # Re-home Z against the hot bed so the mesh is probed on the geometry it
+        # will print on (#127, Felixoid). Only where it has been checked.
+        if self.KOBRA_MODEL_CODE in self.HOT_Z_REHOME_MODELS:
+            script.append('G28 Z')
+
+        script += ['BED_MESH_CALIBRATE', 'TURN_OFF_HEATERS', 'M106 S0', 'SAVE_CONFIG']
+        return script
+
     def patch_bed_mesh(self):
         from .klippy_connection import KlippyConnection
 
@@ -1306,33 +1384,23 @@ class Kobra:
                                     extru_end_temp = int(extru_end_temp_match[1])
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
-                        calibrate_script = [
-                            # Home first. Without this the printer can reach
-                            # BED_MESH_CALIBRATE un-homed, and GoKlipper then blocks
-                            # forever at the first probe point instead of raising
-                            # "Must home axis first" the way mainline Klipper does -
-                            # Moonraker forwards gcode with no timeout, so the UI just
-                            # sits there with no error (issue #85). Verified on a KS1
-                            # (fw 2.7.2.7): un-homed the printer stalls at mesh_min
-                            # 5,5; homed, the full 5x5 mesh probes and saves normally.
-                            'G28',
-                            'MOVE_HEAT_POS',
-                            f'M140 S{bed_temp}', # Set bed to 60
-                            f'M109 S{extru_temp}', # Wait hotend to 170
-                            f'M190 S{bed_temp}', # Wait bed to 60
-                            'WIPE_ENTER', # Move to wiping position
-                            'WIPE_NOZZLE', # Wipe nozzle
-                            'WIPE_EXIT', # Exit wiping position
-                            f'M109 S{extru_end_temp}', # Wait hotend to 140
-                            'BED_MESH_CALIBRATE',
-                            'TURN_OFF_HEATERS',
-                            'M106 S0', # Set fan speed to 0
-                            'SAVE_CONFIG'
-                        ]
+                        # Ask the printer which commands it has, so the script never
+                        # sends one it lacks. GoKlipper answers an unknown command
+                        # with "ok" and only a log warning, which is how
+                        # MOVE_HEAT_POS went unnoticed on the S1 family (#101).
+                        commands = None
+                        try:
+                            web_request.endpoint = 'gcode/help'
+                            help_result = await original_request(me, web_request)
+                            if isinstance(help_result, dict) and help_result:
+                                commands = {str(name).upper() for name in help_result}
+                        except Exception as e:
+                            logging.warning(f'[Kobra] Could not list printer commands for bed mesh calibration: {e!r}')
+                        finally:
+                            web_request.endpoint = 'gcode/script'
 
-                        if self.KOBRA_MODEL_CODE != 'KS1' and self.KOBRA_MODEL_CODE != 'KS1M':
-                            calibrate_script.remove('WIPE_ENTER')
-                            calibrate_script.remove('WIPE_EXIT')
+                        calibrate_script = self.build_calibrate_script(commands, bed_temp, extru_temp, extru_end_temp)
+                        logging.info(f'[Kobra] Bed mesh calibration script: {calibrate_script}')
 
                         web_request.get_args()["script"] = '\n'.join(calibrate_script)
                     elif script.lower().startswith('bed_mesh_profile'):
