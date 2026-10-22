@@ -301,7 +301,12 @@ def patch_K3SysUi(binaryPath, modelCode, version):
 
     if strInstruction >= 0:
         thisOffset = bytes[strInstruction]
-        thisInstructions = [ asm(f'ldr r0, [r11, #-0x{thisOffset:x}]'), asm('ldr r0, [r0]') ]
+        # K2P 3.1.4: the stack slot already holds MainWindow*. Dereferencing
+        # it again passes the object's first word instead of the C++ this pointer.
+        # Keep other firmware variants unchanged until independently verified.
+        thisInstructions = [asm(f'ldr r0, [r11, #-0x{thisOffset:x}]')]
+        if not (modelCode == 'K2P' and version == '3.1.4'):
+            thisInstructions.append(asm('ldr r0, [r0]'))
     else:
         for i in range(20):
             address = patchJumpAddress - i * 4
