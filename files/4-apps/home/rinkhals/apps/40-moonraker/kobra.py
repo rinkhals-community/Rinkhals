@@ -192,6 +192,9 @@ class Kobra:
     _remote_mode = None
     _total_layer = 0
     _states_cache = []
+    _last_sdcard_progress = 0.0
+    _end_of_print_hold_task = None
+    END_OF_PRINT_HOLD_TIMEOUT = 90  # seconds, safety margin. End routine takes ~25 s on the S1, not measured on other printers
     _exclude_object_current_file = None
     _exclude_object_objects = None
     _exclude_object_force_end_task = None
@@ -774,6 +777,26 @@ class Kobra:
                 self._exclude_object_last_force_end_key = trigger_key
             self._exclude_object_force_end_task = None
 
+    def _cancel_end_of_print_hold(self):
+        task = self._end_of_print_hold_task
+        self._end_of_print_hold_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _end_of_print_hold_timeout(self):
+        await asyncio.sleep(self.END_OF_PRINT_HOLD_TIMEOUT)
+        self._release_end_of_print_hold()
+
+    def _release_end_of_print_hold(self):
+        self._end_of_print_hold_task = None
+        if getattr(self, '_last_tracked_state', None) != 'printing':
+            return
+        logging.warning('[Kobra] GoKlipper did not report complete after the file was fully consumed, reporting complete now')
+        self._last_tracked_state = 'complete'
+        klippy_conn = self.server.lookup_component("klippy_connection", None)
+        if klippy_conn:
+            klippy_conn._process_status_update(time.time(), {'print_stats': {'state': 'complete'}})
+
     def _maybe_force_end_excluded_object(self, status: dict):
         if not isinstance(status, dict):
             return
@@ -817,6 +840,14 @@ class Kobra:
 
     def patch_status(self, status, is_subscription_update=False, requested=None):
         if self.is_goklipper_running():
+            # Remember last reported file progress (#184)
+            sdcard_status = status.get('virtual_sdcard')
+            if isinstance(sdcard_status, dict):
+                progress = sdcard_status.get('progress')
+                if isinstance(progress, (int, float)):
+                    self._last_sdcard_progress = progress
+                    if progress < 1.0:
+                        self._cancel_end_of_print_hold()
 
             if 'print_stats' in status:
                 if 'state' in status['print_stats']: 
@@ -835,10 +866,28 @@ class Kobra:
                     if state.lower() in ['complete', 'completed', 'print_complete', 'finished', 'finish', 'done']:
                         state = 'complete'
 
-                    # Debounce GoKlipper's standby state due to race condition at end of print (#445)
-                    # GoKlipper emits "standby" then "complete" 1-2 seconds later, causing Moonraker to report "cancelled"
+                    # GoKlipper left standby on its own (complete, cancelled, error...): the hold is over.
+                    # Excludes "printing" because a second patch_status pass sees the rewritten state
+                    if state.lower() not in ('standby', 'printing'):
+                        self._cancel_end_of_print_hold()
+
+                    # Recognize as new print when the printer moves to printing from anything other than "printing" or "paused"
+                    # and forget progress of the previous print
+                    previous_print_state = getattr(self, '_last_tracked_state', None)
+                    if state.lower() == 'printing' and previous_print_state not in ('printing', 'paused'):
+                        self._last_sdcard_progress = 0.0
+
+                    # GoKlipper reports "standby" the moment the gcode file is fully consumed, while its end-of-print
+                    # routine is still running. Moonraker history records any printing -> standby transition as cancelled
+                    # and listeners act on complete immediately. So we need to keep reporting printing until GoKlipper sends its own complete (#184).
+                    # A standby before the file is consumed is a cancel - we keep the short debounce for that (#445).
                     if state.lower() == 'standby' and getattr(self, '_last_tracked_state', None) == 'printing':
-                        state = 'printing' # Keep it printing for now
+                        state = 'printing'
+
+                        if self._last_sdcard_progress >= 1.0:
+                            # Safety net in case GoKlipper never reports complete
+                            if self._end_of_print_hold_task is None:
+                                self._end_of_print_hold_task = self.server.get_event_loop().create_task(self._end_of_print_hold_timeout())
                         
                         async def _apply_delayed_standby():
                             import asyncio
@@ -850,7 +899,7 @@ class Kobra:
                                 if klippy_conn:
                                     klippy_conn._process_status_update(time.time(), {'print_stats': {'state': 'standby'}})
 
-                        if not getattr(self, '_delayed_standby_task', None) or getattr(self, '_delayed_standby_task').done():
+                        if self._last_sdcard_progress < 1.0 and (not getattr(self, '_delayed_standby_task', None) or getattr(self, '_delayed_standby_task').done()):
                             # Run the debouncer
                             setattr(self, '_delayed_standby_task', self.server.get_event_loop().create_task(_apply_delayed_standby()))
 
