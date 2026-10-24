@@ -2055,6 +2055,11 @@ class MmuAcePatcher:
 
         self.kobra.register_print_data_patcher(self.patch_print_data)
 
+        # Auto-feed at print start (see patch_print_data). On by default; set
+        # `auto_feed: False` under [mmu_ace] to leave all loading to the
+        # printer, e.g. if it ever feeds at the wrong moment (issue #196).
+        self._auto_feed_enabled = config.getboolean("auto_feed", True)
+
         # Tube-length / push-speed for the auto-feed FEED_FILAMENT command.
         # Defaults are tuned for ACE Pro on Kobra 3 Combo; ACE v1 and other
         # K-series tube lengths can override in moonraker.conf under [mmu_ace]:
@@ -3304,64 +3309,39 @@ class MmuAcePatcher:
             # Print flow currently doesn't issue FEED_FILAMENT; this hook fills
             # that gap). See issue #464.
             #
-            # Slot selection, in descending order of confidence:
-            #   1. self.ace.gate if set — touchscreen Color Match selection (#443).
-            #      Highest confidence: user explicitly picked.
-            #   2. ttg_map[detected_tools[0]] for a single-tool print — the slicer
-            #      told us in metadata which tool it actually uses, and the
-            #      printer's tool-to-gate map resolves it to a gate. High
-            #      confidence.
-            #   3. Skip otherwise (was: mapping[0].ams_index). For multi-tool
-            #      prints the gcode itself contains T-commands that gklib's
-            #      tool-change handler will execute, so auto-feed is unnecessary
-            #      and pre-loading the wrong slot causes a wasteful unload+reload
-            #      dance (issue #20).
+            # Only when the file does not select a tool itself. A file with
+            # T-commands (or MMU_CHANGE_TOOL) gets its filament loaded by gklib's
+            # own tool-change handler at the first one, so feeding here as well
+            # is redundant at best. On KS1 2.7.2.7 it is harmful: G9111 heats to
+            # print temperature before LeviQ probing, the feed starts, probing
+            # drops the nozzle target and gklib aborts the feed with "Extruder
+            # must heat up first", failing the print (issue #196). Feeding a gate
+            # the file does not start with also forces an unload and reload
+            # (issue #20).
+            #
+            # That leaves the case this hook exists for: no tool command in the
+            # file and a gate picked with touchscreen Color Match (#443). Without
+            # a Color Match selection there is nothing to go on, so skip.
             if self.ace.loaded_gate == TOOL_GATE_UNKNOWN and mapping:
                 candidate = None
                 source = None
 
-                if self.ace.gate != TOOL_GATE_UNKNOWN:
+                if not getattr(self, "_auto_feed_enabled", True):
+                    logging.info("patch_print_data: auto_feed is disabled in [mmu_ace], skipping auto-feed")
+                elif used_tools:
+                    logging.info(
+                        f"patch_print_data: {filename!r} selects its own tools "
+                        f"(T{', T'.join(str(t) for t in used_tools)}), the printer loads "
+                        f"the filament at the first tool change; skipping auto-feed"
+                    )
+                elif self.ace.gate != TOOL_GATE_UNKNOWN:
                     candidate = self.ace.gate
                     source = "Color Match (self.ace.gate)"
                 else:
-                    # Consult the metadata preprocessor's tool list rather than
-                    # guessing from mapping order. The trailer is appended by
-                    # mmu_ace_metadata.process_file during upload.
-                    filename = (print_data or {}).get("filename") or ""
-                    gcode_path = os.path.join(ACE_GCODE_DIR, filename.lstrip("/"))
-                    detected_tools = _read_referenced_tools(gcode_path)
-
-                    if detected_tools is None:
-                        logging.info(
-                            "patch_print_data: detected_tools unknown for "
-                            f"{filename!r}, skipping auto-feed (no trailer found)"
-                        )
-                    elif len(detected_tools) == 0:
-                        logging.info(
-                            f"patch_print_data: detected_tools is empty for "
-                            f"{filename!r}, skipping auto-feed"
-                        )
-                    elif len(detected_tools) == 1:
-                        tool_index = detected_tools[0]
-                        if 0 <= tool_index < len(self.ace.ttg_map):
-                            candidate = self.ace.ttg_map[tool_index]
-                            source = f"detected_tools=[{tool_index}] → ttg_map[{tool_index}]"
-                        else:
-                            logging.warning(
-                                f"patch_print_data: detected tool {tool_index} out "
-                                f"of ttg_map range ({len(self.ace.ttg_map)}), "
-                                f"skipping auto-feed"
-                            )
-                    else:
-                        # Multi-tool print. The gcode contains T-commands;
-                        # gklib's tool-change handler will load the right slot
-                        # as soon as it encounters the first T. Pre-loading
-                        # would just force an unload+reload (issue #20).
-                        logging.info(
-                            f"patch_print_data: multi-tool print "
-                            f"(detected_tools={detected_tools}); "
-                            f"skipping auto-feed, gcode T-commands will handle it"
-                        )
+                    logging.info(
+                        f"patch_print_data: {filename!r} selects no tool and there is no "
+                        f"Color Match selection; skipping auto-feed"
+                    )
 
                 if candidate is not None:
                     # Reject a target gate the printer doesn't have. A stale Color
@@ -3464,7 +3444,18 @@ class MmuAcePatcher:
                             f"SPEED={self._auto_feed_speed}"
                         )
                         logging.info(f"auto-feed: sending {gcode}")
-                        await self.ace_controller.printer.send_gcode(gcode)
+                        try:
+                            await self.ace_controller.printer.send_gcode(gcode)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            # One attempt only. Re-sending into a print that
+                            # just rejected the feed can push filament at the
+                            # wrong moment again (issue #196).
+                            logging.warning(
+                                f"auto-feed: {gcode} failed ({exc}); not retrying"
+                            )
+                            return
 
                         self._commit_loaded_gate(gate)
                         return

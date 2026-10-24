@@ -3295,6 +3295,103 @@ class MmuAceUnmappedToolTests(unittest.TestCase):
         self.assertIn("T3 has no gate assigned", str(raised.exception))
 
 
+class MmuAceAutoFeedSelectionTests(unittest.TestCase):
+    """patch_print_data must only auto-feed when the file does not pick a tool
+    itself (issue #196). In the reported case the file used T3; gklib loads that
+    gate at the T-command anyway, and our extra feed on KS1 2.7.2.7 started
+    before LeviQ probing and was aborted with "Extruder must heat up first"."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def _patcher(self, color_match_gate=None, auto_feed=True):
+        m = self.module
+        gates = [
+            types.SimpleNamespace(status=m.GATE_AVAILABLE, color=[0, 0, 0, 255],
+                                  material="PLA", filament_name="PLA")
+            for _ in range(4)
+        ]
+        patcher = m.MmuAcePatcher.__new__(m.MmuAcePatcher)
+        patcher.server = DummyServer()
+        patcher.ace = types.SimpleNamespace(
+            enabled=True,
+            units=[types.SimpleNamespace(gates=gates)],
+            tools=[types.SimpleNamespace() for _ in gates],
+            ttg_map=[0, 1, 2, 3],
+            endless_spool_groups=[0] * 4,
+            gate=m.TOOL_GATE_UNKNOWN if color_match_gate is None else color_match_gate,
+            loaded_gate=m.TOOL_GATE_UNKNOWN,  # nothing loaded going into the print
+        )
+        patcher._auto_feed_enabled = auto_feed
+        patcher._auto_feed_task = None
+        self.scheduled = []
+        patcher._auto_feed_at_print_start = lambda gate: ("feed", gate)
+        patcher.ace_controller = types.SimpleNamespace(
+            eventloop=types.SimpleNamespace(create_task=lambda job: self.scheduled.append(job[1])),
+        )
+        return patcher
+
+    def _print(self, patcher, used_tools):
+        with mock.patch.object(self.module, "_read_referenced_tools", return_value=used_tools):
+            return self.module.MmuAcePatcher.patch_print_data(patcher, {"filename": "job.gcode"})
+
+    def test_a_file_that_selects_its_tool_is_not_auto_fed(self):
+        # The #196 case: single tool T3, nothing loaded, no Color Match.
+        self._print(self._patcher(), [3])
+        self.assertEqual(self.scheduled, [])
+
+    def test_a_file_that_selects_its_tool_wins_over_color_match(self):
+        self._print(self._patcher(color_match_gate=1), [3])
+        self.assertEqual(self.scheduled, [])
+
+    def test_color_match_still_feeds_a_file_without_tool_commands(self):
+        # The case auto-feed exists for (#464): no T-command in the file.
+        self._print(self._patcher(color_match_gate=2), None)
+        self.assertEqual(self.scheduled, [2])
+
+    def test_no_tool_commands_and_no_color_match_feeds_nothing(self):
+        self._print(self._patcher(), None)
+        self.assertEqual(self.scheduled, [])
+
+    def test_auto_feed_can_be_switched_off(self):
+        self._print(self._patcher(color_match_gate=2, auto_feed=False), None)
+        self.assertEqual(self.scheduled, [])
+
+
+class MmuAceAutoFeedSendTests(unittest.IsolatedAsyncioTestCase):
+    """A FEED_FILAMENT the printer rejects must not be sent again (issue #196)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    async def test_a_rejected_feed_is_not_retried(self):
+        m = self.module
+        sent = []
+
+        async def query_objects(_objects):
+            return {"extruder": {"temperature": 205.0, "target": 210.0},
+                    "print_stats": {"state": "printing"}}
+
+        async def send_gcode(gcode):
+            sent.append(gcode)
+            raise RuntimeError("Extruder must heat up first")
+
+        patcher = m.MmuAcePatcher.__new__(m.MmuAcePatcher)
+        patcher.ace = types.SimpleNamespace(loaded_gate=m.TOOL_GATE_UNKNOWN)
+        patcher.ace_controller = types.SimpleNamespace(
+            printer=types.SimpleNamespace(query_objects=query_objects, send_gcode=send_gcode))
+        patcher._auto_feed_length = 80
+        patcher._auto_feed_speed = 25
+        patcher._commit_loaded_gate = lambda gate: self.fail("a failed feed must not mark the gate loaded")
+
+        with self.assertLogs(level="WARNING"):
+            await m.MmuAcePatcher._auto_feed_at_print_start(patcher, 3)
+
+        self.assertEqual(sent, ["FEED_FILAMENT ID=0 INDEX=3 LENGTH=80 SPEED=25"])
+
+
 class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
     """MMU_TTG_MAP must keep the map the same length as the tool list, reject
     gates that don't exist, and say when a change can't reach the running print
