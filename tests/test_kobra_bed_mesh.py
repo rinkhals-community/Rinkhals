@@ -64,8 +64,11 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
 
     def test_nothing_is_sent_that_the_printer_does_not_have(self):
         """GoKlipper answers an unknown command with "ok" and a log warning, so
-        a missing macro fails silently (#101)."""
+        a missing macro fails silently (#101). Models on the pre-#190 script
+        are exempt: they get exactly what they had before, on purpose."""
         for model, commands in CASES:
+            if model in self.module.Kobra.LEGACY_CALIBRATE_MODELS:
+                continue
             with self.subTest(model=model):
                 script = self.script(model, commands)
                 for command in script:
@@ -75,11 +78,9 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
     # --- #101: the S1 family ---------------------------------------------------
 
     def test_s1_uses_the_throw_position_not_move_heat_pos(self):
-        for model, commands in (("KS1", KS1_2727), ("KS1M", KS1M_2721)):
-            with self.subTest(model=model):
-                script = self.script(model, commands)
-                self.assertNotIn("MOVE_HEAT_POS", script)
-                self.assertIn("TO_THROW_POSITION", script)
+        script = self.script("KS1", KS1_2727)
+        self.assertNotIn("MOVE_HEAT_POS", script)
+        self.assertIn("TO_THROW_POSITION", script)
 
     def test_s1_cools_down_parked_on_the_pad(self):
         """The nozzle used to wait out the cooldown at the wiper exit (X83 Y250
@@ -90,10 +91,13 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
         self.assertLess(script.index("WIPE_STOP"), cooldown)
         self.assertGreater(script.index("WIPE_EXIT"), cooldown)
 
-    def test_s1_max_has_no_wipe_exit_so_none_is_sent(self):
-        script = self.script("KS1M", KS1M_2721)
-        self.assertNotIn("WIPE_EXIT", script)
-        self.assertLess(script.index("WIPE_STOP"), script.index("M109 S140"))
+    def test_s1_max_keeps_the_script_from_before_190(self):
+        """On an S1 Max (fw 2.7.1.4) the new sequence never finished: gcode/script
+        stayed pending for minutes and the mesh wasn't saved. Until a new
+        sequence is tested on one, it gets exactly what it had before, whatever
+        gcode/help reports."""
+        self.assertEqual(self.script("KS1M", KS1M_2721), self.script("KS1M", None))
+        self.assertNotIn("WIPE_STOP", self.script("KS1M", KS1M_2721))
 
     # --- other models keep what they had ---------------------------------------
 
