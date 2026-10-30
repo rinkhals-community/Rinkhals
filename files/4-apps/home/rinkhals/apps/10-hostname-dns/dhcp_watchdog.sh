@@ -20,9 +20,11 @@ while true; do
     for UDHCPC_PID in $(get_by_name udhcpc); do
         CMDLINE=$(cat "/proc/$UDHCPC_PID/cmdline" 2>/dev/null | tr '\0' ' ')
 
-        # Skip instances that already have the hostname flag
+        # Skip instances that already have the hostname flag, and one-shot
+        # requests (-q) like the one in ntpclient.sh, which exit on their own
         case "$CMDLINE" in
             *"-x hostname:$HOSTNAME"*) continue ;;
+            *" -q "*) continue ;;
         esac
 
         # Extract interface from this rogue instance
