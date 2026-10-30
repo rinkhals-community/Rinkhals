@@ -1399,13 +1399,23 @@ class Kobra:
     # run on each and G28 Z is confirmed to move to safe_z_home first.
     HOT_Z_REHOME_MODELS = ('K3',)
 
+    # Models that still get the calibration script from before #190. On an S1 Max
+    # (fw 2.7.1.4, 20261027_01_test) the new sequence never finished: four runs
+    # in one debug bundle each left gcode/script pending for 7-8 minutes without
+    # saving the mesh, while the same sequence completes in under 4 minutes on a
+    # KS1. The S1 Max has no WIPE_EXIT, so it went from WIPE_STOP straight into
+    # BED_MESH_CALIBRATE; the logs don't show which command blocked. The old
+    # script ran on the S1 Max for months without hang reports. Drop the model
+    # from here once a new sequence has been tested on one.
+    LEGACY_CALIBRATE_MODELS = ('KS1M',)
+
     def build_calibrate_script(self, commands, bed_temp, extru_temp, extru_end_temp):
         """Build the bed mesh calibration sequence for this printer.
 
         commands is the set of command names the printer reports through
-        gcode/help, or None if that could not be read. When it is None the
-        sequence is exactly what we sent before, so a printer that can't answer
-        gcode/help is no worse off.
+        gcode/help, or None if that could not be read. When it is None, or the
+        model is in LEGACY_CALIBRATE_MODELS, the sequence is exactly what we sent
+        before, so a printer that can't answer gcode/help is no worse off.
 
         When it is known:
         - nothing is sent that the printer does not have. MOVE_HEAT_POS only
@@ -1419,7 +1429,7 @@ class Kobra:
         """
         s1_family = self.KOBRA_MODEL_CODE in ('KS1', 'KS1M')
 
-        if commands is None:
+        if commands is None or self.KOBRA_MODEL_CODE in self.LEGACY_CALIBRATE_MODELS:
             script = [
                 'G28', 'MOVE_HEAT_POS',
                 f'M140 S{bed_temp}', f'M109 S{extru_temp}', f'M190 S{bed_temp}',
@@ -1455,8 +1465,8 @@ class Kobra:
             # Wipe, then park on the silicone pad for the cooldown wait, then
             # leave the wiper. WIPE_STOP ends at X75 Y273 on the S1 (X125.5 Y370
             # on the S1 Max); WIPE_EXIT used to leave the nozzle at X83 Y250
-            # through the cooldown, where it oozed (#101). The S1 Max has no
-            # WIPE_EXIT, so it probes straight from the pad as it did before.
+            # through the cooldown, where it oozed (#101). The S1 Max doesn't
+            # get here yet, see LEGACY_CALIBRATE_MODELS.
             script += available('WIPE_ENTER', 'WIPE_NOZZLE', 'WIPE_STOP')
             script.append(f'M109 S{extru_end_temp}')
             script += available('WIPE_EXIT')
