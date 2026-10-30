@@ -62,3 +62,57 @@ This is the patch generation process (in `/3-rinkhals/opt/rinkhals/patches/creat
 - Using `pwntools` this script will dynamically patch a binary to generate a new patched one
 - Then it will compare the original binary with the patch and generate a diff
 - The diff is then formatted as a patch script that checks for the right input and then apply the patch
+## Recoverable native executable preparation
+
+`start.sh` uses `native-binaries.py` for `gkapi` and `K3SysUi`. The native
+processes must be stopped before preparation. A boot-local `native-start.lock`
+serializes the entire startup, including launch and restoration. An abruptly
+killed startup leaves the lock for the remainder of that boot; reboot clears
+`/tmp`. Do not remove the lock while a startup could still be running.
+
+The helper reads the generated profile's Before/After MD5 values and validates
+both targets before changing either. It retains one verified stock `.original`
+per executable across boots. A legacy `.original` is reused if its hash matches.
+After a firmware change it is replaced only from a current executable matching
+the new profile. Unknown bytes are never adopted as an original; `.1` is not a
+recovery source. If neither source matches, preparation fails for manual recovery.
+
+Copies are written to private staging names in the same directory, checked and
+`fsync`ed before publication. Each namespace change is followed by directory
+`fsync`. Patches must exit successfully and produce the expected After MD5 before
+the normal executable name is replaced. The original is never consumed by a
+rename. Recovery can therefore restart after another interrupted copy.
+
+After launching the modified native process, a complete stock copy is staged at
+`.patch`, then Linux `renameat2(RENAME_EXCHANGE)` swaps it with the normal name.
+This preserves the running executable's dentry under `.patch` while restoring the
+stock name without an absent-name interval. A hard link followed by replacement
+is not equivalent: `/proc/PID/exe` would report the old name as deleted, contrary
+to the native binaries' location expectations. A filesystem capability probe is
+performed before executable changes; there is no unsafe two-rename fallback.
+Python `ctypes`, a libc exporting `renameat2`, and filesystem/kernel support for
+`RENAME_EXCHANGE` are required. Python is already used earlier in this startup.
+
+Damaged files are not archived. Staging leftovers and an invalid `.patch` are
+removed after successful restoration; the verified `.original` is retained.
+An error leaves the disable marker in place. If verified stock recovery also
+fails, startup stops without launching unverified native executables. The
+existing loader's disable-marker policy is unchanged: this does not automatically
+enable Rinkhals after an interrupted boot. Before operator re-enable, the normal
+name can contain either the complete stock or complete patched executable.
+
+### Validation limits
+
+`tests/test_native_binaries.py` uses synthetic data, partial-copy failures,
+checksum/patch errors, namespace/durability failure points and abrupt subprocess
+exits, including two interruptions during recovery. A Linux host executable test
+checks the running inode's `/proc/PID/exe` name through the exchange. No firmware
+binary, production configuration or printer is used as a test fixture.
+
+These are process-crash tests, not electrical power-cut tests or an eMMC cache
+model. Before release, maintainers must verify the bundled Python/libc capability,
+actual filesystem durability behavior, native location checks, stock fallback,
+firmware upgrade and repeated power-loss recovery on supported hardware. The
+reported 8-MiB truncation in issue #198 is evidence motivating the change, not
+proof of its historical cause. This proposal does not repair an already-damaged
+printer without a matching good original.
