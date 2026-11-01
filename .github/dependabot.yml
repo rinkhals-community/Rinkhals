@@ -33,6 +33,12 @@ updates:
       - dependency-name: "@sveltejs/vite-plugin-svelte"
         update-types:
           - version-update:semver-major
+      # TypeScript 7 is outside @sveltejs/kit's peer range (^5.3.3 || ^6.0.0), so
+      # npm ci refuses it outright and the PR can never pass (#120). Revisit once
+      # SvelteKit allows it.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   # Go backend for the web portal.
   - package-ecosystem: gomod

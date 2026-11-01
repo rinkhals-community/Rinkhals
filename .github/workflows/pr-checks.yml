@@ -26,7 +26,7 @@ jobs:
     steps:
       # Full history: the change detection below needs a common ancestor with the
       # base branch, which a shallow clone does not have.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -58,7 +58,7 @@ jobs:
           fi
 
       # Keep in step with the Dockerfile's build-web-ui stage (node:22-bookworm).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.changed.outputs.run == 'true'
         with:
           node-version: '22'
@@ -79,9 +79,9 @@ jobs:
     name: Python component tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 

@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -120,3 +121,160 @@ class StripIdempotencyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataParserTimeoutTests(unittest.TestCase):
+    """Moonraker kills the metadata script at default_metadata_parser_timeout
+    (20s upstream). Our script also strips lines gklib cannot parse, so being
+    killed means the strip never lands and gklib crashes at print start
+    (issue #126, seen on a 35.7 MB file). Losing this setting silently
+    reintroduces that, so assert it stays put."""
+
+    CONF = (
+        Path(__file__).resolve().parents[1]
+        / "files/4-apps/home/rinkhals/apps/40-moonraker/moonraker.conf"
+    )
+
+    def test_timeout_is_raised_above_the_upstream_default(self):
+        text = self.CONF.read_text()
+        match = re.search(
+            r"^\s*default_metadata_parser_timeout\s*:\s*([0-9.]+)", text, re.MULTILINE
+        )
+        self.assertIsNotNone(
+            match, "default_metadata_parser_timeout missing from moonraker.conf"
+        )
+        self.assertGreaterEqual(float(match.group(1)), 300.0)
+
+    def test_setting_is_inside_the_file_manager_section(self):
+        text = self.CONF.read_text()
+        section = text.split("[file_manager]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("default_metadata_parser_timeout", section)
+
+
+class ByteOffsetStabilityTests(unittest.TestCase):
+    """The strip must not move any byte after it.
+
+    gklib has the gcode open with its own read offset while the metadata
+    script runs: in issue #128 the print reached 'printing' 31 log lines
+    before 'Pre-processing file' fired. Shortening the file shifted everything
+    and gklib resumed mid-number, producing
+    'strconv.ParseFloat: parsing "3.7.0252"'.
+    """
+
+    def test_blanked_line_keeps_exact_byte_length(self):
+        for original in (
+            "; filament_colour_type = 0;0;0;0\n",
+            "; filament_colour_type = 1\r\n",
+            "   ; filament_colour_type = 2\n",
+            "; filament_colour_type = 3",  # no trailing newline at EOF
+        ):
+            blanked = metadata_module.blank_strippable_line(original)
+            self.assertEqual(len(blanked), len(original), repr(original))
+            self.assertNotIn("filament_colour_type", blanked)
+            self.assertTrue(blanked.lstrip().startswith(";") or not blanked.strip())
+
+    def test_single_tool_strip_does_not_change_file_length(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "in.gcode")
+            dst = os.path.join(tmp, "out.gcode")
+            original = _build_gcode(multi_tool=False, include_bad_line=True)
+            with open(src, "w") as handle:
+                handle.write(original)
+            parsed = metadata_module.parse_gcode_file(src)
+            metadata_module.process_file(
+                src, dst, parsed["tools_used"], parsed["total_toolchanges"]
+            )
+            with open(dst) as handle:
+                rewritten = handle.read()
+            self.assertEqual(len(rewritten), len(original))
+            self.assertNotIn("filament_colour_type", rewritten)
+            # Every offset a reader had already passed is still the same byte.
+            prefix = original.index("; filament_colour_type")
+            self.assertEqual(rewritten[:prefix], original[:prefix])
+
+
+class _Logger:
+    def __init__(self):
+        self.messages = []
+
+    def info(self, message):
+        self.messages.append(message)
+
+
+class AtomicReplacementTests(unittest.TestCase):
+    """replace_file_in_place must not disturb a reader that already has the
+    file open, which is exactly gklib's position during a print."""
+
+    def test_open_reader_still_sees_original_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "job.gcode")
+            original = _build_gcode(multi_tool=True, include_bad_line=True)
+            with open(target, "w") as handle:
+                handle.write(original)
+
+            # Stand in for gklib: open the file and read part of it.
+            with open(target) as reader:
+                already_read = reader.read(20)
+
+                parsed = metadata_module.parse_gcode_file(target)
+                replaced = metadata_module.replace_file_in_place(
+                    target,
+                    _Logger(),
+                    lambda src, dst: metadata_module.process_file(
+                        src, dst, parsed["tools_used"], parsed["total_toolchanges"]
+                    ),
+                )
+                self.assertTrue(replaced)
+
+                # The in-flight reader must finish on the bytes it started with.
+                rest = reader.read()
+
+            self.assertEqual(already_read + rest, original)
+
+            # ...while the file on disk now carries the MMU metadata.
+            with open(target) as handle:
+                self.assertTrue(
+                    handle.read().startswith(metadata_module.MMU_ACE_FINGERPRINT)
+                )
+
+    def test_staged_file_is_created_beside_the_target(self):
+        # A staged file anywhere else risks a cross-filesystem shutil.move,
+        # which truncates and rewrites the live inode instead of swapping it.
+        with tempfile.TemporaryDirectory() as tmp:
+            target_dir = os.path.join(tmp, "gcodes")
+            os.makedirs(target_dir)
+            target = os.path.join(target_dir, "job.gcode")
+            with open(target, "w") as handle:
+                handle.write(_build_gcode(multi_tool=True, include_bad_line=True))
+
+            seen = {}
+
+            def build(src, dst):
+                seen["dst_dir"] = os.path.dirname(os.path.abspath(dst))
+                with open(src) as i, open(dst, "w") as o:
+                    o.write(i.read() + "; touched\n")
+
+            metadata_module.replace_file_in_place(target, _Logger(), build)
+            self.assertEqual(seen["dst_dir"], os.path.abspath(target_dir))
+            # No staging leftovers.
+            self.assertEqual(os.listdir(target_dir), ["job.gcode"])
+
+    def test_identical_rewrite_is_skipped_and_file_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "job.gcode")
+            with open(target, "w") as handle:
+                handle.write(_build_gcode(multi_tool=False, include_bad_line=False))
+            before = os.stat(target)
+
+            replaced = metadata_module.replace_file_in_place(
+                target,
+                _Logger(),
+                lambda src, dst: metadata_module.process_file(src, dst, [], 0),
+            )
+
+            self.assertFalse(replaced)
+            after = os.stat(target)
+            # Same inode and mtime: we did not rewrite the live file for nothing.
+            self.assertEqual(before.st_ino, after.st_ino)
+            self.assertEqual(before.st_mtime, after.st_mtime)
+            self.assertEqual(os.listdir(tmp), ["job.gcode"])

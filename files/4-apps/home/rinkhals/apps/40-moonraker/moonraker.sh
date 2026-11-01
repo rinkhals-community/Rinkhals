@@ -8,6 +8,8 @@ python -m venv --without-pip .
 cp -rf kobra.py moonraker/moonraker/components/kobra.py
 cp -rf memory_manager.py moonraker/moonraker/components/memory_manager.py
 cp -rf mmu_ace.py moonraker/moonraker/components/mmu_ace.py
+cp -rf mmu_ace_spool_store.py moonraker/moonraker/components/mmu_ace_spool_store.py
+cp -rf mmu_ace_spool_matcher.py moonraker/moonraker/components/mmu_ace_spool_matcher.py
 cp -rf mmu_ace_metadata.py moonraker/moonraker/components/mmu_ace_metadata.py
 
 # Sometimes .moonraker.uuid is empty for some reason (#199)
@@ -34,12 +36,16 @@ cleanup() {
         kill -TERM $MOONRAKER_PID 2>/dev/null
 
         # Wait up to 10 seconds for graceful shutdown
-        for i in {1..10}; do
+        # busybox ash has no brace expansion, so "for i in {1..10}" ran exactly
+        # once and Moonraker got about a second before being force killed.
+        i=0
+        while [ $i -lt 10 ]; do
             if ! kill -0 $MOONRAKER_PID 2>/dev/null; then
                 echo "$(date): Moonraker stopped gracefully" >> $RINKHALS_ROOT/logs/app-moonraker.log
                 break
             fi
             sleep 1
+            i=$((i + 1))
         done
 
         # Force kill if still running

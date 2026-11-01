@@ -32,8 +32,30 @@ def gcode_processed_already(file_path):
         return mmu_regex.match(line)
 
 # Lines emitted by newer OrcaSlicer versions that Anycubic's Go firmware
-# (gklib) cannot parse — causes slice-bounds panic (error 10111).
+# (gklib) cannot parse - causes slice-bounds panic (error 10111).
 GCODE_STRIP_PREFIXES = ("; filament_colour_type",)
+
+
+def blank_strippable_line(line):
+    """Replace a gklib-hostile line with an inert comment of the same length.
+
+    Deleting the line would shorten the file and shift every byte after it.
+    gklib already has the file open with its own read offset while this runs:
+    the print starts before Moonraker's inotify scan fires the metadata script
+    (confirmed in issue #128, where the print went 'printing' 31 log lines
+    before 'Pre-processing file'). A shift makes gklib resume mid-token and
+    fail the job, e.g. 'strconv.ParseFloat: parsing "3.7.0252"' where it read
+    'E3.7' from one line and '.0252' from another.
+
+    Keeping the byte count identical means an in-flight print reads the same
+    offsets it would have before, and only sees a comment where the
+    unparseable line used to be.
+    """
+    body = line.rstrip('\r\n')
+    terminator = line[len(body):]
+    if not body:
+        return line
+    return ';' + ' ' * (len(body) - 1) + terminator
 
 def parse_gcode_file(file_path):
     slicer_regex = re.compile(SLICER_REGEX, re.IGNORECASE)
@@ -84,11 +106,66 @@ def process_file(input_filename, output_filename, tools_used, total_toolchanges)
             outfile.write(f'{MMU_ACE_FINGERPRINT}\n')
         for line in infile:
             if line.lstrip().startswith(GCODE_STRIP_PREFIXES):
+                # Blank in place rather than drop, so the file length and every
+                # byte offset after this point stay unchanged. See
+                # blank_strippable_line().
+                outfile.write(blank_strippable_line(line))
                 continue
             outfile.write(line)
         # Append referenced tools metadata
         if write_mmu_metadata:
             outfile.write("; referenced_tools = %s\n" % ",".join(map(str, tools_used)))
+
+def replace_file_in_place(file_path, logger, build):
+    """Rewrite file_path through a staged copy swapped in with os.replace().
+
+    Two properties matter here, both learned from issue #128:
+
+    1. The staged file is created in the target's own directory, so the swap is
+       a rename within a single filesystem. The previous code staged under
+       tempfile.TemporaryDirectory(), which Moonraker places on /useremain
+       (TMPDIR), while gcodes live under /userdata. shutil.move() across that
+       boundary falls back to copy-and-delete, which truncates and rewrites the
+       *same* inode, directly underneath a gklib that is reading it.
+
+    2. os.replace() swaps the directory entry atomically. A reader that already
+       holds the old file open keeps that inode and reads the original bytes
+       through to the end, so an in-flight print is never disturbed. The new
+       content is what the next open sees.
+
+    Returns True if the file was replaced, False if the rewrite produced
+    identical bytes and was skipped.
+    """
+    target_dir = os.path.dirname(file_path) or "."
+    fd, staged = tempfile.mkstemp(
+        dir=target_dir,
+        prefix="." + os.path.basename(file_path) + ".",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    try:
+        build(file_path, staged)
+
+        # shallow=False forces a content comparison. The default compares the
+        # stat signature, and a freshly staged file always has a different
+        # mtime, so the "nothing changed" branch was unreachable before and we
+        # rewrote the live file on every scan.
+        if filecmp.cmp(staged, file_path, shallow=False):
+            logger.info(f"No changes needed, leaving {file_path} untouched")
+            return False
+
+        shutil.copystat(file_path, staged)
+        os.replace(staged, file_path)
+        staged = None
+        logger.info(f"Replaced {file_path} atomically")
+        return True
+    finally:
+        if staged is not None:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+
 
 def main(config: Dict[str, Any], metadata) -> None:
     logging.debug("main setup_anycubic_slicer metadata extraction")
@@ -105,35 +182,29 @@ def main(config: Dict[str, Any], metadata) -> None:
         metadata.logger.info(f"mmu_server: Pre-processing file: {file_path}")
         fname = os.path.basename(file_path)
         if fname.endswith(".gcode") and not gcode_processed_already(file_path):
-            with tempfile.TemporaryDirectory() as tmp_dir_name:
-                tmp_file = os.path.join(tmp_dir_name, fname)
+            start = time.time()
+            parse_result = parse_gcode_file(file_path)
+            slicer = parse_result["slicer"]
+            tools_used = parse_result["tools_used"]
+            total_toolchanges = parse_result["total_toolchanges"]
+            needs_strip = parse_result["needs_strip"]
+            metadata.logger.info("Reading placeholders took %.2fs. Detected gcode by slicer: %s" % (time.time() - start, slicer))
+            metadata.logger.info("Detected tools: %s" % tools_used)
 
-                start = time.time()
-                parse_result = parse_gcode_file(file_path)
-                slicer = parse_result["slicer"]
-                tools_used = parse_result["tools_used"]
-                total_toolchanges = parse_result["total_toolchanges"]
-                needs_strip = parse_result["needs_strip"]
-                metadata.logger.info("Reading placeholders took %.2fs. Detected gcode by slicer: %s" % (time.time() - start, slicer))
-                metadata.logger.info("Detected tools: %s" % tools_used)
+            # Rewrite when there are tools to record OR when the file carries a
+            # line gklib cannot parse. The strip used to live behind the
+            # tools_used gate, which made it dead code for every single-tool
+            # file - i.e. it never ran for the prints most likely to hit it.
+            if needs_strip:
+                metadata.logger.info("Found gcode lines gklib cannot parse, stripping them")
 
-                # Rewrite when there are tools to record OR when the file carries a
-                # line gklib cannot parse. The strip used to live behind the
-                # tools_used gate, which made it dead code for every single-tool
-                # file - i.e. it never ran for the prints most likely to hit it.
-                if needs_strip:
-                    metadata.logger.info("Found gcode lines gklib cannot parse, stripping them")
-
-                if needs_strip or (tools_used is not None and len(tools_used) > 0):
-                    process_file(file_path, tmp_file, tools_used, total_toolchanges)
-
-                    # Move temporary file back in place
-                    if os.path.islink(file_path):
-                        file_path = os.path.realpath(file_path)
-                    if not filecmp.cmp(tmp_file, file_path):
-                        shutil.move(tmp_file, file_path)
-                    else:
-                        metadata.logger.info(f"Files are the same, skipping replacement of: {file_path} by {tmp_file}")
+            if needs_strip or (tools_used is not None and len(tools_used) > 0):
+                # Resolve the symlink before choosing where to stage, so the
+                # staged file lands next to the real target.
+                if os.path.islink(file_path):
+                    file_path = os.path.realpath(file_path)
+                replace_file_in_place(file_path, metadata.logger,
+                                      lambda src, dst: process_file(src, dst, tools_used, total_toolchanges))
 
     except Exception:
         metadata.logger.info(traceback.format_exc())

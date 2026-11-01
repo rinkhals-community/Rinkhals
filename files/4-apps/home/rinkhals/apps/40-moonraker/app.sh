@@ -42,7 +42,27 @@ debug() {
     TMPDIR=/useremain/tmp HOME=/userdata/app/gk python ./moonraker/moonraker/moonraker.py -c /userdata/app/gk/printer_data/config/moonraker.generated.conf $@
 }
 stop() {
-    kill_by_name moonraker.py
+    # moonraker.sh traps SIGTERM and gracefully stops its Moonraker child.
+    # kill_by_name defaults to SIGKILL, which would bypass that cleanup.
+    kill_by_name moonraker.sh 15
+
+    # Do not return while the old supervisor or Moonraker child is still
+    # running. start() calls stop() first, so returning early can race the
+    # old instance and create duplicate Moonraker processes.
+    i=0
+    while [ $i -lt 48 ]; do
+        WRAPPER_PIDS=$(get_by_name moonraker.sh)
+        MOONRAKER_PIDS=$(get_by_name moonraker.py)
+
+        if [ "$WRAPPER_PIDS" == "" ] && [ "$MOONRAKER_PIDS" == "" ]; then
+            return
+        fi
+
+        msleep 250
+        i=$((i + 1))
+    done
+
+    log "/!\\ Timeout waiting for Moonraker to stop"
 }
 
 case "$1" in

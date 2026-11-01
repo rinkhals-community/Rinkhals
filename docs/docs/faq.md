@@ -40,6 +40,23 @@ If you are using **Anycubic Slicer Next** or **Orca Slicer**:
 2. Consider disabling **Dynamic overhang cooling** or reducing the frequency of fan speed changes, as the constant back-and-forth commands can overwhelm the host proxy.
 *(Note: As of Rinkhals 20260501_01, core priority processes have been optimized to better mitigate this, but slicer adjustments remain the best practice.)*
 
+## Leveling always probes the whole bed, never an adaptive mesh
+
+The printer firmware decides on adaptive leveling by reading four comment lines from your G-code. If they are missing, ticking Leveling when you send a print runs a full-bed mesh every time. Some printer presets, especially older custom ones, don't write them.
+
+To fix it, open your printer preset in Anycubic Slicer Next, go to **Machine G-code > Machine start G-code**, and add these lines after your `G9111` line:
+
+```
+; print_bed_min = {print_bed_min[0]},{print_bed_min[1]}
+; print_bed_max = {print_bed_max[0]},{print_bed_max[1]}
+; first_layer_print_min = {first_layer_print_min[0]},{first_layer_print_min[1]}
+; first_layer_print_max = {first_layer_print_max[0]},{first_layer_print_max[1]}
+```
+
+Re-slice, and check that the lines in your G-code now show numbers, for example `; first_layer_print_min = 148.088,6.37019`. Then send the print with Leveling ticked. The printer will probe only the area around your first layer, plus a small margin. Very small prints get a slightly larger area, because the firmware enforces a minimum mesh size.
+
+On a Kobra S1 with firmware 2.7.2.7, the adaptive mesh also shows up in the Mainsail and Fluidd Heightmap while the print is running. On other models and firmware, the Heightmap still shows the saved default mesh.
+
 ## Should I use installer-\*.swu or update-\*.swu?
 
 The installer-\*.swu is the Rinkhals Installer tool. It's like a web installer on steroids. Using this tool you can download any Rinkhals or system firmware and perform some other operations. Check more details on the [Installer page](about/rinkhals-installer.md)

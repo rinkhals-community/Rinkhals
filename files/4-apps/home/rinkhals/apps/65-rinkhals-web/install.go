@@ -765,12 +765,36 @@ func patchUpdateScript() error {
 	return nil
 }
 
+// rinkhalsInstallerGuard is how a Rinkhals update.sh starts: unless it is given
+// "async" it relaunches itself in the background and exits 0. That is what the
+// USB install path needs, where the stock updater would otherwise kill it, but
+// run from here it means we only ever saw the 0 from the copy that relaunched
+// itself, never the result of the install. A failed Rinkhals update (not enough
+// space, wrong model, incomplete copy) was reported as a success and the printer
+// rebooted into the old version (found by mane in #170).
+const rinkhalsInstallerGuard = `if [ "$1" != "async" ]`
+
+// updateScriptArgs returns the arguments to run update.sh with. A Rinkhals
+// installer gets "async" so it runs in the foreground and its exit status is the
+// real one. Anything else, Anycubic's own update.sh included, is run exactly as
+// before, with no arguments.
+func updateScriptArgs(script []byte) []string {
+	if strings.Contains(string(script), rinkhalsInstallerGuard) {
+		return []string{"async"}
+	}
+	return nil
+}
+
 func runUpdateScript() error {
 	scriptPath := filepath.Join(installExtractPath, "update.sh")
 	if err := os.Chmod(scriptPath, 0755); err != nil {
 		return err
 	}
-	cmd := exec.Command("sh", scriptPath)
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("sh", append([]string{scriptPath}, updateScriptArgs(script)...)...)
 	cmd.Dir = installExtractPath
 	cmd.Stdout = installLogWriter{}
 	cmd.Stderr = installLogWriter{}

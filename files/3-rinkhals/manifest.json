@@ -13,11 +13,11 @@
 
     // Remote repositories
     "firmware_repositories": {
-        "K2P": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-mirror/manifest-k2p.json",
-        "K3": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-mirror/manifest-k3.json",
-        "K3V2": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-mirror/manifest-k3v2.json",
-        "KS1": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-mirror/manifest-ks1.json",
-        "K3M": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-mirror/manifest-k3m.json",
+        "K2P": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-k2p.json",
+        "K3": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-k3.json",
+        "K3V2": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-k3v2.json",
+        "KS1": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-ks1.json",
+        "K3M": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-k3m.json",
         "KS1M": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-ks1m.json"
     },
     "rinkhals_repository": "rinkhals-community/Rinkhals",

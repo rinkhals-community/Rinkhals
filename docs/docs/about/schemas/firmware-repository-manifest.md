@@ -44,17 +44,17 @@ but does not include the current model.
 ```json
 {
     "$version": "1",
-    "name": "Anycubic Kobra S1 firmware (Mirror)",
-    "description": "Mirror for Anycubic Kobra S1 stock firmwares",
-    "repository": "https://rinkhals.thedju.net",
-    "self": "https://rinkhals.thedju.net/Kobra%20S1/manifest.json",
+    "name": "Anycubic Kobra S1 firmwares (Official)",
+    "description": "Official Anycubic Kobra S1 stock firmwares",
+    "repository": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares",
+    "self": "https://raw.githubusercontent.com/rinkhals-community/Rinkhals.Firmwares/refs/heads/main/manifests-anycubic/manifest-ks1.json",
     "firmwares": [
         {
             "version": "2.5.0.6",
             "date": 1742569005,
             "changes": "1. Improved loading and unloading logic\n2. Improved video monitoring stability\n3. Other issues fixed",
             "md5": "c0d7b3857602b2b3ed145fd195b3236d",
-            "url": "https://rinkhals.thedju.net/Kobra%20S1/KS1_2.5.0.6.swu",
+            "url": "https://rinkhals.firmwareforge.org/firmware/Kobra%20S1/KS1_2.5.0.6.swu",
             "supported_models": [
                 "KS1"
             ]

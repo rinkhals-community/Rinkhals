@@ -84,6 +84,93 @@ def _find_pid_by_name(process_name: str) -> int:
     return None
 
 
+PRINTER_MUTABLE_CFG = "/userdata/app/gk/printer_data/config/printer_mutable.cfg"
+BED_MESH_PROFILE_ALIASES = ('bed_mesh default', 'bed_mesh "default"')
+
+
+def read_saved_bed_mesh(path=PRINTER_MUTABLE_CFG):
+    """Return (bed_mesh status, 'bed_mesh default' status) for the mesh saved
+    in printer_mutable.cfg, or ({}, {}) when there is none."""
+    if not os.path.isfile(path):
+        return {}, {}
+    with open(path, 'r') as f:
+        config = json.load(f)
+    mesh = config.get('bed_mesh default')
+    if mesh is None:
+        return {}, {}
+    points = json.loads("[[" + mesh.get('points').replace("\n", "], [") + "]]")
+    bed_mesh = {
+        "profile_name": "default",
+        "mesh_min": (float(mesh.get("min_x")), float(mesh.get("min_y"))),
+        "mesh_max": (float(mesh.get("max_x")), float(mesh.get("max_y"))),
+        "probed_matrix": points,
+        "mesh_matrix": points
+    }
+    profile = {
+        "points": points,
+        "mesh_params": {
+            "min_x": float(mesh["min_x"]),
+            "max_x": float(mesh["max_x"]),
+            "min_y": float(mesh["min_y"]),
+            "max_y": float(mesh["max_y"]),
+            "x_count": int(mesh["x_count"]),
+            "y_count": int(mesh["y_count"]),
+            "mesh_x_pps": int(mesh["mesh_x_pps"]),
+            "mesh_y_pps": int(mesh["mesh_y_pps"]),
+            "tension": float(mesh["tension"]),
+            "algo": mesh["algo"]
+        }
+    }
+    return bed_mesh, profile
+
+
+_BED_MESH_PROFILE_QUOTED = re.compile(r'\b(LOAD|SAVE|REMOVE)=(["\'])([^\s"\']+)\2', re.IGNORECASE)
+
+
+def normalize_bed_mesh_profile_script(script):
+    """Remove quotes around BED_MESH_PROFILE LOAD/SAVE/REMOVE names.
+
+    Mainsail and Fluidd send BED_MESH_PROFILE LOAD="name". Klipper strips the
+    quotes, but GoKlipper takes the value literally, looks for a profile named
+    "name" including the quotes, finds none and silently does nothing.
+    Verified on a KS1 (fw 2.7.2.7): LOAD="adaptive" is ignored, LOAD=adaptive
+    loads the profile. Names containing whitespace are left untouched.
+    """
+    if not script or not script.strip().upper().startswith('BED_MESH_PROFILE'):
+        return script
+    return _BED_MESH_PROFILE_QUOTED.sub(lambda m: f'{m.group(1)}={m.group(3)}', script)
+
+
+def is_live_bed_mesh(status):
+    """True when gklib's own bed_mesh status holds a probed mesh.
+
+    GoKlipper keeps a Klipper-style bed_mesh status (profile_name, mesh_min,
+    mesh_max, probed_matrix, mesh_matrix, profiles), rebuilt by
+    BedMesh.Set_mesh -> Update_status whenever a mesh is calibrated, loaded or
+    cleared (KS1 fw 2.7.2.7: Update_status 0x4c5ee0, Get_status 0x4c5ed0).
+    Adaptive meshes (BED_MESH_CALIBRATE ADAPTIVE=1) are never written to
+    printer_mutable.cfg, so this is the only place they show up.
+    """
+    if not isinstance(status, dict):
+        return False
+    matrix = status.get('probed_matrix')
+    if not isinstance(matrix, (list, tuple)) or not matrix:
+        return False
+    if not all(isinstance(row, (list, tuple)) and row for row in matrix):
+        return False
+    return status.get('mesh_min') is not None and status.get('mesh_max') is not None
+
+
+# Model and firmware combinations where querying gklib's own bed_mesh object
+# has been verified on a printer. GoKlipper can panic on objects it does not
+# support (KS1M crashes on motion_report rather than returning an error), so
+# every other combination keeps answering bed_mesh from printer_mutable.cfg.
+# Add entries one at a time once confirmed on that model and firmware.
+LIVE_BED_MESH_VERIFIED = (
+    ('KS1', '2.7.2.7'),
+)
+
+
 class Kobra:
     # Environment
     KOBRA_MODEL_ID = None
@@ -105,14 +192,18 @@ class Kobra:
     _remote_mode = None
     _total_layer = 0
     _states_cache = []
+    _last_sdcard_progress = 0.0
+    _end_of_print_hold_task = None
+    END_OF_PRINT_HOLD_TIMEOUT = 90  # seconds, safety margin. End routine takes ~25 s on the S1, not measured on other printers
     _exclude_object_current_file = None
     _exclude_object_objects = None
     _exclude_object_force_end_task = None
     _exclude_object_last_force_end_key = None
+    EXCLUDE_OBJECT_SCAN_MAX_LINES = 50000  # backstop for slicers with no layer markers. Headers seen are under 300 lines, plus thumbnails
 
     # GCode handlers
     gcode_handlers: dict[str, FlexCallback] = {}
-    status_patchers: List[Callable[[dict], dict]] = []
+    status_patchers: List[Callable[..., dict]] = []
     print_data_patchers: List[Callable[[dict], dict]] = []
 
     def __init__(self, config):
@@ -163,6 +254,9 @@ class Kobra:
         self.patch_k2p_bug()
         self.patch_klipper_restart()
         self.patch_ace_flush_control()
+        # Must stay last: it has to wrap every other request patch so it sees
+        # the client's objects before any of them edit the request.
+        self.patch_requested_objects()
 
         logging.info('Completed Kobra patching! Yay!')
 
@@ -205,6 +299,9 @@ class Kobra:
 
             await self.power.add_device('chamber_light', ShellPowerDevice(config.getsection('power chamber_light')))
 
+
+    def live_bed_mesh_supported(self):
+        return (self.KOBRA_MODEL_CODE, self.KOBRA_VERSION) in LIVE_BED_MESH_VERIFIED
 
     def is_goklipper_running(self):
         if time.time() < self._goklipper_next_check:
@@ -418,6 +515,13 @@ class Kobra:
         if file_path.startswith(prefix):
             file_path = file_path.replace(prefix, '', 1)
 
+        # After a print, virtual_sdcard.file_path can be just the gcodes directory
+        # while print_stats.filename still names the file. Switching to '' and back
+        # threw away the cached objects and re-read the file on every Mainsail
+        # reconnect (#111)
+        if not file_path:
+            return
+
         if file_path != self._exclude_object_current_file:
             logging.info(f'[Kobra] Tracking exclude_object file: {file_path}')
             self._exclude_object_current_file = file_path
@@ -434,13 +538,19 @@ class Kobra:
             absolute_path = os.path.join('/userdata/app/gk/printer_data/gcodes', file_path.lstrip('/'))
             if os.path.isfile(absolute_path):
                 try:
+                    # Slicers write the definitions in the header, before the first
+                    # layer. Stop there: this runs on Moonraker's event loop, and
+                    # reading a whole unlabeled 15h file blocked it for ~20s (#111)
                     with open(absolute_path, 'r', encoding='utf-8', errors='replace') as f:
-                        for line in f:
+                        for line_number, line in enumerate(f):
+                            if line_number >= self.EXCLUDE_OBJECT_SCAN_MAX_LINES:
+                                break
+
                             line = line.strip()
                             if not line:
                                 continue
 
-                            if line.startswith('EXCLUDE_OBJECT_START') and objects:
+                            if line.startswith(('EXCLUDE_OBJECT_START', ';LAYER_CHANGE', ';LAYER:')):
                                 break
 
                             if not line.startswith('EXCLUDE_OBJECT_DEFINE '):
@@ -681,6 +791,26 @@ class Kobra:
                 self._exclude_object_last_force_end_key = trigger_key
             self._exclude_object_force_end_task = None
 
+    def _cancel_end_of_print_hold(self):
+        task = self._end_of_print_hold_task
+        self._end_of_print_hold_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _end_of_print_hold_timeout(self):
+        await asyncio.sleep(self.END_OF_PRINT_HOLD_TIMEOUT)
+        self._release_end_of_print_hold()
+
+    def _release_end_of_print_hold(self):
+        self._end_of_print_hold_task = None
+        if getattr(self, '_last_tracked_state', None) != 'printing':
+            return
+        logging.warning('[Kobra] GoKlipper did not report complete after the file was fully consumed, reporting complete now')
+        self._last_tracked_state = 'complete'
+        klippy_conn = self.server.lookup_component("klippy_connection", None)
+        if klippy_conn:
+            klippy_conn._process_status_update(time.time(), {'print_stats': {'state': 'complete'}})
+
     def _maybe_force_end_excluded_object(self, status: dict):
         if not isinstance(status, dict):
             return
@@ -722,8 +852,16 @@ class Kobra:
         )
 
 
-    def patch_status(self, status):
+    def patch_status(self, status, is_subscription_update=False, requested=None):
         if self.is_goklipper_running():
+            # Remember last reported file progress (#184)
+            sdcard_status = status.get('virtual_sdcard')
+            if isinstance(sdcard_status, dict):
+                progress = sdcard_status.get('progress')
+                if isinstance(progress, (int, float)):
+                    self._last_sdcard_progress = progress
+                    if progress < 1.0:
+                        self._cancel_end_of_print_hold()
 
             if 'print_stats' in status:
                 if 'state' in status['print_stats']: 
@@ -742,10 +880,28 @@ class Kobra:
                     if state.lower() in ['complete', 'completed', 'print_complete', 'finished', 'finish', 'done']:
                         state = 'complete'
 
-                    # Debounce GoKlipper's standby state due to race condition at end of print (#445)
-                    # GoKlipper emits "standby" then "complete" 1-2 seconds later, causing Moonraker to report "cancelled"
+                    # GoKlipper left standby on its own (complete, cancelled, error...): the hold is over.
+                    # Excludes "printing" because a second patch_status pass sees the rewritten state
+                    if state.lower() not in ('standby', 'printing'):
+                        self._cancel_end_of_print_hold()
+
+                    # Recognize as new print when the printer moves to printing from anything other than "printing" or "paused"
+                    # and forget progress of the previous print
+                    previous_print_state = getattr(self, '_last_tracked_state', None)
+                    if state.lower() == 'printing' and previous_print_state not in ('printing', 'paused'):
+                        self._last_sdcard_progress = 0.0
+
+                    # GoKlipper reports "standby" the moment the gcode file is fully consumed, while its end-of-print
+                    # routine is still running. Moonraker history records any printing -> standby transition as cancelled
+                    # and listeners act on complete immediately. So we need to keep reporting printing until GoKlipper sends its own complete (#184).
+                    # A standby before the file is consumed is a cancel - we keep the short debounce for that (#445).
                     if state.lower() == 'standby' and getattr(self, '_last_tracked_state', None) == 'printing':
-                        state = 'printing' # Keep it printing for now
+                        state = 'printing'
+
+                        if self._last_sdcard_progress >= 1.0:
+                            # Safety net in case GoKlipper never reports complete
+                            if self._end_of_print_hold_task is None:
+                                self._end_of_print_hold_task = self.server.get_event_loop().create_task(self._end_of_print_hold_timeout())
                         
                         async def _apply_delayed_standby():
                             import asyncio
@@ -757,7 +913,7 @@ class Kobra:
                                 if klippy_conn:
                                     klippy_conn._process_status_update(time.time(), {'print_stats': {'state': 'standby'}})
 
-                        if not getattr(self, '_delayed_standby_task', None) or getattr(self, '_delayed_standby_task').done():
+                        if self._last_sdcard_progress < 1.0 and (not getattr(self, '_delayed_standby_task', None) or getattr(self, '_delayed_standby_task').done()):
                             # Run the debouncer
                             setattr(self, '_delayed_standby_task', self.server.get_event_loop().create_task(_apply_delayed_standby()))
 
@@ -818,14 +974,17 @@ class Kobra:
                     self._normalize_exclude_object_status(status['exclude_object'], objects)
 
         for patcher in self.status_patchers:
-            status = patcher(status)
+            status = patcher(status, is_subscription_update, requested)
 
         if self.is_goklipper_running():
             self._maybe_force_end_excluded_object(status)
 
         return status
 
-    def register_status_patcher(self, patcher: Callable[[dict], dict]):
+    # patcher(status: dict, is_subscription_update: bool, requested: Optional[set]) -> dict
+    # requested is None when the caller cannot know what the client asked for
+    # (add everything), or the set of requested object names (add only those).
+    def register_status_patcher(self, patcher: Callable[..., dict]):
         self.status_patchers.append(patcher)
 
     def register_print_data_patcher(self, patcher: Callable[[dict], dict]):
@@ -841,13 +1000,15 @@ class Kobra:
             async def _send_klippy_request(me, method, params, default = Sentinel.MISSING, transport = None):
                 result = await original__send_klippy_request(me, method, params, default, transport)
                 if result and isinstance(result, dict) and 'status' in result:
-                    result['status'] = self.patch_status(result['status'])
+                    # Patcher objects (mmu) are added by patch_requested_objects(),
+                    # which is the only layer that knows what the caller asked for.
+                    result['status'] = self.patch_status(result['status'], requested=())
                 return result
             return _send_klippy_request
 
         def wrap_send_status(original_send_status):
             def send_status(me, status, eventtime):
-                status = self.patch_status(status)
+                status = self.patch_status(status, is_subscription_update=True)
                 return original_send_status(me, status, eventtime)
             return send_status
 
@@ -859,9 +1020,28 @@ class Kobra:
         setattr(KlippyAPI, 'send_status', wrap_send_status(KlippyAPI.send_status))
         logging.debug(f'  After: {KlippyAPI.send_status}')
 
+        # NOTE: ordering invariant for MMU status diffing (MmuAcePatcher.patch_status).
+        # patch_status() runs TWICE per GoKlipper status push: once here in
+        # the outer wrapper below, before delegating to the original
+        # handler, and again inside wrap_send_status's KlippyAPI.send_status
+        # above, since KlippyAPI is the host Subscribable that
+        # original__process_status_update fans the update out to for each
+        # connected client.
+        #
+        # The call in the outer wrapper below MUST run BEFORE delegating to
+        # original__process_status_update. That first call folds only the
+        # changed MMU keys into the shared `status` dict AND syncs the diff
+        # cache, so every subsequent send_status() call for each fanned-out
+        # subscriber sees an up-to-date cache (and correctly contributes no
+        # further changes), while still handing every subscriber the same
+        # already-patched `status` object. If this call were moved to run
+        # only inside send_status, or moved to after delegating here, only
+        # the first subscriber's send_status call would observe the diff
+        # and sync the cache -- every other subscriber in the same fan-out
+        # would silently receive a status frame with the MMU keys missing.
         def wrap__process_status_update(original__process_status_update):
             def _process_status_update(me, eventtime, status):
-                status = self.patch_status(status)
+                status = self.patch_status(status, is_subscription_update=True)
                 return original__process_status_update(me, eventtime, status)
             return _process_status_update
 
@@ -876,7 +1056,8 @@ class Kobra:
         def wrap_set_result(original_set_result):
             def set_result(me, result):
                 if isinstance(result, dict) and 'status' in result:
-                    result['status'] = self.patch_status(result['status'])
+                    # See patch_requested_objects(): patcher objects are added there.
+                    result['status'] = self.patch_status(result['status'], requested=())
                 original_set_result(me, result)
             return set_result
 
@@ -893,7 +1074,8 @@ class Kobra:
                 if result and isinstance(result, dict):
                     logging.debug(f'Wrap request method {rpc_method} result: {json.dumps(result)}')
                 if result and isinstance(result, dict) and 'status' in result:
-                    result['status'] = self.patch_status(result['status'])
+                    # See patch_requested_objects(): patcher objects are added there.
+                    result['status'] = self.patch_status(result['status'], requested=())
                     logging.debug(f'Wrap request method {rpc_method} result status: {json.dumps(result)}')
                 return result
             return request
@@ -998,6 +1180,62 @@ class Kobra:
     def register_gcode_handler(self, cmd, callback: FlexCallback):
         logging.info(f'> Registering gcode handler for {cmd}...')
         self.gcode_handlers[cmd.upper()] = callback
+
+    def patch_requested_objects(self):
+        """Answer objects/query with only the objects the client asked for.
+
+        Several patches add objects to status responses: patch_status()
+        injects idle_timeout whenever print_stats.state is present, and the MMU
+        patcher merged mmu and mmu_machine into every query. Upstream Moonraker
+        returns exactly what was requested. Some clients cannot cope with the
+        extra data: BIQU Panda Breath silently ignores responses over roughly
+        1.5 KB, so in Auto mode it never saw the bed target and never turned
+        its heater on (issue #140). A 316 byte reply became 2765 bytes.
+
+        This wrapper is installed after every other request patch, so it is the
+        outermost layer and sees the client's object list before inner patches
+        edit it (patch_bed_mesh, for example, deletes bed_mesh from the request
+        before it reaches gklib and adds it back to the result).
+
+        For objects/query and objects/subscribe it adds patcher objects (mmu)
+        only if they were requested, which also keeps the MMU diff cache from
+        advancing for clients that never asked for MMU. For objects/query it
+        then drops anything that was not requested. Subscribe responses are
+        already pruned by Moonraker itself, and are otherwise left as they were.
+        """
+        from .klippy_connection import KlippyConnection
+
+        logging.info('> Patching object queries to return only requested objects...')
+
+        def wrap_request(original_request):
+            async def request(me, web_request: WebRequest) -> Any:
+                rpc_method = web_request.get_endpoint()
+
+                requested = None
+                if rpc_method in ('objects/query', 'objects/subscribe'):
+                    args = web_request.get_args()
+                    objects = args.get('objects') if isinstance(args, dict) else None
+                    if isinstance(objects, dict):
+                        # Copy the names now; inner patches mutate this dict.
+                        requested = set(objects.keys())
+
+                result = await original_request(me, web_request)
+
+                if (requested is not None and isinstance(result, dict) and
+                        isinstance(result.get('status'), dict)):
+                    status = result['status']
+                    for patcher in self.status_patchers:
+                        status = patcher(status, False, requested)
+                    if rpc_method == 'objects/query':
+                        status = {name: value for name, value in status.items() if name in requested}
+                    result['status'] = status
+
+                return result
+            return request
+
+        logging.debug(f'  Before: {KlippyConnection.request}')
+        setattr(KlippyConnection, 'request', wrap_request(KlippyConnection.request))
+        logging.debug(f'  After: {KlippyConnection.request}')
 
     def patch_gcode_handler(self):
         from .klippy_apis import KlippyAPI
@@ -1170,6 +1408,94 @@ class Kobra:
         logging.info('> Routing EXCLUDE_OBJECT to native endpoint...')
         self.register_gcode_handler('EXCLUDE_OBJECT', handle_gcode_exclude_object)
 
+    # Models where re-homing Z once the bed is hot has been checked: Felixoid on a
+    # K3 running 2.4.6.7 (#127). Add the S1 and S1 Max once a calibration has been
+    # run on each and G28 Z is confirmed to move to safe_z_home first.
+    HOT_Z_REHOME_MODELS = ('K3',)
+
+    # Models that still get the calibration script from before #190. On an S1 Max
+    # (fw 2.7.1.4, 20261027_01_test) the new sequence never finished: four runs
+    # in one debug bundle each left gcode/script pending for 7-8 minutes without
+    # saving the mesh, while the same sequence completes in under 4 minutes on a
+    # KS1. The S1 Max has no WIPE_EXIT, so it went from WIPE_STOP straight into
+    # BED_MESH_CALIBRATE; the logs don't show which command blocked. The old
+    # script ran on the S1 Max for months without hang reports. Drop the model
+    # from here once a new sequence has been tested on one.
+    LEGACY_CALIBRATE_MODELS = ('KS1M',)
+
+    def build_calibrate_script(self, commands, bed_temp, extru_temp, extru_end_temp):
+        """Build the bed mesh calibration sequence for this printer.
+
+        commands is the set of command names the printer reports through
+        gcode/help, or None if that could not be read. When it is None, or the
+        model is in LEGACY_CALIBRATE_MODELS, the sequence is exactly what we sent
+        before, so a printer that can't answer gcode/help is no worse off.
+
+        When it is known:
+        - nothing is sent that the printer does not have. MOVE_HEAT_POS only
+          exists on the K3 family; the S1 family uses TO_THROW_POSITION, and the
+          S1 Max has no WIPE_EXIT (#101).
+        - on the S1 family the nozzle cools down parked on the silicone pad
+          (WIPE_STOP) instead of at the wiper exit, so it can't ooze (#101).
+        - the per-model choices otherwise match what we sent before, so the K3
+          family and the Kobra 2 Pro only lose commands they never had, plus a
+          hot Z re-home on HOT_Z_REHOME_MODELS (#127).
+        """
+        s1_family = self.KOBRA_MODEL_CODE in ('KS1', 'KS1M')
+
+        if commands is None or self.KOBRA_MODEL_CODE in self.LEGACY_CALIBRATE_MODELS:
+            script = [
+                'G28', 'MOVE_HEAT_POS',
+                f'M140 S{bed_temp}', f'M109 S{extru_temp}', f'M190 S{bed_temp}',
+                'WIPE_ENTER', 'WIPE_NOZZLE', 'WIPE_EXIT',
+                f'M109 S{extru_end_temp}',
+                'BED_MESH_CALIBRATE', 'TURN_OFF_HEATERS', 'M106 S0', 'SAVE_CONFIG',
+            ]
+            if not s1_family:
+                script.remove('WIPE_ENTER')
+                script.remove('WIPE_EXIT')
+            return script
+
+        def available(*names):
+            return [name for name in names if name in commands]
+
+        # Home first. Without this the printer can reach BED_MESH_CALIBRATE
+        # un-homed, and GoKlipper then blocks forever at the first probe point
+        # instead of raising "Must home axis first" the way mainline Klipper
+        # does - Moonraker forwards gcode with no timeout, so the UI just sits
+        # there with no error (issue #85). Verified on a KS1 (fw 2.7.2.7).
+        script = ['G28']
+
+        # Heating position: the K3 family has MOVE_HEAT_POS, the S1 family has
+        # TO_THROW_POSITION (the purge chute) instead.
+        if 'MOVE_HEAT_POS' in commands:
+            script.append('MOVE_HEAT_POS')
+        elif s1_family and 'TO_THROW_POSITION' in commands:
+            script.append('TO_THROW_POSITION')
+
+        script += [f'M140 S{bed_temp}', f'M109 S{extru_temp}', f'M190 S{bed_temp}']
+
+        if s1_family:
+            # Wipe, then park on the silicone pad for the cooldown wait, then
+            # leave the wiper. WIPE_STOP ends at X75 Y273 on the S1 (X125.5 Y370
+            # on the S1 Max); WIPE_EXIT used to leave the nozzle at X83 Y250
+            # through the cooldown, where it oozed (#101). The S1 Max doesn't
+            # get here yet, see LEGACY_CALIBRATE_MODELS.
+            script += available('WIPE_ENTER', 'WIPE_NOZZLE', 'WIPE_STOP')
+            script.append(f'M109 S{extru_end_temp}')
+            script += available('WIPE_EXIT')
+        else:
+            script += available('WIPE_NOZZLE')
+            script.append(f'M109 S{extru_end_temp}')
+
+        # Re-home Z against the hot bed so the mesh is probed on the geometry it
+        # will print on (#127, Felixoid). Only where it has been checked.
+        if self.KOBRA_MODEL_CODE in self.HOT_Z_REHOME_MODELS:
+            script.append('G28 Z')
+
+        script += ['BED_MESH_CALIBRATE', 'TURN_OFF_HEATERS', 'M106 S0', 'SAVE_CONFIG']
+        return script
+
     def patch_bed_mesh(self):
         from .klippy_connection import KlippyConnection
 
@@ -1221,36 +1547,31 @@ class Kobra:
                                     extru_end_temp = int(extru_end_temp_match[1])
                                     logging.info(f'[Kobra] Using leviQ3 extru_end_temp: {extru_end_temp}')
 
-                        calibrate_script = [
-                            # Home first. Without this the printer can reach
-                            # BED_MESH_CALIBRATE un-homed, and GoKlipper then blocks
-                            # forever at the first probe point instead of raising
-                            # "Must home axis first" the way mainline Klipper does -
-                            # Moonraker forwards gcode with no timeout, so the UI just
-                            # sits there with no error (issue #85). Verified on a KS1
-                            # (fw 2.7.2.7): un-homed the printer stalls at mesh_min
-                            # 5,5; homed, the full 5x5 mesh probes and saves normally.
-                            'G28',
-                            'MOVE_HEAT_POS',
-                            f'M140 S{bed_temp}', # Set bed to 60
-                            f'M109 S{extru_temp}', # Wait hotend to 170
-                            f'M190 S{bed_temp}', # Wait bed to 60
-                            'WIPE_ENTER', # Move to wiping position
-                            'WIPE_NOZZLE', # Wipe nozzle
-                            'WIPE_EXIT', # Exit wiping position
-                            f'M109 S{extru_end_temp}', # Wait hotend to 140
-                            'BED_MESH_CALIBRATE',
-                            'TURN_OFF_HEATERS',
-                            'M106 S0', # Set fan speed to 0
-                            'SAVE_CONFIG'
-                        ]
+                        # Ask the printer which commands it has, so the script never
+                        # sends one it lacks. GoKlipper answers an unknown command
+                        # with "ok" and only a log warning, which is how
+                        # MOVE_HEAT_POS went unnoticed on the S1 family (#101).
+                        commands = None
+                        try:
+                            web_request.endpoint = 'gcode/help'
+                            help_result = await original_request(me, web_request)
+                            if isinstance(help_result, dict) and help_result:
+                                commands = {str(name).upper() for name in help_result}
+                        except Exception as e:
+                            logging.warning(f'[Kobra] Could not list printer commands for bed mesh calibration: {e!r}')
+                        finally:
+                            web_request.endpoint = 'gcode/script'
 
-                        if self.KOBRA_MODEL_CODE != 'KS1' and self.KOBRA_MODEL_CODE != 'KS1M':
-                            calibrate_script.remove('WIPE_ENTER')
-                            calibrate_script.remove('WIPE_EXIT')
+                        calibrate_script = self.build_calibrate_script(commands, bed_temp, extru_temp, extru_end_temp)
+                        logging.info(f'[Kobra] Bed mesh calibration script: {calibrate_script}')
 
                         web_request.get_args()["script"] = '\n'.join(calibrate_script)
                     elif script.lower().startswith('bed_mesh_profile'):
+                        normalized_script = normalize_bed_mesh_profile_script(script)
+                        if normalized_script != script:
+                            logging.info(f'[Kobra] Normalized bed mesh profile quoting: {script} -> {normalized_script}')
+                            web_request.get_args()['script'] = normalized_script
+                            script = normalized_script
                         name = re.search(r'save=("(?:[^"]+)"|(?:[^\s]+))', script.lower())
                         if name and name[1] != 'default':
                             message = 'GoKlipper only support one default bed mesh'
@@ -1271,59 +1592,61 @@ class Kobra:
             async def _request_standard(me, web_request, timeout = None):
                 args = web_request.get_args()
 
-                # Do not send bed_mesh to goklipper, it does not support it
+                # GoKlipper has no "bed_mesh default" style profile objects,
+                # so those are answered here from printer_mutable.cfg. The
+                # plain "bed_mesh" object is passed through to gklib, which
+                # reports the mesh actually in use, including adaptive meshes
+                # that are never saved, but only on the model and firmware
+                # combinations in LIVE_BED_MESH_VERIFIED; everywhere else
+                # gklib never sees bed_mesh. If gklib has no mesh loaded, or
+                # the query fails, fall back to the saved mesh as before.
                 want_bed_mesh = False
+                ask_live = False
                 if self.is_goklipper_running():
-                    if 'objects' in args and ('bed_mesh' in args['objects'] or 'bed_mesh default' in args['objects'] or 'bed_mesh \"default\"' in args['objects']):
+                    objects = args.get('objects') if isinstance(args, dict) else None
+                    if isinstance(objects, dict) and any(k in objects for k in ('bed_mesh',) + BED_MESH_PROFILE_ALIASES):
                         want_bed_mesh = True
-                        if 'bed_mesh' in args['objects']:
-                            del args['objects']['bed_mesh']
-                        if 'bed_mesh default' in args['objects']:
-                            del args['objects']['bed_mesh default']
-                        if 'bed_mesh \"default\"' in args['objects']:
-                            del args['objects']['bed_mesh \"default\"']
+                        ask_live = ('bed_mesh' in objects and
+                                    self.live_bed_mesh_supported() and
+                                    getattr(self, 'live_bed_mesh', True))
+                        for alias in BED_MESH_PROFILE_ALIASES:
+                            objects.pop(alias, None)
+                        if not ask_live:
+                            objects.pop('bed_mesh', None)
 
-                result = await original__request_standard(me, web_request, timeout)
+                try:
+                    result = await original__request_standard(me, web_request, timeout)
+                except Exception:
+                    if not ask_live:
+                        raise
+                    logging.exception('[Kobra] gklib rejected the bed_mesh query, using the saved mesh only')
+                    self.live_bed_mesh = False
+                    args['objects'].pop('bed_mesh', None)
+                    result = await original__request_standard(me, web_request, timeout)
 
                 # Add bed_mesh, so mainsail will recognize it
                 if want_bed_mesh:
                     if 'status' not in result:
                         result['status'] = {}
+                    status = result['status']
 
-                    result['status']['bed_mesh'] = {}
-                    result['status']['bed_mesh default'] = {}
-                    result['status']['bed_mesh \"default\"'] = {}
+                    try:
+                        saved_mesh, saved_profile = read_saved_bed_mesh()
+                    except Exception:
+                        logging.exception('[Kobra] Could not read the saved bed mesh')
+                        saved_mesh, saved_profile = {}, {}
 
-                    if os.path.isfile("/userdata/app/gk/printer_data/config/printer_mutable.cfg"):
-                        with open('/userdata/app/gk/printer_data/config/printer_mutable.cfg', 'r') as f:
-                            config = json.load(f)
-                            mesh = config.get('bed_mesh default')
-                            if not mesh is None:
-                                points = json.loads("[[" + mesh.get('points').replace("\n", "], [") + "]]")
+                    live_mesh = status.get('bed_mesh')
+                    if is_live_bed_mesh(live_mesh):
+                        bed_mesh = dict(live_mesh)
+                        if not bed_mesh.get('profile_name'):
+                            bed_mesh['profile_name'] = 'adaptive'
+                    else:
+                        bed_mesh = saved_mesh
 
-                                result['status']['bed_mesh'] = {
-                                    "profile_name": "default",
-                                    "mesh_min": (float(mesh.get("min_x")), float(mesh.get("min_y"))),
-                                    "mesh_max": (float(mesh.get("max_x")), float(mesh.get("max_y"))),
-                                    "probed_matrix": points,
-                                    "mesh_matrix": points
-                                }
-                                result['status']['bed_mesh default'] = {
-                                    "points": points,
-                                    "mesh_params": {
-                                        "min_x": float(mesh["min_x"]),
-                                        "max_x": float(mesh["max_x"]),
-                                        "min_y": float(mesh["min_y"]),
-                                        "max_y": float(mesh["max_y"]),
-                                        "x_count": int(mesh["x_count"]),
-                                        "y_count": int(mesh["y_count"]),
-                                        "mesh_x_pps": int(mesh["mesh_x_pps"]),
-                                        "mesh_y_pps": int(mesh["mesh_y_pps"]),
-                                        "tension": float(mesh["tension"]),
-                                        "algo": mesh["algo"]
-                                    }
-                                }
-                                #result['status']['bed_mesh \"default\"'] = result['status']['bed_mesh default']
+                    status['bed_mesh'] = bed_mesh
+                    status['bed_mesh default'] = saved_profile
+                    status['bed_mesh "default"'] = {}
                 return result
             return _request_standard
 
@@ -1374,7 +1697,9 @@ class Kobra:
                         "bed_mesh",
                         "bed_mesh default",
                         "bed_mesh \"default\"",
-                        "idle_timeout"
+                        "idle_timeout",
+                        "mmu",
+                        "mmu_machine"
                     ]
 
                     # For KS1M: Do not expose motion_report to avoid GoKlipper panic:
@@ -1433,6 +1758,27 @@ class Kobra:
         logging.debug(f'  Before: {KlippyConnection.request}')
         setattr(KlippyConnection, 'request', wrap_request(KlippyConnection.request))
         logging.debug(f'  After: {KlippyConnection.request}')
+
+        def wrap__request_standard(original__request_standard):
+            async def _request_standard(me, web_request, timeout=None):
+                args = web_request.get_args()
+
+                # gklib doesn't implement these, so never forward them.
+                # Unlike bed_mesh above, no synthesise-back is needed:
+                # patch_status merges mmu/mmu_machine onto every status.
+                if (self.is_goklipper_running() and
+                        isinstance(args, dict) and
+                        isinstance(args.get('objects'), dict) and
+                        web_request.get_endpoint() in ('objects/query', 'objects/subscribe')):
+                    args['objects'].pop('mmu', None)
+                    args['objects'].pop('mmu_machine', None)
+
+                return await original__request_standard(me, web_request, timeout)
+            return _request_standard
+
+        logging.debug(f'  Before: {KlippyConnection._request_standard}')
+        setattr(KlippyConnection, '_request_standard', wrap__request_standard(KlippyConnection._request_standard))
+        logging.debug(f'  After: {KlippyConnection._request_standard}')
 
     def patch_mainsail(self):
         from .klippy_connection import KlippyConnection

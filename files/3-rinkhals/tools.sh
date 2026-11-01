@@ -167,7 +167,7 @@ wait_for_name() {
             return
         fi
 
-        if [ "$TOTAL" -gt 30000 ]; then
+        if [ "$TOTAL" -lt 0 ]; then
             if [ "$3" != "" ]; then
                 log "$3"
             else

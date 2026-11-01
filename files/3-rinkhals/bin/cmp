@@ -1,0 +1,27 @@
+#!/bin/sh
+
+# Minimal cmp compatibility wrapper.
+# Supports: cmp [-s] FILE1 FILE2
+# Exit: 0=same, 1=different, 2=error
+
+SILENT=0
+
+if [ "$1" = "-s" ]; then
+    SILENT=1
+    shift
+fi
+
+if [ "$#" -ne 2 ]; then
+    [ "$SILENT" -eq 1 ] || echo "Usage: cmp [-s] FILE1 FILE2" >&2
+    exit 2
+fi
+
+if [ ! -r "$1" ] || [ ! -r "$2" ]; then
+    [ "$SILENT" -eq 1 ] || echo "cmp: file not readable" >&2
+    exit 2
+fi
+
+HASH1=$(md5sum "$1" 2>/dev/null | awk '{print $1}') || exit 2
+HASH2=$(md5sum "$2" 2>/dev/null | awk '{print $1}') || exit 2
+
+[ "$HASH1" = "$HASH2" ]
