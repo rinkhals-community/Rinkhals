@@ -199,6 +199,7 @@ class Kobra:
     _exclude_object_objects = None
     _exclude_object_force_end_task = None
     _exclude_object_last_force_end_key = None
+    EXCLUDE_OBJECT_SCAN_MAX_LINES = 50000  # backstop for slicers with no layer markers. Headers seen are under 300 lines, plus thumbnails
 
     # GCode handlers
     gcode_handlers: dict[str, FlexCallback] = {}
@@ -514,6 +515,13 @@ class Kobra:
         if file_path.startswith(prefix):
             file_path = file_path.replace(prefix, '', 1)
 
+        # After a print, virtual_sdcard.file_path can be just the gcodes directory
+        # while print_stats.filename still names the file. Switching to '' and back
+        # threw away the cached objects and re-read the file on every Mainsail
+        # reconnect (#111)
+        if not file_path:
+            return
+
         if file_path != self._exclude_object_current_file:
             logging.info(f'[Kobra] Tracking exclude_object file: {file_path}')
             self._exclude_object_current_file = file_path
@@ -530,13 +538,19 @@ class Kobra:
             absolute_path = os.path.join('/userdata/app/gk/printer_data/gcodes', file_path.lstrip('/'))
             if os.path.isfile(absolute_path):
                 try:
+                    # Slicers write the definitions in the header, before the first
+                    # layer. Stop there: this runs on Moonraker's event loop, and
+                    # reading a whole unlabeled 15h file blocked it for ~20s (#111)
                     with open(absolute_path, 'r', encoding='utf-8', errors='replace') as f:
-                        for line in f:
+                        for line_number, line in enumerate(f):
+                            if line_number >= self.EXCLUDE_OBJECT_SCAN_MAX_LINES:
+                                break
+
                             line = line.strip()
                             if not line:
                                 continue
 
-                            if line.startswith('EXCLUDE_OBJECT_START') and objects:
+                            if line.startswith(('EXCLUDE_OBJECT_START', ';LAYER_CHANGE', ';LAYER:')):
                                 break
 
                             if not line.startswith('EXCLUDE_OBJECT_DEFINE '):
