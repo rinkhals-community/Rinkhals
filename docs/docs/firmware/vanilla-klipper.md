@@ -2,23 +2,15 @@
 title: Vanilla Klipper
 ---
 
-## K2P Support
+## Status
 
-Working on the K2P:
-
-- App and config are provided here: [https://github.com/rinkhals-community/Rinkhals.apps/blob/master/apps/vanilla-klipper](https://github.com/rinkhals-community/Rinkhals.apps/blob/master/apps/vanilla-klipper)
+The Rinkhals vanilla-klipper app has been retired from the app store, and a replacement app is being worked on. Until it's available, there is no vanilla Klipper app from Rinkhals.
 
 ## K3 and KS1 Support
 
-Vanilla Klipper is now working for KS1 and K3 printers. However, they require a current klipper-base and some driver additions which are not yet merged into the main branch of the Rinkhals vanilla-klipper APP builds. Without these updates, you may encounter startup errors (e.g., Error Code 22 on the printer display).
+Vanilla Klipper works on KS1 and K3 printers, but it needs a current klipper base and some driver additions. Without them, you may run into startup errors (e.g., Error Code 22 on the printer display).
 
-### Current Workaround
-
-An updated klipper base with the necessary driver additions exists on the `feature/anycubic-klippy` branch of the Rinkhals.Apps repository, but it is not yet merged to master:
-
-- [https://github.com/rinkhals-community/Rinkhals.Apps/tree/feature/anycubic-klippy](https://github.com/rinkhals-community/Rinkhals.Apps/tree/feature/anycubic-klippy)
-
-Alternatively, for KS1/K3 vanilla-klipper APP builds, you can use this repository which contains the necessary klipper base and driver patches:
+For KS1/K3 vanilla-klipper builds, this community repository contains the necessary klipper base and driver patches:
 
 - [https://github.com/Kobra-S1/vanilla-klipper-swu](https://github.com/Kobra-S1/vanilla-klipper-swu)
 
