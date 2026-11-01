@@ -68,5 +68,4 @@ And other apps for their respective services:
 - [Cloudflare Tunnel](https://github.com/rinkhals-community/Rinkhals.apps/tree/master/apps/cloudflare-tunnel)
 - [OctoApp](https://github.com/rinkhals-community/Rinkhals.apps/tree/master/apps/octoapp)
 - [OctoEverywhere](https://github.com/rinkhals-community/Rinkhals.apps/tree/master/apps/octoeverywhere)
-- [Remote Debugging](https://github.com/rinkhals-community/Rinkhals.apps/tree/master/apps/remote-debugging) (ngrok)
 - [Tailscale](https://github.com/rinkhals-community/Rinkhals.apps/tree/master/apps/tailscale)
