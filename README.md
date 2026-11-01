@@ -115,7 +115,7 @@ You can find more information in [the documentation](https://rinkhals-community.
 > Having said that, running your printer with Moonraker, 1\~2 apps and 1\~2 connected clients should work fine.
 
 An apps system is provided in Rinkhals. It allows for the users to easily add some features to their printer. Some default ones ship with every release (Moonraker, Mainsail, Fluidd, mjpg-streamer, Remote display via VNC, Hostname/mDNS, the opt-in Firmware Collector, and the Rinkhals monitor for MQTT) and additional community apps are available on separate repos like:
-- https://github.com/rinkhals-community/Rinkhals.Apps (Tailscale, Cloudflare Tunnel, OctoApp, OctoEverywhere, NFS mount, stunnel, vanilla Klipper, and more)
+- https://github.com/rinkhals-community/Rinkhals.Apps (Tailscale, Cloudflare Tunnel, OctoApp, OctoEverywhere, NFS mount, stunnel, and more)
 - https://github.com/basvd/Rinkhals.WebUI (a web interface for Rinkhals)
 
 The default apps are listed in detail under [Features and built-in apps](https://rinkhals-community.github.io/Rinkhals/about/#features-and-built-in-apps) in the documentation. Instructions on how to install or develop apps live in the Rinkhals.Apps repository.
