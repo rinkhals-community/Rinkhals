@@ -83,6 +83,10 @@ When the app is started and enabled, the camera will be available in OctoApp, Ma
 
 You have to disable and stop the app to make the camera work in Anycubic apps.
 
+## My printer disappeared from the Anycubic app after turning on LAN mode
+
+On recent firmware, the touchscreen's LAN mode toggle also removes the printer from your Anycubic account, so the app shows "Scan to add device". To keep using the Anycubic app in LAN mode, use the Cloud to LAN bridge app and its own LAN mode setting instead, see [Anycubic app in LAN mode](guides/anycubic-app-in-lan-mode.md).
+
 ## Can I use OctoApp with Rinkhals?
 Yes, Rinkhals supports OctoApp out of the box. To work properly, OctoApp needs the Moonraker app and one of Mainsail and Fluidd app to be enabled.
 

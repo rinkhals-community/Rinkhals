@@ -121,6 +121,37 @@ gkapi communicates in Cloud/LAN mode with the Slicer and/or Cloud using MQTT (se
 
 K3Sysui, however, connects to gkapi via TCP on port `18086`. The protocol here is almost identical to the one used by the gklib socket. However, some commands are only handled by gkapi. This port also acts as a proxy between gklib and k3sysui.
 
+### LAN mode
+
+```json
+{"id": 2017, "method": "Printer/QueryLanPrintStatus", "params": {}}\\x03
+```
+
+Returns `{"open": 1}` in LAN mode and `{"open": 0}` in cloud mode.
+
+```json
+{"id": 2015, "method": "Printer/OpenLanPrint", "params": {}}\\x03
+{"id": 2016, "method": "Printer/CloseLanPrint", "params": {}}\\x03
+```
+
+Switch to LAN mode or cloud mode. gkapi updates `/useremain/dev/remote_ctrl_mode` itself. K3SysUi isn't notified when another client switches modes: it only asks with `Printer/QueryLanPrintStatus` when it starts and after its own switch.
+
+When LAN mode is turned on from the touchscreen, K3SysUi sends `Cloud/Unbind` before `Printer/OpenLanPrint` (seen on the KS1 with 2.7.2.7), which removes the printer from the Anycubic account. Turning it off only sends `Printer/CloseLanPrint`. The [Cloud to LAN bridge](https://github.com/rinkhals-community/Rinkhals.Apps/tree/master/apps/cloud2lan-bridge) calls `Printer/OpenLanPrint` directly to keep the account.
+
+### cloud account
+
+```json
+{"id": 2008, "method": "Cloud/BindQuery", "params": {}}\\x03
+```
+
+Returns `{"bind": 1, "iconpath": "", "nickname": "..."}` when the printer is on an Anycubic account. gkapi asks the cloud for this, so in LAN mode, where its cloud client is off, it returns `bind: 0` even when the printer is still on the account.
+
+```json
+{"id": 2010, "method": "Cloud/Unbind", "params": {}}\\x03
+```
+
+Removes the printer from the Anycubic account.
+
 ### set camera led
 
 (does not work without gkcam)
