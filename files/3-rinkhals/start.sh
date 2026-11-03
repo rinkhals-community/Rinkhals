@@ -4,6 +4,16 @@ export TZ=UTC
 export RINKHALS_ROOT=$(dirname $(realpath $0))
 export RINKHALS_VERSION=$(cat $RINKHALS_ROOT/.version)
 
+# Serialize the complete stop/patch/launch/restore sequence. A hard-killed
+# startup leaves this boot-local lock in place; reboot clears /tmp. Do not
+# reclaim a lock merely because a PID might have been reused.
+mkdir -p /tmp/rinkhals
+if ! mkdir /tmp/rinkhals/native-start.lock 2>/dev/null; then
+    log "Another or interrupted Rinkhals startup owns native-start.lock; refusing concurrent startup"
+    exit 1
+fi
+trap 'rmdir /tmp/rinkhals/native-start.lock 2>/dev/null' 0
+
 # Check Kobra model and firmware version
 check_compatibility
 
@@ -272,25 +282,26 @@ cd /userdata/app/gk
 export USE_MUTABLE_CONFIG=1
 export LD_LIBRARY_PATH=/userdata/app/gk:$LD_LIBRARY_PATH
 
-#TARGETS="gklib gkapi gkcam K3SysUi"
-TARGETS="gkapi K3SysUi"
-
-for TARGET in $TARGETS; do
-    TARGET_PATCH=/opt/rinkhals/patches/${TARGET}.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh
-
-    if [ -f $TARGET_PATCH ]; then
-        # Little dance to patch binaries
-        # We should be able to delete the file after starting it, Linux will keep the inode alive until the process exits (https://stackoverflow.com/a/196910)
-        # But those binaries checks for their location, so moving does the trick instead
-        # Then directly restore the original file to keep everything tidy
-
-        rm -rf $TARGET.original 2> /dev/null
-        mv $TARGET $TARGET.original
-        cp $TARGET.original $TARGET
-        $TARGET_PATCH $TARGET &> /dev/null
-        chmod +x $TARGET
+# Keep a verified stock .original across boots. Prepare a complete, verified
+# patched inode before replacing the expected executable name. The native
+# binaries inspect their location, so launch them here and then restore stock
+# filenames while keeping the running patched inodes linked as .patch.
+NATIVE_BINARIES="$RINKHALS_ROOT/opt/rinkhals/scripts/native-binaries.py"
+native_binaries() {
+    python "$NATIVE_BINARIES" "$1" --model "$KOBRA_MODEL_CODE" --version "$KOBRA_VERSION"
+}
+native_failure() {
+    log "/!\\ Native binary preparation/restore failed"
+    if native_binaries restore; then
+        cd "$RINKHALS_ROOT"
+        quit
     fi
-done
+    # Do not start stock services with unverified executables. Keep the existing
+    # disable marker, originals and recovery access for operator intervention.
+    log "/!\\ Cannot restore verified native binaries; leaving Rinkhals disabled"
+    exit 1
+}
+native_binaries prepare || native_failure
 
 # Tweak processes priority to avoid MCU timing and more generally priting errors. (https://github.com/rinkhals-community/Rinkhals/issues/128)
 rm -f /userdata/app/gk/rinkhals_gklib.cfg
@@ -310,13 +321,7 @@ fi
 
 ./gkcam >> $RINKHALS_LOGS/gkcam.log 2>&1 &
 
-for TARGET in $TARGETS; do
-    if [ -f $TARGET.original ]; then
-        rm -rf $TARGET.patch 2> /dev/null
-        mv $TARGET $TARGET.patch
-        mv $TARGET.original $TARGET
-    fi
-done
+native_binaries restore || native_failure
 
 wait_for_socket /tmp/unix_uds1 30000 "/!\ Timeout waiting for gklib to start"
 
