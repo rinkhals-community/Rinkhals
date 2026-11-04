@@ -5,9 +5,9 @@ name: PR checks
 # So dependency bumps that break the frontend build or the Python components were
 # only discovered at release time, when the Docker image build failed.
 #
-# These are the two cheap checks that would have caught that, and nothing more -
-# no SWU build here, since that needs the ARM toolchain and takes far too long
-# for a PR gate.
+# Build the portal and test the Python components, plus check the embedded Go
+# backend when its sources or portal assets change. A full SWU build still
+# needs the firmware toolchain and is kept out of the PR gate.
 
 on:
   pull_request:
@@ -74,6 +74,80 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         working-directory: web-portal
         run: npm run build
+
+  go-backend:
+    name: Go backend tests and ARM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect backend or embedded UI changes
+        id: changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] ||
+             [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif ! changed_files=$(git diff --name-only "$BASE_SHA" HEAD -- \
+              files/4-apps/home/rinkhals/apps/65-rinkhals-web/ \
+              web-portal/ .github/workflows/pr-checks.yml); then
+            echo "Could not determine changed files, running backend checks anyway" >&2
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$changed_files" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No backend or embedded UI changes, skipping backend checks"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v7
+        if: steps.changed.outputs.run == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web-portal/package-lock.json
+
+      - name: Build embedded frontend
+        if: steps.changed.outputs.run == 'true'
+        working-directory: web-portal
+        run: |
+          npm ci
+          npm run build
+          mkdir -p ../files/4-apps/home/rinkhals/apps/65-rinkhals-web/ui
+          cp -a build/. ../files/4-apps/home/rinkhals/apps/65-rinkhals-web/ui/
+
+      - uses: actions/setup-go@v7
+        if: steps.changed.outputs.run == 'true'
+        with:
+          go-version-file: files/4-apps/home/rinkhals/apps/65-rinkhals-web/go.mod
+          cache-dependency-path: files/4-apps/home/rinkhals/apps/65-rinkhals-web/go.sum
+
+      - name: Test backend and check for races
+        if: steps.changed.outputs.run == 'true'
+        working-directory: files/4-apps/home/rinkhals/apps/65-rinkhals-web
+        run: |
+          go test -race ./...
+          go vet ./...
+
+      - name: Cross-compile static Linux ARMv7 backend
+        if: steps.changed.outputs.run == 'true'
+        working-directory: files/4-apps/home/rinkhals/apps/65-rinkhals-web
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/rinkhals-web-armv7" .
+          readelf -h "$RUNNER_TEMP/rinkhals-web-armv7" | grep -E 'Machine:.*ARM'
+          if readelf -l "$RUNNER_TEMP/rinkhals-web-armv7" | grep -q INTERP; then
+            echo "Backend must not depend on a dynamic loader"
+            exit 1
+          fi
 
   python-tests:
     name: Python component tests
