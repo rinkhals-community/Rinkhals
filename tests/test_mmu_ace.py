@@ -14,7 +14,7 @@ MODULE_PATH = (
 MODULE_NAME = "testsupport.moonraker.components.mmu_ace"
 # mmu_ace imports these as package siblings, so they must exist under those
 # names before mmu_ace itself is executed.
-SIBLING_MODULES = ("mmu_ace_spool_store", "mmu_ace_spool_matcher")
+SIBLING_MODULES = ("mmu_ace_spool_store", "mmu_ace_sku", "mmu_ace_spool_matcher")
 COMMON_NAME = "testsupport.moonraker.common"
 
 
@@ -126,6 +126,8 @@ class DummyHttpClient:
         self.spools: list = []
         self.requested: list = []
         self.fail = False
+        # Status served for GET /v1/spool/<id> in place of the spool, if set.
+        self.spool_status = None
 
     # --- inventory -----------------------------------------------------------
 
@@ -192,6 +194,17 @@ class DummyHttpClient:
                 rows = [f for f in rows
                         if self._colour_close((f.get("color_hex") or ""), colour, threshold)]
             return DummyHttpResponse(self._page(rows, params))
+
+        by_id = re.search(r"/v1/spool/(\d+)$", path)
+        if by_id is not None:
+            # The by-ID route answers a dict, and 404 for a spool that is not there
+            # (archived ones are still served, as on the real thing).
+            if self.spool_status is not None:
+                return DummyHttpResponse({}, self.spool_status)
+            for spool in self.spools:
+                if spool.get("id") == int(by_id.group(1)):
+                    return DummyHttpResponse(spool)
+            return DummyHttpResponse({"message": "No spool"}, 404)
 
         rows = list(self.spools)
         material = params.get("filament.material")
@@ -260,6 +273,17 @@ class DummySpoolman:
                              "article_number": article, "name": f"spool {i}"},
             })
         self.http_client.set_spools(payload)
+
+    def set_details(self, spool_id, name=None, vendor=None, color_hex=None):
+        """Give one catalogue spool the descriptive fields Spoolman holds for it."""
+        for spool in self.http_client.spools:
+            if spool["id"] != spool_id:
+                continue
+            filament = spool["filament"]
+            filament["name"] = name
+            filament["vendor"] = {"id": 1, "name": vendor} if vendor else None
+            if color_hex is not None:
+                filament["color_hex"] = color_hex
 
 
 _MISSING = object()
@@ -988,7 +1012,7 @@ class MmuAceUpdateGateSpoolTests(AsyncControllerTestBase):
         await self.controller.update_gate(1, material="WOOD", filament_name="Nope", spool_id=24)
 
         self.assertEqual(self._gate(1).material, "PLA")
-        self.assertEqual(self._gate(1).filament_name, "Anycubic Highspeed PLA Black")
+        self.assertEqual(self._gate(1).filament_name, "Anycubic Basic PLA Black")
 
     async def test_records_override_on_an_untagged_gate(self):
         await self.controller.update_gate(0, status=1, material="PETG", spool_id=16)
@@ -2270,9 +2294,9 @@ class MmuAceNoFabricatedSpoolIdTests(AsyncControllerTestBase):
         gate = self._gates()[1]
         self.assertEqual(gate.sku, "AHPLBK-107")
         self.assertEqual(gate.vendor, "Anycubic")
-        self.assertEqual(gate.series, "Highspeed")
+        self.assertEqual(gate.series, "Basic")
         self.assertEqual(gate.color_name, "Black")
-        self.assertEqual(gate.filament_name, "Anycubic Highspeed PLA Black")
+        self.assertEqual(gate.filament_name, "Anycubic Basic PLA Black")
 
     def test_status_reports_zero_for_unassigned_gates(self):
         self.controller._manual_spool_overrides[2] = 25
@@ -2402,7 +2426,7 @@ class MmuAceAutoMatchTests(MatcherTestBase):
     """Auto-assigning an unmapped gate from Spoolman by (material, colour).
 
     The ACE gives no usable per-spool identity for most tags - untagged gates have
-    no SKU, OpenSpool tags all report the literal "OPENSPOOL", and a stock Anycubic
+    no SKU, OpenSpool tags report "OPENSPOOL" on older firmware, and a stock Anycubic
     SKU is a product code shared by every roll of that product. Material and colour
     are available on all of them, and on a real 25-spool inventory identified 84%
     of spools uniquely.
@@ -2618,6 +2642,511 @@ class MmuAceSkuMatchTests(MatcherTestBase):
         await self._rebuild(self._hub(sku="", colour=(252, 246, 246)))
 
         self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
+
+
+class MmuAceSpoolmanFillsWhatTheParseMissesTests(MatcherTestBase):
+    """A bound spool names what the SKU parse could not.
+
+    The parse comes first: a tag that parses to a vendor and series keeps that
+    name, and the colour is always the tag's. Spoolman fills the vendor when the
+    parse found none, and the name when the parse could not build one - an
+    untagged spool, a hand-written tag, a vendor code that is not configured.
+    """
+    GATE_MATERIAL = "PLA"
+    GATE_COLOUR = (0, 0, 0)
+    GATE_SKU = ""
+
+    def setUp(self):
+        super().setUp()
+        self.spoolman.set_catalogue((7, "PLA", "1A1A1A", None))
+        self.spoolman.set_details(7, name="PLA Galaxy Black", vendor="Prusament",
+                                  color_hex="1A1A1A")
+
+    def _gate0(self):
+        return self.controller.ace.units[0].gates[0]
+
+    def _by_id_requests(self):
+        return [u for u in self._urls() if re.search(r"/v1/spool/\d+$", u.partition("?")[0])]
+
+    async def _bind(self, spool_id=7, sku=None):
+        hub = self._hub(sku=sku)
+        await self._rebuild(hub)
+        self.controller.set_manual_spool_id(0, spool_id)
+        await self.loop.drain()
+        return hub
+
+    # --- the parse comes first ---------------------------------------------------
+
+    async def test_a_tag_that_parses_keeps_its_parsed_name(self):
+        await self._bind(sku="AHPLBK-105")
+
+        self.assertEqual(self._gate0().vendor, "Anycubic")
+        self.assertEqual(self._gate0().filament_name, "Anycubic Basic PLA Black")
+
+    async def test_the_tag_colour_is_kept(self):
+        await self._bind()
+
+        self.assertEqual(self._gate0().color, self.module.rgb_to_rgba([0, 0, 0]))
+
+    async def test_an_unbound_gate_is_not_looked_up(self):
+        await self._rebuild(self._hub(sku="THPLBR-1"))
+
+        self.assertEqual(self._by_id_requests(), [])
+        self.assertEqual(self._gate0().vendor, "")
+
+    # --- what the parse misses ----------------------------------------------------
+
+    async def test_an_untagged_gate_takes_its_vendor_and_name_from_spoolman(self):
+        await self._bind()
+
+        self.assertEqual(self._gate0().vendor, "Prusament")
+        self.assertEqual(self._gate0().filament_name, "Prusament PLA Galaxy Black")
+
+    async def test_an_unconfigured_vendor_code_is_filled_from_spoolman(self):
+        # T is not a configured vendor, so THPLBR-1 parses to no vendor at all.
+        await self._bind(sku="THPLBR-1")
+
+        self.assertEqual(self._gate0().vendor, "Prusament")
+        self.assertEqual(self._gate0().filament_name, "Prusament PLA Galaxy Black")
+
+    async def test_a_name_that_already_starts_with_the_vendor_is_not_doubled(self):
+        self.spoolman.set_details(7, name="Prusament PLA Galaxy Black", vendor="Prusament")
+
+        await self._bind()
+
+        self.assertEqual(self._gate0().filament_name, "Prusament PLA Galaxy Black")
+
+    async def test_a_configured_vendor_with_no_parsed_series_keeps_the_vendor(self):
+        self.controller.sku_format = self.module.SkuFormat(
+            self.module.SkuFormat.parse_prefixes("T=Tinmorry"))
+
+        await self._bind(sku="THZZZZ-1")
+
+        self.assertEqual(self._gate0().vendor, "Tinmorry")
+        self.assertEqual(self._gate0().filament_name, "Tinmorry PLA Galaxy Black")
+
+    async def test_it_survives_the_next_status_rebuild(self):
+        await self._bind()
+
+        await self._rebuild()
+
+        self.assertEqual(self._gate0().vendor, "Prusament")
+        self.assertEqual(self._gate0().filament_name, "Prusament PLA Galaxy Black")
+
+    async def test_the_status_is_republished_once_the_details_arrive(self):
+        await self._rebuild()
+        self.controller.set_manual_spool_id(0, 7)
+        self.status_updates.clear()
+
+        await self.loop.drain()
+
+        self.assertTrue(self.status_updates)
+
+    async def test_a_field_spoolman_leaves_empty_stays_empty(self):
+        self.spoolman.set_details(7, name="PLA Galaxy Black", vendor=None)
+
+        await self._bind()
+
+        self.assertEqual(self._gate0().vendor, "")
+        self.assertEqual(self._gate0().filament_name, "PLA Galaxy Black")
+
+    # --- Spoolman has nothing to give ---------------------------------------------
+
+    async def test_a_spool_spoolman_does_not_have_keeps_the_parse(self):
+        await self._bind(spool_id=99)
+
+        self.assertEqual(self._gate0().vendor, "")
+        self.assertEqual(self._gate0().filament_name, "PLA")
+
+    async def test_an_outage_keeps_the_parse(self):
+        self.spoolman.http_client.fail = True
+
+        await self._bind()
+
+        self.assertEqual(self._gate0().vendor, "")
+
+    # --- how often Spoolman is asked ---------------------------------------------
+
+    async def test_one_lookup_serves_every_rebuild(self):
+        await self._bind()
+
+        await self._rebuild()
+        await self._rebuild()
+
+        self.assertEqual(len(self._by_id_requests()), 1)
+
+    async def test_a_failed_lookup_is_not_repeated_every_rebuild(self):
+        self.spoolman.http_client.fail = True
+        await self._bind()
+
+        await self._rebuild()
+        await self._rebuild()
+
+        self.assertEqual(len(self._by_id_requests()), 1)
+
+    async def test_a_failed_lookup_is_retried_after_a_while(self):
+        self.spoolman.http_client.fail = True
+        await self._bind()
+        self.spoolman.http_client.fail = False
+        for spool_id in self.controller._spool_info_failed_at:
+            self.controller._spool_info_failed_at[spool_id] -= self.controller.SPOOL_INFO_RETRY_S
+
+        await self._rebuild()
+
+        self.assertEqual(self._gate0().vendor, "Prusament")
+
+    async def test_the_details_are_refreshed_after_a_while(self):
+        await self._bind()
+        self.spoolman.set_details(7, name="PLA Galaxy Black", vendor="Renamed Co")
+        for info in self.controller._spool_info.values():
+            info["fetched"] -= self.controller.SPOOL_INFO_TTL_S
+
+        # The first rebuild asks again, the next one shows the answer.
+        await self._rebuild()
+        await self._rebuild()
+
+        self.assertEqual(self._gate0().vendor, "Renamed Co")
+
+    async def test_clearing_the_spool_returns_to_the_parse(self):
+        await self._bind()
+        self.controller._manual_spool_overrides.pop(0, None)
+        self.controller._spool_store.forget(0)
+
+        await self._rebuild()
+
+        self.assertEqual(self._gate0().vendor, "")
+        self.assertEqual(self._gate0().filament_name, "PLA")
+
+    # --- the Spoolman proxy --------------------------------------------------------
+
+    async def test_the_proxy_fills_in_what_the_parse_missed(self):
+        await self._bind()
+
+        self.assertEqual(self.controller.spool_display(self._gate0()),
+                         ("Prusament", "Prusament PLA Galaxy Black"))
+
+    async def test_the_proxy_keeps_a_parsed_name(self):
+        await self._bind(sku="AHPLBK-105")
+
+        self.assertEqual(self.controller.spool_display(self._gate0()),
+                         ("Anycubic", "Anycubic Basic PLA Black"))
+
+
+class MmuAceSkuSpoolIdTests(MatcherTestBase):
+    """sku_spool_id: a tag that names its own Spoolman spool.
+
+    Off by default, independent of spool_auto_match (which these tests leave off
+    unless they say otherwise), and never reads a stock Anycubic SKU - the number
+    after its dash is a product code, which is what #107 removed.
+    """
+    GATE_MATERIAL = "PETG"
+    GATE_SKU = "OS-24"
+
+    def setUp(self):
+        super().setUp()
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None))
+        self.controller._matcher.sku_spool_id = "openspool"
+
+    def _by_id_requests(self):
+        return [u for u in self._urls() if re.search(r"/v1/spool/\d+$", u.partition("?")[0])]
+
+    def _overrides(self):
+        return self.controller._manual_spool_overrides
+
+    # --- which SKUs are read ---------------------------------------------------
+
+    async def test_openspool_sku_binds_under_openspool(self):
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_the_binding_is_remembered_with_the_sku(self):
+        await self._rebuild()
+
+        self.assertEqual(self.controller._spool_store.entries[0]["sku"], "OS-24")
+
+    async def test_off_reads_nothing_and_does_not_query_spoolman(self):
+        self.controller._matcher.sku_spool_id = "off"
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._urls(), [])
+
+    async def test_a_chip_uid_is_not_an_id(self):
+        await self._rebuild(self._hub(sku="OS-04A1B2C3D4E5F6"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_the_literal_openspool_is_not_an_id(self):
+        self.controller._matcher.sku_spool_id = "serial"
+
+        await self._rebuild(self._hub(sku="OPENSPOOL"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_a_stock_anycubic_sku_stays_unbound_when_off(self):
+        self.controller._matcher.sku_spool_id = "off"
+        self.spoolman.set_catalogue((102, "PETG", "000000", None))
+
+        await self._rebuild(self._hub(sku="AHPETK-102"))
+
+        self.assertNotIn(0, self._overrides())
+
+    async def test_a_stock_anycubic_sku_stays_unbound_under_serial(self):
+        # 102 is a product code. Even with a real PETG spool 102 in the library it
+        # must not be taken for that spool.
+        self.controller._matcher.sku_spool_id = "serial"
+        self.spoolman.set_catalogue((102, "PETG", "000000", None))
+
+        await self._rebuild(self._hub(sku="AHPETK-102"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_a_hand_written_sku_binds_under_serial(self):
+        self.controller._matcher.sku_spool_id = "serial"
+        self.spoolman.set_catalogue((1, "PLA", "6B4226", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="THPLBR-1"))
+
+        self.assertEqual(self._overrides().get(0), 1)
+
+    async def test_a_multi_letter_vendor_code_binds_under_serial(self):
+        # The vendor code runs up to the first H, so AT is the vendor here; it does
+        # not have to be configured for the ID to be read.
+        self.controller._matcher.sku_spool_id = "serial"
+        self.spoolman.set_catalogue((4, "PLA", "000000", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="ATHPLBK-4"))
+
+        self.assertEqual(self._overrides().get(0), 4)
+
+    async def test_a_configured_atomic_tag_is_bound_and_named(self):
+        # What the UI ends up showing for Atomic's tags once AT=Atomic is set.
+        self.controller._matcher.sku_spool_id = "serial"
+        self.controller.sku_format = self.module.SkuFormat(
+            self.module.SkuFormat.parse_prefixes("AT=Atomic"))
+        self.spoolman.set_catalogue((4, "PLA", "000000", None))
+        # A spool Spoolman has nothing to say about, so the parse is what shows.
+        self.spoolman.set_details(4)
+
+        await self._rebuild(self._hub(material="PLA", sku="ATHPLBK-4"))
+
+        gate = self.controller.ace.units[0].gates[0]
+        self.assertEqual(self._overrides().get(0), 4)
+        self.assertEqual(gate.vendor, "Atomic")
+        self.assertEqual(gate.filament_name, "Atomic Basic PLA Black")
+
+    async def test_a_sku_without_the_h_is_not_read_under_serial(self):
+        # ATPLBK-25 is not <vendor>H<filament>: there is no vendor/filament split
+        # to trust, so the 25 is not claimed as a spool ID.
+        self.controller._matcher.sku_spool_id = "serial"
+        self.spoolman.set_catalogue((25, "PLA", "000000", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="ATPLBK-25"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_a_hand_written_sku_is_not_read_under_openspool(self):
+        self.spoolman.set_catalogue((1, "PLA", "6B4226", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="THPLBR-1"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    def test_an_unknown_mode_falls_back_to_off(self):
+        matcher = self.module.MmuAceSpoolMatcher(self.server, "off", "bogus")
+
+        self.assertEqual(matcher.sku_spool_id, "off")
+        self.assertFalse(matcher.sku_spool_id_enabled)
+
+    # --- verification ----------------------------------------------------------
+
+    async def test_a_material_mismatch_is_refused(self):
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+
+    async def test_the_material_comparison_ignores_case_and_padding(self):
+        self.spoolman.set_catalogue((24, " petg ", "FCF6F6", None))
+
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_an_archived_spool_is_refused(self):
+        self.spoolman.http_client.spools[0]["archived"] = True
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+
+    async def test_a_gate_with_no_material_is_refused(self):
+        for material in ("", "unknown"):
+            with self.subTest(material=material):
+                self.controller._auto_match_seen.clear()
+                await self._rebuild(self._hub(material=material))
+
+                self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_a_missing_spool_is_refused_and_not_retried(self):
+        self.spoolman.set_catalogue()
+
+        await self._rebuild()
+        await self._rebuild()
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(len(self._by_id_requests()), 1,
+                         "a 404 is an answer; asking again each rebuild is wasted traffic")
+
+    async def test_a_refused_tag_is_checked_again_after_a_while(self):
+        # Fixing the Spoolman record has to be enough; the tag itself has not changed.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        await self._rebuild()
+        self.assertNotIn(0, self._overrides())
+
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None))
+        await self._rebuild()
+        self.assertNotIn(0, self._overrides(), "not before the recheck interval")
+
+        self.controller._tag_refused_at[0] -= self.controller.TAG_RECHECK_S
+        await self._rebuild()
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_a_transport_error_is_retried(self):
+        self.spoolman.http_client.fail = True
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertNotIn(0, self.controller._auto_match_seen,
+                         "an outage must not count as having considered the spool")
+
+        self.spoolman.http_client.fail = False
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_a_server_error_is_retried_not_treated_as_missing(self):
+        self.spoolman.http_client.spool_status = 500
+        await self._rebuild()
+
+        self.assertNotIn(0, self.controller._auto_match_seen)
+
+        self.spoolman.http_client.spool_status = None
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_get_spool_raises_on_an_outage_and_returns_none_on_404(self):
+        matcher = self.controller._matcher
+
+        self.assertIsNone(await matcher.get_spool(999))
+        self.spoolman.http_client.fail = True
+        with self.assertRaises(self.module.SpoolmanUnavailable):
+            await matcher.get_spool(24)
+
+    # --- interaction with everything else --------------------------------------
+
+    async def test_a_user_clear_is_respected(self):
+        await self._rebuild()
+        self.controller.clear_manual_spool_id(0)
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+
+    async def test_a_cleared_gate_binds_again_once_the_tag_changes(self):
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None),
+                                    (25, "PETG", "FCF6F6", None))
+        await self._rebuild()
+        self.controller.clear_manual_spool_id(0)
+
+        for _ in range(2):
+            await self._rebuild(self._hub(sku="OS-25"))
+
+        self.assertEqual(self._overrides().get(0), 25)
+
+    async def test_swapping_one_openspool_tag_for_another_rebinds(self):
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None),
+                                    (25, "PETG", "FCF6F6", None))
+        await self._rebuild()
+        self.assertEqual(self._overrides().get(0), 24)
+
+        # The swap is noticed on one rebuild and the new tag read on the next.
+        for _ in range(2):
+            await self._rebuild(self._hub(sku="OS-25"))
+
+        self.assertEqual(self._overrides().get(0), 25)
+        self.assertEqual(self.controller._spool_store.entries[0]["sku"], "OS-25")
+
+    async def test_repeated_rebuilds_of_a_bound_gate_ask_once(self):
+        for _ in range(4):
+            await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+        self.assertEqual(len(self._by_id_requests()), 1)
+
+    async def test_the_spool_is_fetched_by_id_not_by_filter(self):
+        # /v1/spool?id=N would be answered with the whole, unfiltered list.
+        await self._rebuild()
+
+        self.assertTrue(self._by_id_requests())
+        # Match the id parameter itself; "filament.id=24" from a fingerprint query is fine.
+        self.assertFalse([u for u in self._urls() if re.search(r"[?&]id=", u)])
+
+    async def test_a_spool_claimed_by_another_gate_leaves_this_one_unassigned(self):
+        self.controller.set_manual_spool_id(1, 24)
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._overrides().get(1), 24, "the other gate keeps it")
+
+    async def test_a_manual_assignment_wins(self):
+        await self._rebuild()
+        self.controller.set_manual_spool_id(0, 7)
+        self.spoolman.http_client.requested.clear()
+
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 7)
+        # Only the manually assigned spool is looked at, to describe it: the tag's
+        # own ID (24) is not verified again.
+        self.assertEqual([u for u in self._by_id_requests() if not u.endswith("/7")], [])
+
+    async def test_a_bound_tag_does_not_consult_the_matcher(self):
+        self.controller._matcher.mode = "unique"
+
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 24)
+        # Gate 1 (a stock PLA tag) is rightly matched; gate 0's PETG must not be.
+        self.assertFalse([u for u in self._urls() if "material=PETG" in u])
+
+    async def test_a_refused_tag_falls_through_to_the_matcher_when_enabled(self):
+        self.controller._matcher.mode = "unique"
+        self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))
+
+        await self._rebuild(self._hub(colour=(252, 246, 246)))
+
+        self.assertEqual(self._overrides().get(0), 25)
+
+    async def test_a_refused_tag_does_not_match_when_the_matcher_is_off(self):
+        self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))
+
+        await self._rebuild(self._hub(colour=(252, 246, 246)))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertFalse([u for u in self._urls() if "material=PETG" in u])
 
 
 class MmuAceBackgroundTaskTests(ControllerTestBase):
@@ -2908,7 +3437,7 @@ class MmuAceSpoolmanQueryScalingTests(MatcherTestBase):
         await self._rebuild(self._hub(colour=(0xAB, 0xCD, 0xEF)))
 
         self.assertTrue(all(f"limit={page}" in u for u in self._urls()
-                            if "/v1/spool" in u),
+                            if "/v1/spool" in u and "/v1/spool/" not in u),
                         f"a spool query had no page limit: {self._urls()}")
 
     async def test_ambiguity_is_detected_across_page_boundaries(self):

@@ -10,7 +10,6 @@ import ast
 import logging
 import inspect
 import os
-import re
 import asyncio
 import shutil
 import sys
@@ -41,6 +40,7 @@ from typing import (
 # Import at runtime for actual use
 from ..common import WebRequest, APITransport, RequestType
 from .mmu_ace_spool_store import MmuAceSpoolStore
+from .mmu_ace_sku import SKU_SPOOL_ID_MODES, SkuFormat
 from .mmu_ace_spool_matcher import MmuAceSpoolMatcher, SpoolmanUnavailable
 
 if TYPE_CHECKING:
@@ -526,86 +526,6 @@ def get_material_temperature(material: str) -> int:
     }
     return temps.get(material.upper(), 210)
 
-def parse_anycubic_sku(sku: str) -> dict:
-    """Parse Anycubic SKU code like AHPLBW-107
-
-    Returns dict with:
-    - vendor: "Anycubic" or ""
-    - material_type: "PLA", "PETG", etc.
-    - series: "Highspeed", "Basic", etc.
-    - color_code: "BW", "BK", etc.
-    - color_name: "White", "Black", etc.
-    - serial: "107", "106", etc.
-    """
-    if not sku or len(sku) < 8:
-        return {"vendor": "", "material_type": "", "series": "", "color_code": "", "color_name": "", "serial": ""}
-
-    # Check if it starts with 'A' (Anycubic)
-    vendor = "Anycubic" if sku.startswith("A") else ""
-
-    # Extract parts: A-HPL-BW-107 or AHPLBW-107
-    parts = sku.split("-")
-    if len(parts) == 2:
-        # Format: AHPLBW-107
-        code_part = parts[0][1:]  # Remove 'A'
-        serial = parts[1]
-    else:
-        return {"vendor": vendor, "material_type": "", "series": "", "color_code": "", "color_name": "", "serial": ""}
-
-    # Material type mapping
-    material_map = {
-        "HPL": ("PLA", "Highspeed"),
-        "PLA": ("PLA", "Basic"),
-        "HPETG": ("PETG", "Highspeed"),
-        "PETG": ("PETG", "Basic"),
-        "HABS": ("ABS", "Highspeed"),
-        "ABS": ("ABS", "Basic"),
-        "TPU": ("TPU", "Basic"),
-    }
-
-    # Color code mapping
-    color_map = {
-        "BW": "White",
-        "BK": "Black",
-        "RD": "Red",
-        "BL": "Blue",
-        "GR": "Green",
-        "YL": "Yellow",
-        "OR": "Orange",
-        "PK": "Pink",
-        "GY": "Gray",
-        "PR": "Purple",
-        "BR": "Brown",
-    }
-
-    # Try to extract material and color
-    material_type = ""
-    series = ""
-    color_code = ""
-    color_name = ""
-
-    # Try longest material codes first
-    for mat_code, (mat_type, mat_series) in sorted(material_map.items(), key=lambda x: -len(x[0])):
-        if code_part.startswith(mat_code):
-            material_type = mat_type
-            series = mat_series
-            remaining = code_part[len(mat_code):]
-
-            # Check if remaining part is a color code
-            if remaining in color_map:
-                color_code = remaining
-                color_name = color_map[remaining]
-            break
-
-    return {
-        "vendor": vendor,
-        "material_type": material_type,
-        "series": series,
-        "color_code": color_code,
-        "color_name": color_name,
-        "serial": serial
-    }
-
 class MmuAceController:
     ace: MmuAce
     server: Any
@@ -615,7 +535,9 @@ class MmuAceController:
 
     def __init__(self, server: Server, host: str | None,
                  spool_forget_after: float = MmuAceSpoolStore.DEFAULT_FORGET_AFTER_S,
-                 auto_match_mode: str = "off"):
+                 auto_match_mode: str = "off",
+                 sku_spool_id: str = "off",
+                 vendor_prefixes: Optional[dict] = None):
         self.server = server
         self.eventloop = self.server.get_event_loop()
         self._last_status_update = 0.0
@@ -637,11 +559,29 @@ class MmuAceController:
         self._spool_store = MmuAceSpoolStore(self.server, forget_after=spool_forget_after)
 
         # Off unless asked for; see MmuAceSpoolMatcher for how a gate is matched.
-        self._matcher = MmuAceSpoolMatcher(server, auto_match_mode)
+        # The SKU format, with the user's vendor codes; shared with the matcher so
+        # the gate display and the spool ID read agree on what a SKU is.
+        self.sku_format = SkuFormat(vendor_prefixes)
+        self._matcher = MmuAceSpoolMatcher(server, auto_match_mode, sku_spool_id,
+                                           self.sku_format)
+        self._matcher.on_spool = self._note_spoolman_spool
         self._auto_match_inflight: set = set()
         # The spool each gate was last matched against, so a gate is only asked
         # about when what is in it changes. See _maybe_auto_match.
         self._auto_match_seen: dict = {}
+        # When a tag's own Spoolman ID was last refused, by gate. The tag cannot
+        # change without the identity changing, but the Spoolman record it was
+        # checked against can (material corrected, spool unarchived or created),
+        # so a refusal is looked at again after TAG_RECHECK_S.
+        self._tag_refused_at: dict = {}
+
+        # What Spoolman says about each spool a gate is bound to, by spool ID:
+        # vendor, filament name and colour, which take over from the SKU parse
+        # (see _apply_spoolman_info). _spool_info_failed_at rate-limits a lookup
+        # that failed or found nothing, so a gate cannot cost a request per poll.
+        self._spool_info: dict = {}
+        self._spool_info_inflight: set = set()
+        self._spool_info_failed_at: dict = {}
 
         # Strong references to fire-and-forget tasks: asyncio keeps only a weak
         # one, so a task nobody holds can be collected part-way through. That bit
@@ -1342,7 +1282,7 @@ class MmuAceController:
                 # Parse SKU for additional information
                 gate.sku = sku
                 if sku:
-                    sku_info = parse_anycubic_sku(sku)
+                    sku_info = self.sku_format.parse(sku)
                     gate.vendor = sku_info["vendor"]
                     gate.series = sku_info["series"]
                     gate.color_name = sku_info["color_name"]
@@ -1364,6 +1304,9 @@ class MmuAceController:
                     # user assigned; this branch used to zero it on every poll, which
                     # is what untagged third-party spools always take.
                     gate.spool_id = self._manual_spool_overrides.get(global_gate_index, 0)
+
+                # The tag parse names the gate; Spoolman only fills what it could not.
+                self._apply_spoolman_info(gate)
 
                 unit.gates.append(gate)
 
@@ -1796,6 +1739,10 @@ class MmuAceController:
     def _maybe_auto_match(self, gate_index: int, gate, sku: str):
         """Queue an unmapped gate for auto-assignment, if that is switched on.
 
+        Either feature qualifies: spool_auto_match (matching against the Spoolman
+        inventory) or sku_spool_id (reading the ID off the tag). They are
+        independent, so the tag can be trusted without opting in to guessing.
+
         Clamped to the spool actually changing. The rebuild runs constantly during
         a print, and the answer for a given spool cannot change between rebuilds,
         so asking again only costs a Spoolman round trip to be told the same thing
@@ -1804,14 +1751,24 @@ class MmuAceController:
         Called from the status rebuild, which is synchronous, so the work itself
         runs as a task. _auto_match_inflight keeps one attempt per gate in flight.
         """
-        if not self._matcher.enabled or gate_index in self._auto_match_inflight:
+        if not (self._matcher.enabled or self._matcher.sku_spool_id_enabled):
+            return
+        if gate_index in self._auto_match_inflight:
             return
         identity = self._matcher.identity(gate, sku)
-        if self._auto_match_seen.get(gate_index) == identity:
+        if self._auto_match_seen.get(gate_index) == identity and not self._tag_recheck_due(gate_index):
             return
+        self._tag_refused_at.pop(gate_index, None)
         self._auto_match_seen[gate_index] = identity
         self._auto_match_inflight.add(gate_index)
         self._spawn(self._auto_match_gate(gate_index))
+
+    # How long a refused tag ID is left before Spoolman is asked about it again.
+    TAG_RECHECK_S = 300.0
+
+    def _tag_recheck_due(self, gate_index: int) -> bool:
+        refused_at = self._tag_refused_at.get(gate_index)
+        return refused_at is not None and time.monotonic() - refused_at >= self.TAG_RECHECK_S
 
     async def _auto_match_gate(self, gate_index: int):
         """Apply whatever the matcher picks for an unmapped gate.
@@ -1829,7 +1786,14 @@ class MmuAceController:
             if gate.status == GATE_EMPTY:
                 return
 
-            spool_id = await self._matcher.match(gate, gate_index)
+            # A tag that names its own spool, once verified, beats guessing from
+            # the inventory, so the matcher is only consulted when the tag gave
+            # nothing usable - and only if it is switched on.
+            spool_id = await self._matcher.spool_from_sku(gate, gate_index)
+            if not spool_id and self._matcher.spool_id_from_sku(gate.sku) is not None:
+                self._tag_refused_at[gate_index] = time.monotonic()
+            if not spool_id and self._matcher.enabled:
+                spool_id = await self._matcher.match(gate, gate_index)
             if not spool_id:
                 return
             if spool_id in self._manual_spool_overrides.values():
@@ -1853,6 +1817,113 @@ class MmuAceController:
         finally:
             self._auto_match_inflight.discard(gate_index)
 
+
+    # How long what Spoolman said about a spool is trusted before it is asked again
+    # (a rename or recolour there reaches the gate within this), and how long a
+    # lookup that failed or found no such spool is left alone.
+    SPOOL_INFO_TTL_S = 600.0
+    SPOOL_INFO_RETRY_S = 60.0
+
+    @staticmethod
+    def _read_spoolman_info(spool: dict) -> dict:
+        """The naming fields of a Spoolman spool; empty ones are None."""
+        filament = spool.get("filament") or {}
+        vendor = ((filament.get("vendor") or {}).get("name") or "").strip()
+        name = (filament.get("name") or "").strip()
+        return {"vendor": vendor or None, "name": name or None,
+                "fetched": time.monotonic()}
+
+    @staticmethod
+    def _spoolman_filament_name(vendor: str, name: str) -> str:
+        """Vendor and Spoolman's filament name, without repeating the vendor."""
+        if vendor and not name.casefold().startswith(vendor.casefold()):
+            return f"{vendor} {name}"
+        return name
+
+    def _note_spoolman_spool(self, spool: dict):
+        """Keep what a spool fetched for any reason says about itself."""
+        spool_id = spool.get("id")
+        if isinstance(spool_id, int) and spool_id > 0:
+            self._spool_info[spool_id] = self._read_spoolman_info(spool)
+            self._spool_info_failed_at.pop(spool_id, None)
+
+    def _apply_spoolman_info(self, gate):
+        """Fill in what the SKU parse could not name from the bound Spoolman spool.
+
+        The parse comes first: a tag that parses to a vendor and series keeps that
+        name. Spoolman supplies the vendor when the parse found none, and the name
+        when the parse could not build one - an untagged spool, a third-party tag,
+        a vendor code that is not configured. The colour is always the tag's.
+        Called on every rebuild, since each one starts the gate over from the hub's
+        data, and it also queues the lookup if that is due.
+        """
+        spool_id = gate.spool_id
+        if spool_id <= 0:
+            return
+        info = self._spool_info.get(spool_id)
+        if info:
+            named_by_parse = bool(gate.vendor and gate.series)
+            if not gate.vendor and info["vendor"]:
+                gate.vendor = info["vendor"]
+            if not named_by_parse and info["name"]:
+                gate.filament_name = self._spoolman_filament_name(gate.vendor, info["name"])
+        self._ensure_spoolman_info(spool_id)
+
+    def _ensure_spoolman_info(self, spool_id: int):
+        now = time.monotonic()
+        info = self._spool_info.get(spool_id)
+        if info and now - info["fetched"] < self.SPOOL_INFO_TTL_S:
+            return
+        if spool_id in self._spool_info_inflight:
+            return
+        failed_at = self._spool_info_failed_at.get(spool_id)
+        if failed_at is not None and now - failed_at < self.SPOOL_INFO_RETRY_S:
+            return
+        self._spool_info_inflight.add(spool_id)
+        self._spawn(self._fetch_spoolman_info(spool_id))
+
+    async def _fetch_spoolman_info(self, spool_id: int):
+        """Ask Spoolman about one spool, then redraw every gate holding it."""
+        try:
+            spool = await self._matcher.get_spool(spool_id)
+            if spool is None:
+                # Gone from Spoolman: back to the parse, and do not ask every poll.
+                self._spool_info.pop(spool_id, None)
+                self._spool_info_failed_at[spool_id] = time.monotonic()
+        except SpoolmanUnavailable as e:
+            self._spool_info_failed_at[spool_id] = time.monotonic()
+            logging.info(f"Spoolman spool {spool_id}: details unavailable ({e}); "
+                         "showing what the tag says")
+        except Exception as e:
+            self._spool_info_failed_at[spool_id] = time.monotonic()
+            logging.warning(f"[mmu_ace] Spoolman details for spool {spool_id} failed: {e}")
+        finally:
+            self._spool_info_inflight.discard(spool_id)
+
+        if spool_id in self._spool_info:
+            for unit in self.ace.units:
+                for gate in unit.gates:
+                    if gate.spool_id == spool_id:
+                        self._apply_spoolman_info(gate)
+            self._handle_status_update(force=True)
+
+    def spool_display(self, gate) -> tuple:
+        """(vendor, filament name) the Spoolman proxy reports for a gate's spool."""
+        sku_info = self.sku_format.parse(gate.sku) if gate.sku else {}
+        vendor = sku_info.get("vendor", "Unknown")
+        parts = [vendor, sku_info.get("series", ""), gate.material]
+        if sku_info.get("color_name"):
+            parts.append(sku_info.get("color_name"))
+        name = " ".join([p for p in parts if p])
+
+        info = self._spool_info.get(gate.spool_id) if gate.spool_id > 0 else None
+        if info:
+            named_by_parse = bool(sku_info.get("vendor") and sku_info.get("series"))
+            if vendor in ("", "Unknown") and info["vendor"]:
+                vendor = info["vendor"]
+            if not named_by_parse and info["name"]:
+                name = self._spoolman_filament_name(vendor, info["name"])
+        return vendor, name
 
     def _deactivate_if_loaded(self, gate_index: int):
         """Stop tracking against a gate's spool once we no longer believe it is there.
@@ -1962,6 +2033,7 @@ class MmuAceController:
         _, gate = gate_lookup
         self._remember_spool_assignment(gate_index, spool_id, gate.sku)
         gate.spool_id = spool_id
+        self._apply_spoolman_info(gate)
 
         self._handle_status_update(force=True)
 
@@ -2003,8 +2075,23 @@ class MmuAcePatcher:
                             f"Valid: {', '.join(MmuAceSpoolMatcher.MODES)}")
             auto_match_mode = "off"
 
+        # Read the Spoolman ID off the tag: off (default), openspool - only
+        # OS-<id> SKUs written by OpenCubic firmware - or serial, which also reads
+        # <code>-<id> on tags you wrote yourself. Stock Anycubic SKUs are never
+        # read, as their number is a product code (#107).
+        sku_spool_id = config.get("sku_spool_id", "off").strip().lower()
+        if sku_spool_id not in SKU_SPOOL_ID_MODES:
+            logging.warning(f"[mmu_ace] Unknown sku_spool_id '{sku_spool_id}', using 'off'. "
+                            f"Valid: {', '.join(SKU_SPOOL_ID_MODES)}")
+            sku_spool_id = "off"
+
+        # Vendor codes for SKUs you wrote yourself, e.g. "AT=Atomic, T=Tinmorry".
+        vendor_prefixes = SkuFormat.parse_prefixes(config.get("sku_vendor_prefixes", ""))
+
         self.ace_controller = MmuAceController(self.server, host, spool_forget_after=spool_forget_after,
-                                               auto_match_mode=auto_match_mode)
+                                               auto_match_mode=auto_match_mode,
+                                               sku_spool_id=sku_spool_id,
+                                               vendor_prefixes=vendor_prefixes)
         self.ace_controller._on_ace_disabled = self._reset_mmu_status_cache
 
         # Tracks the single in-flight auto-feed poller (issue #464). patch_print_data
@@ -3595,14 +3682,7 @@ class MmuAcePatcher:
                 for gate in unit.gates:
                     # Only include gates with RFID data
                     if gate.spool_id > 0 and gate.sku:
-                        sku_info = parse_anycubic_sku(gate.sku)
-                        vendor_name = sku_info.get("vendor", "Unknown")
-
-                        # Build filament name
-                        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-                        if sku_info.get("color_name"):
-                            parts.append(sku_info.get("color_name"))
-                        filament_name = " ".join([p for p in parts if p])
+                        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
                         # Convert color from RGBA to hex
                         color_hex = None
@@ -3672,14 +3752,7 @@ class MmuAcePatcher:
                 for gate in unit.gates:
                     # Only include gates with RFID data
                     if gate.spool_id > 0 and gate.sku:
-                        sku_info = parse_anycubic_sku(gate.sku)
-                        vendor_name = sku_info.get("vendor", "Unknown")
-
-                        # Build filament name
-                        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-                        if sku_info.get("color_name"):
-                            parts.append(sku_info.get("color_name"))
-                        filament_name = " ".join([p for p in parts if p])
+                        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
                         # Convert color from RGBA to hex
                         color_hex = None
@@ -3739,15 +3812,7 @@ class MmuAcePatcher:
         if not gate:
             raise self.server.error(f"Spool ID {spool_id} not found in ACE units")
 
-        # Parse SKU to get vendor info
-        sku_info = parse_anycubic_sku(gate.sku) if gate.sku else {}
-        vendor_name = sku_info.get("vendor", "Unknown")
-
-        # Build filament name
-        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-        if sku_info.get("color_name"):
-            parts.append(sku_info.get("color_name"))
-        filament_name = " ".join([p for p in parts if p])
+        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
         # Convert color from RGBA to hex (remove alpha for Spoolman)
         color_hex = None
