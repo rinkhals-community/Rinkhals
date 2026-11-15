@@ -576,7 +576,7 @@ class MmuAceController:
         self._tag_refused_at: dict = {}
 
         # What Spoolman says about each spool a gate is bound to, by spool ID:
-        # vendor, filament name and colour, which take over from the SKU parse
+        # vendor and filament name, which fill in what the SKU parse could not name
         # (see _apply_spoolman_info). _spool_info_failed_at rate-limits a lookup
         # that failed or found nothing, so a gate cannot cost a request per poll.
         self._spool_info: dict = {}
@@ -1870,6 +1870,8 @@ class MmuAceController:
         self._ensure_spoolman_info(spool_id)
 
     def _ensure_spoolman_info(self, spool_id: int):
+        if self.server.lookup_component("spoolman", None) is None:
+            return
         now = time.monotonic()
         info = self._spool_info.get(spool_id)
         if info and now - info["fetched"] < self.SPOOL_INFO_TTL_S:
@@ -2077,7 +2079,7 @@ class MmuAcePatcher:
 
         # Read the Spoolman ID off the tag: off (default), openspool - only
         # OS-<id> SKUs written by OpenCubic firmware - or serial, which also reads
-        # <code>-<id> on tags you wrote yourself. Stock Anycubic SKUs are never
+        # <vendor>H<filament>-<id> on tags you wrote yourself. Stock Anycubic SKUs are never
         # read, as their number is a product code (#107).
         sku_spool_id = config.get("sku_spool_id", "off").strip().lower()
         if sku_spool_id not in SKU_SPOOL_ID_MODES:

@@ -2784,6 +2784,17 @@ class MmuAceSpoolmanFillsWhatTheParseMissesTests(MatcherTestBase):
 
         self.assertEqual(len(self._by_id_requests()), 1)
 
+    async def test_no_spoolman_component_means_no_lookup_and_no_retry_state(self):
+        await self._bind()
+        self.server._components.pop("spoolman")
+        self.controller._spool_info.clear()
+
+        await self._rebuild()
+
+        self.assertEqual(self.controller._spool_info_failed_at, {})
+        self.assertEqual(self.controller._spool_info_inflight, set())
+        self.assertEqual(self._gate0().vendor, "")
+
     async def test_a_failed_lookup_is_retried_after_a_while(self):
         self.spoolman.http_client.fail = True
         await self._bind()
