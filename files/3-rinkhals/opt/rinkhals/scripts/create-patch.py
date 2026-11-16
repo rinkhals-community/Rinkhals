@@ -219,8 +219,11 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         patchJumpAddress = 0x151da8
         patchReturnAddress = 0x151e6c
         s1CaseAlreadySelected = True
-    elif modelCode == 'KS1' and version == '2.7.3.7':
+    elif modelCode == 'KS1' and version == '2.7.3.5':
         buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Anycubic and the firmware archive call this build 2.7.3.7, but its
+        # version file, which ends up in /useremain/dev/version and so in
+        # KOBRA_VERSION, says 2.7.3.5.
         # Read off the jump table, same layout as 2.7.2.7: callback at 0x17c9a4,
         # dispatch (cmp r3,#4 / addls pc,pc,r3,lsl#2) at +0x48, entry 3 (Service
         # Support) branches to 0x17cca0 (+0x2fc). That case body is the usual
