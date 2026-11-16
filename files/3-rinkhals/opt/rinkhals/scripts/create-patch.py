@@ -219,6 +219,16 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         patchJumpAddress = 0x151da8
         patchReturnAddress = 0x151e6c
         s1CaseAlreadySelected = True
+    elif modelCode == 'KS1' and version == '2.7.3.7':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Read off the jump table, same layout as 2.7.2.7: callback at 0x17c9a4,
+        # dispatch (cmp r3,#4 / addls pc,pc,r3,lsl#2) at +0x48, entry 3 (Service
+        # Support) branches to 0x17cca0 (+0x2fc). That case body is the usual
+        # this-ptr load, mov r1,#3, nav call, then b 0x17cd90 into the shared
+        # switch epilogue, which is the return address.
+        patchJumpAddress = 0x17cca0
+        patchReturnAddress = 0x17cd90
+        s1CaseAlreadySelected = True
 
     elif modelCode == 'KS1M' and version == '2.1.6':
         buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
@@ -277,6 +287,15 @@ def patch_K3SysUi(binaryPath, modelCode, version):
         # epilogue, which is our return address.
         patchJumpAddress = 0x17baf4
         patchReturnAddress = 0x17bbe4
+        s1CaseAlreadySelected = True
+    elif modelCode == 'KS1M' and version == '2.7.2.6':
+        buttonCallback = k3sysui.symbols['_ZZN10MainWindow21AcSettingDeviceUiInitEvENKUlRK11QModelIndexE0_clES2_']
+        # Same jump-table dispatch as 2.7.2.1. Callback at 0x17d404, dispatch at
+        # +0x48, entry 3 (Service Support) branches to 0x17d700 (+0x2fc), whose
+        # body (this-ptr load, mov r1,#3, nav call) ends with b 0x17d7f0 into
+        # the shared switch epilogue.
+        patchJumpAddress = 0x17d700
+        patchReturnAddress = 0x17d7f0
         s1CaseAlreadySelected = True
 
     else:
