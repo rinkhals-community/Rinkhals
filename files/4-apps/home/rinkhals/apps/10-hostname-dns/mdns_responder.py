@@ -85,25 +85,39 @@ def parse_dns_name(data: bytes, offset: int) -> tuple[str, int]:
     """
     labels: list[str] = []
     original_offset: int | None = None
+    visited: set[int] = set()
+    name_length = 1  # The terminating zero counts toward the 255-byte limit.
 
-    while offset < len(data):
+    while True:
+        if offset < 0 or offset >= len(data):
+            raise ValueError("Truncated DNS name")
+        if offset in visited:
+            raise ValueError("Cyclic DNS compression pointer")
+        visited.add(offset)
         length: int = data[offset]
 
         if length == 0:
             offset += 1
             break
 
-        # Pointer (compression): top 2 bits are 11
+        # Compression pointers can revisit earlier labels, but may not form
+        # a cycle or reference bytes beyond this datagram.
         if (length & 0xC0) == 0xC0:
+            if offset + 2 > len(data):
+                raise ValueError("Truncated DNS compression pointer")
             if original_offset is None:
                 original_offset = offset + 2
-            pointer: int = struct.unpack("!H", data[offset : offset + 2])[0] & 0x3FFF
-            offset = pointer
+            offset = struct.unpack("!H", data[offset : offset + 2])[0] & 0x3FFF
             continue
+        if length & 0xC0:
+            raise ValueError("Unsupported DNS label encoding")
 
         offset += 1
         if offset + length > len(data):
-            break
+            raise ValueError("Truncated DNS label")
+        name_length += length + 1
+        if name_length > 255:
+            raise ValueError("DNS name exceeds 255 bytes")
         labels.append(data[offset : offset + length].decode("ascii", errors="replace"))
         offset += length
 
@@ -177,7 +191,11 @@ def handle_query(
             break
 
         name: str
-        name, offset = parse_dns_name(data, offset)
+        try:
+            name, offset = parse_dns_name(data, offset)
+        except ValueError:
+            # Malformed network input must not stop the responder.
+            return
         if offset + 4 > len(data):
             break
 
