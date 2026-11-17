@@ -39,6 +39,15 @@ updates:
       - dependency-name: typescript
         update-types:
           - version-update:semver-major
+      # SvelteKit 3 and adapter-static 4 need Vite 8, vite-plugin-svelte 7 and
+      # TypeScript 6, all held above, so these PRs can't pass npm ci on their own
+      # (#225, #226, #218). They'll come in together as one migration PR.
+      - dependency-name: "@sveltejs/kit"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@sveltejs/adapter-static"
+        update-types:
+          - version-update:semver-major
 
   # Go backend for the web portal.
   - package-ecosystem: gomod
