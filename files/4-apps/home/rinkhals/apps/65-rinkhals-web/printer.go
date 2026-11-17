@@ -4,6 +4,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,19 +45,38 @@ type moonrakerPrintStatsResponse struct {
 	} `json:"result"`
 }
 
+// Swapped out by tests.
+var (
+	printStatsURL        = "http://localhost:7125/printer/objects/query?print_stats"
+	klipperRunsOnPrinter = klipperProcessRunning
+)
+
+// remoteKlipperReason is shown when no Klipper runs on the printer itself.
+// The tunnel apps (tunneled-klipper, lan-tunneled-klipper) stop GoKlipper and
+// run Klipper on another computer, so the printer's own Moonraker can't see a
+// print it's driving, and an update's reboot would cut that print off.
+const remoteKlipperReason = "Klipper isn't running on this printer, so a tunnel app may be printing from another computer"
+
 // fetchPrinterState consults Moonraker on localhost:7125 and translates its
 // print_stats.state into our wire shape. An unreachable Moonraker is treated
 // as "offline" with CanInstall=true: the most common cause is that the
 // Moonraker app is stopped, not that a print is silently in progress without
 // any visible UI to report it.
+//
+// A Moonraker that answers but can't reach Klipper is different when no
+// Klipper runs on the printer at all (neither GoKlipper nor Klippy): that's
+// what the tunnel apps leave behind, and a print may be running elsewhere.
 func fetchPrinterState() *PrinterState {
 	client := &http.Client{Timeout: 1500 * time.Millisecond}
-	resp, err := client.Get("http://localhost:7125/printer/objects/query?print_stats")
+	resp, err := client.Get(printStatsURL)
 	if err != nil {
 		return &PrinterState{State: "offline", CanInstall: true}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if !klipperRunsOnPrinter() {
+			return &PrinterState{State: "remote", CanInstall: false, Reason: remoteKlipperReason}
+		}
 		return &PrinterState{State: "offline", CanInstall: true}
 	}
 	body, _ := io.ReadAll(resp.Body)
@@ -118,4 +142,58 @@ func handlePrinterState(w http.ResponseWriter, r *http.Request) {
 	printerStateMu.Unlock()
 
 	json.NewEncoder(w).Encode(state)
+}
+
+// klipperProcessRunning reports whether GoKlipper (gklib) or mainline Klippy
+// runs on this printer.
+func klipperProcessRunning() bool {
+	if runtime.GOOS != "linux" {
+		// Nothing to look at: don't block anything
+		return true
+	}
+	_, found := findProcess(func(argv []string) bool { return isGoKlipper(argv) || isKlippy(argv) })
+	return found
+}
+
+// findProcess returns the first process whose arguments match. It reads /proc
+// rather than ps, whose busybox output is truncated, and the matchers look at
+// the program itself, so a log viewer with "gklib.log" in its arguments
+// doesn't count.
+func findProcess(match func(argv []string) bool) (int, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, false
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		if match(strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")) {
+			return pid, true
+		}
+	}
+	return 0, false
+}
+
+// isGoKlipper matches "./gklib ...".
+func isGoKlipper(argv []string) bool {
+	return len(argv) > 0 && filepath.Base(argv[0]) == "gklib"
+}
+
+// isKlippy matches "python -m klippy ..." and "python .../klippy.py ...".
+func isKlippy(argv []string) bool {
+	for i := 1; i < len(argv); i++ {
+		if argv[i] == "klippy" && argv[i-1] == "-m" {
+			return true
+		}
+		if filepath.Base(argv[i]) == "klippy.py" {
+			return true
+		}
+	}
+	return false
 }
