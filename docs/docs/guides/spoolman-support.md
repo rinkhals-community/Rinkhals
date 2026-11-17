@@ -273,16 +273,21 @@ if **all** of these hold, and otherwise leaves it as it was and says why in the 
 
 A gate that reports no material, or `unknown`, is never bound this way, as there is nothing to
 check against. If Spoolman cannot be reached, the gate is tried again later. A refusal (spool
-missing, archived, or of another material) is checked again every 5 minutes, so fixing the spool
-in Spoolman binds the gate without reinserting it.
+missing, archived, or of another material) is checked again after 5 minutes, on the next ACE
+status change (not while the printer sits idle), so fixing the spool in Spoolman binds the gate
+without reinserting it.
 
 The ID is bound the same way an assignment you make yourself is, so it is remembered with the
-tag's SKU, survives a restart, and is dropped when a different spool is put in the gate. It runs
-before the `spool_auto_match` steps and, when it binds, those are not consulted; when it finds
-no usable ID or refuses it, they still run if you have them enabled. Your own choices win over
-it: a gate you have assigned is left alone, a gate you have cleared stays cleared until the spool
-in it changes, and if another gate already claims the same spool, this gate is left unassigned
-and a warning is logged.
+tag's SKU, survives a restart, and is dropped when a different spool is put in the gate. A tag
+with an ID is never guessed for: even with `spool_auto_match` on, a refused tag leaves the gate
+unassigned rather than falling back to the inventory. `spool_auto_match` only runs for gates
+whose tag carries no ID.
+
+A tag moved to another gate takes its spool with it: when the gate that held it now reads empty
+or a different roll, the new gate takes the spool over. Your own choices win over the tag: a gate
+you have assigned is left alone, a gate you have cleared stays cleared until the spool in it
+changes, and if another gate still holds the roll the spool was bound with (a duplicate tag, say),
+this gate is left unassigned, a warning is logged, and it is looked at again after 5 minutes.
 
 #### Writing your own tags
 

@@ -3143,13 +3143,100 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         # Gate 1 (a stock PLA tag) is rightly matched; gate 0's PETG must not be.
         self.assertFalse([u for u in self._urls() if "material=PETG" in u])
 
-    async def test_a_refused_tag_falls_through_to_the_matcher_when_enabled(self):
-        self.controller._matcher.mode = "unique"
+    # --- a tag decides alone -----------------------------------------------------
+
+    def _refused_tag_setup(self):
+        # The tag names spool 24, which Spoolman does not have, while spool 25 is an
+        # obvious inventory guess for the gate's PETG and colour.
+        self.controller._matcher.mode = "latest"
         self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))
+
+    async def test_a_refused_tag_is_not_guessed_for(self):
+        self._refused_tag_setup()
 
         await self._rebuild(self._hub(colour=(252, 246, 246)))
 
-        self.assertEqual(self._overrides().get(0), 25)
+        self.assertNotIn(0, self._overrides())
+        self.assertFalse([u for u in self._urls() if "material=PETG" in u])
+        self.assertIn(0, self.controller._tag_refused_at)
+
+    async def test_a_refused_tag_binds_once_spoolman_is_fixed_with_matching_on(self):
+        self._refused_tag_setup()
+        await self._rebuild(self._hub(colour=(252, 246, 246)))
+        self.assertNotIn(0, self._overrides())
+
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None), (25, "PETG", "FCF6F6", None))
+        self.controller._matcher._cache.clear()
+        self.controller._tag_refused_at[0] -= self.controller.TAG_RECHECK_S
+        await self._rebuild(self._hub(colour=(252, 246, 246)))
+
+        self.assertEqual(self._overrides().get(0), 24)
+
+    # --- a tag that moves --------------------------------------------------------
+
+    def _two_gate_hub(self, gate0_sku=None, gate1_sku=None):
+        """Gate 0 and gate 1 each read the given OpenSpool tag (None = empty)."""
+        hub = self._hub()
+        slots = hub["filament_hubs"][0]["slots"]
+        for slot, sku in ((slots[0], gate0_sku), (slots[1], gate1_sku)):
+            if sku is None:
+                slot.update(status="empty", sku="", type="", color=[0, 0, 0])
+            else:
+                slot.update(status="ready", sku=sku, type="PETG", color=[252, 246, 246])
+        return hub
+
+    async def test_a_tag_moved_to_another_gate_takes_its_spool_over(self):
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+        self.assertEqual(self._overrides().get(0), 24)
+
+        hub = self._two_gate_hub(None, "OS-24")
+        await self._rebuild(hub)
+        await self._rebuild(hub)
+
+        self.assertEqual(self._overrides().get(1), 24)
+        self.assertNotIn(0, self._overrides())
+
+    async def test_the_gate_a_tag_left_stops_reporting_its_spool_at_once(self):
+        # On an idle printer nothing rebuilds the gates after the move, so the gate
+        # the roll left must not go on showing the spool until the next hub change.
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+
+        await self._rebuild(self._two_gate_hub(None, "OS-24"))
+
+        self.assertEqual(self.controller._get_gate_by_index(1)[1].spool_id, 24)
+        self.assertEqual(self.controller._get_gate_by_index(0)[1].spool_id, 0)
+
+    async def test_a_tag_moved_back_takes_it_over_again(self):
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+        await self._rebuild(self._two_gate_hub(None, "OS-24"))
+        await self._rebuild(self._two_gate_hub(None, "OS-24"))
+        self.assertEqual(self._overrides().get(1), 24)
+
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+
+        self.assertEqual(self._overrides().get(0), 24)
+        self.assertNotIn(1, self._overrides())
+
+    async def test_a_duplicate_tag_in_two_gates_is_refused_and_rechecked(self):
+        hub = self._two_gate_hub("OS-24", "OS-24")
+        await self._rebuild(hub)
+        await self._rebuild(hub)
+
+        bound = [g for g in (0, 1) if self._overrides().get(g) == 24]
+        other = 1 - bound[0] if len(bound) == 1 else None
+        self.assertEqual(len(bound), 1, "one roll cannot be in two gates")
+        self.assertNotIn(other, self._overrides())
+        self.assertIn(other, self.controller._tag_refused_at)
+
+        # The bound gate is emptied; once the recheck is due the other one binds.
+        empty_bound = self._two_gate_hub(*(("OS-24", None) if bound[0] == 1 else (None, "OS-24")))
+        await self._rebuild(empty_bound)
+        self.controller._tag_refused_at[other] -= self.controller.TAG_RECHECK_S
+        await self._rebuild(empty_bound)
+
+        self.assertEqual(self._overrides().get(other), 24)
+        self.assertNotIn(bound[0], self._overrides())
 
     async def test_a_refused_tag_does_not_match_when_the_matcher_is_off(self):
         self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))

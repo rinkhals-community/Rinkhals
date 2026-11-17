@@ -1741,7 +1741,9 @@ class MmuAceController:
 
         Either feature qualifies: spool_auto_match (matching against the Spoolman
         inventory) or sku_spool_id (reading the ID off the tag). They are
-        independent, so the tag can be trusted without opting in to guessing.
+        independent, so the tag can be trusted without opting in to guessing. A tag
+        that carries an ID decides alone: it is never guessed for, even with
+        spool_auto_match on; the inventory is only searched when the tag has none.
 
         Clamped to the spool actually changing. The rebuild runs constantly during
         a print, and the answer for a given spool cannot change between rebuilds,
@@ -1770,6 +1772,24 @@ class MmuAceController:
         refused_at = self._tag_refused_at.get(gate_index)
         return refused_at is not None and time.monotonic() - refused_at >= self.TAG_RECHECK_S
 
+    def _still_holds_its_spool(self, gate_index: int, fallback_sku: str) -> bool:
+        """Whether a gate still holds the roll its assignment was made for.
+
+        An empty gate, or one now reading a different SKU than it was bound with,
+        has had that roll taken out, so its claim on the spool is stale. The SKU it
+        was bound with is compared (fallback_sku if none was recorded), not just
+        emptiness: a roll swapped for another leaves the gate full but the old spool
+        gone.
+        """
+        gate_lookup = self._get_gate_by_index(gate_index)
+        if not gate_lookup:
+            return False
+        gate = gate_lookup[1]
+        if gate.status == GATE_EMPTY:
+            return False
+        entry = self._spool_store.entries.get(gate_index) or {}
+        return gate.sku == (entry.get("sku") or fallback_sku)
+
     async def _auto_match_gate(self, gate_index: int):
         """Apply whatever the matcher picks for an unmapped gate.
 
@@ -1786,14 +1806,28 @@ class MmuAceController:
             if gate.status == GATE_EMPTY:
                 return
 
-            # A tag that names its own spool, once verified, beats guessing from
-            # the inventory, so the matcher is only consulted when the tag gave
-            # nothing usable - and only if it is switched on.
-            spool_id = await self._matcher.spool_from_sku(gate, gate_index)
-            if not spool_id and self._matcher.spool_id_from_sku(gate.sku) is not None:
-                self._tag_refused_at[gate_index] = time.monotonic()
-            if not spool_id and self._matcher.enabled:
-                spool_id = await self._matcher.match(gate, gate_index)
+            # A tag that names its own spool decides alone: the roll says which
+            # spool it is, so a refused ID (missing, archived, wrong material) is
+            # not second-guessed by picking something similar from the inventory.
+            # Refusals are looked at again after TAG_RECHECK_S, since Spoolman may
+            # have been fixed meanwhile. The matcher only runs for a tag with no ID.
+            if self._matcher.spool_id_from_sku(gate.sku) is not None:
+                spool_id = await self._matcher.spool_from_sku(gate, gate_index)
+                if not spool_id:
+                    self._tag_refused_at[gate_index] = time.monotonic()
+                    return
+                claimants = [g for g, s in self._manual_spool_overrides.items()
+                             if s == spool_id and g != gate_index]
+                if any(self._still_holds_its_spool(g, gate.sku) for g in claimants):
+                    logging.warning(f"Gate {gate_index}: tag names spool {spool_id}, "
+                                    "but another gate still holds it - leaving unassigned")
+                    self._tag_refused_at[gate_index] = time.monotonic()
+                    return
+                # Otherwise the roll was moved here, and set_manual_spool_id moves
+                # the assignment with it.
+                self.set_manual_spool_id(gate_index, spool_id)
+                return
+            spool_id = await self._matcher.match(gate, gate_index) if self._matcher.enabled else None
             if not spool_id:
                 return
             if spool_id in self._manual_spool_overrides.values():
@@ -1953,6 +1987,11 @@ class MmuAceController:
             self._manual_spool_overrides.pop(other, None)
             self._spool_store.forget(other)
             self._deactivate_if_loaded(other)
+            # Stop reporting it there too. Nothing rebuilds the gates while the
+            # printer is idle, so the old gate would go on showing the spool.
+            other_lookup = self._get_gate_by_index(other)
+            if other_lookup:
+                other_lookup[1].spool_id = 0
 
         self._manual_spool_overrides[gate_index] = spool_id
         self._spool_store.remember(gate_index, spool_id, sku)
