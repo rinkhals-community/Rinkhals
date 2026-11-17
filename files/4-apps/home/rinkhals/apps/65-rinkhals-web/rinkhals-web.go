@@ -24,6 +24,7 @@ import (
 
 var processCommands = map[string]string{
 	"gklib":            "gklib",
+	"Klipper":          "klippy",
 	"gkapi":            "gkapi",
 	"K3SysUi":          "K3SysUi",
 	"Moonraker":        "moonraker.py",
@@ -39,6 +40,14 @@ var processCache = map[string]*process.Process{}
 func getProcessID(processName string) (int, error) {
 	if processName == "rinkhals-web" {
 		return os.Getpid(), nil
+	}
+	if processName == "klippy" {
+		// Mainline Klipper is "python -m klippy ...", which grep can't single
+		// out from its log files and helper scripts
+		if pid, found := findProcess(isKlippy); found {
+			return pid, nil
+		}
+		return 0, fmt.Errorf("process %s not found", processName)
 	}
 	if runtime.GOOS != "linux" {
 		return 0, fmt.Errorf("getProcessID is only supported on Linux")

@@ -669,10 +669,17 @@
 		<div class="bg-surface-warm border border-accent/40 rounded-xl px-4 py-3 flex items-start gap-3">
 			<AlertCircle size={18} class="text-accent shrink-0 mt-0.5" />
 			<div class="flex-1 text-sm">
-				<p class="font-medium text-ink">Printer is busy</p>
-				<p class="text-ink-muted mt-0.5">
-					{$printerState.reason ?? "A print is in progress"}. Installs and uninstalls are disabled until the print completes. App start, stop, restart, and Configure remain available.
-				</p>
+				{#if $printerState.state === "remote"}
+					<p class="font-medium text-ink">Klipper is running elsewhere</p>
+					<p class="text-ink-muted mt-0.5">
+						{$printerState.reason}. Installs and uninstalls are disabled while it is, since they can restart the printer. Stop the tunnel app first. App start, stop, restart, and Configure remain available.
+					</p>
+				{:else}
+					<p class="font-medium text-ink">Printer is busy</p>
+					<p class="text-ink-muted mt-0.5">
+						{$printerState.reason ?? "A print is in progress"}. Installs and uninstalls are disabled until the print completes. App start, stop, restart, and Configure remain available.
+					</p>
+				{/if}
 			</div>
 		</div>
 	{/if}

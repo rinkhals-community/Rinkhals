@@ -297,10 +297,17 @@
 	<div class="bg-surface-warm border border-accent/40 rounded-xl px-4 py-3 mb-5 flex items-start gap-3">
 		<AlertCircle size={18} class="text-accent shrink-0 mt-0.5" />
 		<div class="flex-1 text-sm">
-			<p class="font-medium text-ink">Printer is busy</p>
-			<p class="text-ink-muted mt-0.5">
-				{$printerState.reason ?? "A print is in progress"}. Firmware installs are disabled until the print completes. You can still browse versions and read release notes.
-			</p>
+			{#if $printerState.state === "remote"}
+				<p class="font-medium text-ink">Klipper is running elsewhere</p>
+				<p class="text-ink-muted mt-0.5">
+					{$printerState.reason}. Firmware installs restart the printer, so they're disabled while it is. Stop the tunnel app first. You can still browse versions and read release notes.
+				</p>
+			{:else}
+				<p class="font-medium text-ink">Printer is busy</p>
+				<p class="text-ink-muted mt-0.5">
+					{$printerState.reason ?? "A print is in progress"}. Firmware installs are disabled until the print completes. You can still browse versions and read release notes.
+				</p>
+			{/if}
 		</div>
 	</div>
 {/if}

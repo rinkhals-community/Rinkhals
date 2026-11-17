@@ -8,6 +8,7 @@ export type PrinterStateValue =
 	| "cancelling"
 	| "error"
 	| "offline"
+	| "remote"
 	| "unknown";
 
 export interface PrinterStateResponse {
