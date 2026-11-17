@@ -114,16 +114,29 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
 
     # --- #127: hot Z re-home only where it has been checked ---------------------
 
-    def test_z_rehomed_hot_on_the_k3_after_cooldown_before_probing(self):
-        script = self.script("K3", K3_FAMILY)
-        z_home = script.index("G28 Z")
-        self.assertGreater(z_home, script.index("M190 S60"))
-        self.assertGreater(z_home, script.index("M109 S140"))
-        self.assertLess(z_home, script.index("BED_MESH_CALIBRATE"))
+    HOT_Z_CHECKED = ("K3", "KS1")
+
+    def test_z_rehomed_hot_after_cooldown_before_probing(self):
+        for model, commands in CASES:
+            if model not in self.HOT_Z_CHECKED:
+                continue
+            with self.subTest(model=model):
+                script = self.script(model, commands)
+                z_home = script.index("G28 Z")
+                self.assertGreater(z_home, script.index("M190 S60"))
+                self.assertGreater(z_home, script.index("M109 S140"))
+                self.assertLess(z_home, script.index("BED_MESH_CALIBRATE"))
+
+    def test_s1_rehomes_z_after_leaving_the_wiper(self):
+        """Homing cold and probing hot put the KS1 mesh about 0.3 mm high. The
+        re-home comes after WIPE_EXIT so the head is clear of the wiper when
+        safe_z_home moves it to the bed centre."""
+        script = self.script("KS1", KS1_2727)
+        self.assertGreater(script.index("G28 Z"), script.index("WIPE_EXIT"))
 
     def test_no_z_rehome_on_models_not_yet_checked(self):
         for model, commands in CASES:
-            if model == "K3":
+            if model in self.HOT_Z_CHECKED:
                 continue
             with self.subTest(model=model):
                 self.assertNotIn("G28 Z", self.script(model, commands))
