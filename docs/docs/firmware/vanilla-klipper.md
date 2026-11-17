@@ -2,7 +2,7 @@
 title: Vanilla Klipper
 ---
 
-The **Klipper (vanilla)** app in the Rinkhals app store runs mainline Klipper on the printer in place of Anycubic's GoKlipper. It's Kobra-S1's (Antirad's) work: Klipper comes from his [Klipper fork](https://github.com/Kobra-S1/klipper-kobra-s1) with the Kobra drivers, and the ACE Pro support, ACE dashboard and printer configs come from [ACEPRO](https://github.com/Kobra-S1/ACEPRO). Rinkhals.Apps follows both, and new versions come through as app updates.
+The **Klipper (vanilla)** app in the Rinkhals app store runs mainline Klipper on the printer in place of Anycubic's GoKlipper. It's Kobra-S1's (Antiriad's) work: Klipper comes from his [Klipper fork](https://github.com/Kobra-S1/klipper-kobra-s1) with the Kobra drivers, and the ACE Pro support, ACE dashboard and printer configs come from [ACEPRO](https://github.com/Kobra-S1/ACEPRO). Rinkhals.Apps follows both, and new versions come through as app updates.
 
 The [app's README](https://github.com/rinkhals-community/Rinkhals.Apps/blob/develop/apps/vanilla-klipper/README.md) has the full details, including the list of supported printers. This page covers what to know before you start.
 
