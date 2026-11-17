@@ -7,7 +7,7 @@ weight: 0
 
 The goal of Rinkhals is to expand existing Anycubic features with better compatibility, apps and more. It will likely not support all use cases, like running vanilla Klipper or your specific feature / plugin.
 
-Even though progress have been made for running vanilla Klipper (still not working), the goal is NOT to provide a complete replacement for Anycubic firmware, but instead to complement stock firmware.
+Vanilla Klipper is available as an [app](../firmware/vanilla-klipper.md) for those who want it, but the goal of Rinkhals is NOT to provide a complete replacement for Anycubic firmware, but instead to complement stock firmware.
 
 Rinkhals is targeted at a wide audience, not experts. I designed it to be as easy to use as possible with the default configuration for anyone to use. It is still a firmware mod and people should avoid using it if they are not comfortable potentially making their printer not work anymore. Because of that, experts might find the firmware still too limited, it's intended even though I exposed ways to go deeper if needed.
 
