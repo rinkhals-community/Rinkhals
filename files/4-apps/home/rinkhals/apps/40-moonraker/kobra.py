@@ -1409,9 +1409,12 @@ class Kobra:
         self.register_gcode_handler('EXCLUDE_OBJECT', handle_gcode_exclude_object)
 
     # Models where re-homing Z once the bed is hot has been checked: Felixoid on a
-    # K3 running 2.4.6.7 (#127). Add the S1 and S1 Max once a calibration has been
-    # run on each and G28 Z is confirmed to move to safe_z_home first.
-    HOT_Z_REHOME_MODELS = ('K3',)
+    # K3 running 2.4.6.7 (#127), and our KS1 on 2.7.3.5. Z homes on the nozzle
+    # probe, so homing cold and probing at 140/55 put the KS1 mesh about 0.3 mm
+    # high; homing hot brought it back in line with 2.7.2.7. G28 Z on the KS1
+    # moves to safe_z_home (125,125) first from any position. Add the S1 Max once
+    # the same has been checked on one.
+    HOT_Z_REHOME_MODELS = ('K3', 'KS1')
 
     # Models that still get the calibration script from before #190. On an S1 Max
     # (fw 2.7.1.4, 20261027_01_test) the new sequence never finished: four runs
