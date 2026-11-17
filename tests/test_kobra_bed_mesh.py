@@ -60,7 +60,11 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
     def test_script_still_saves_and_cools_down(self):
         for model, commands, script in self.every_script():
             with self.subTest(model=model, commands=commands is not None):
-                self.assertEqual(script[-3:], ["TURN_OFF_HEATERS", "M106 S0", "SAVE_CONFIG"])
+                save = script.index("SAVE_CONFIG")
+                self.assertEqual(script[save - 2:save + 1], ["TURN_OFF_HEATERS", "M106 S0", "SAVE_CONFIG"])
+                self.assertGreater(script.index("TURN_OFF_HEATERS"), script.index("BED_MESH_CALIBRATE"))
+                # Only a park move may follow the save (#205).
+                self.assertLessEqual(set(script[save + 1:]), {"TO_THROW_POSITION"})
 
     def test_nothing_is_sent_that_the_printer_does_not_have(self):
         """GoKlipper answers an unknown command with "ok" and a log warning, so
@@ -90,6 +94,12 @@ class BedMeshCalibrateScriptTests(unittest.TestCase):
         self.assertLess(script.index("WIPE_NOZZLE"), script.index("WIPE_STOP"))
         self.assertLess(script.index("WIPE_STOP"), cooldown)
         self.assertGreater(script.index("WIPE_EXIT"), cooldown)
+
+    def test_s1_parks_over_the_chute_after_saving(self):
+        """The head used to stay over the last probe point (#205). The park
+        comes after SAVE_CONFIG, so a failed move can't cost the mesh."""
+        script = self.script("KS1", KS1_2727)
+        self.assertEqual(script[-2:], ["SAVE_CONFIG", "TO_THROW_POSITION"])
 
     def test_s1_max_keeps_the_script_from_before_190(self):
         """On an S1 Max (fw 2.7.1.4) the new sequence never finished: gcode/script

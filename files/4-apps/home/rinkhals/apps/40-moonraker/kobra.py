@@ -1440,6 +1440,8 @@ class Kobra:
         - the per-model choices otherwise match what we sent before, so the K3
           family and the Kobra 2 Pro only lose commands they never had, plus a
           hot Z re-home on HOT_Z_REHOME_MODELS (#127).
+        - on the S1 family the head parks over the purge chute once the mesh is
+          saved (#205).
         """
         s1_family = self.KOBRA_MODEL_CODE in ('KS1', 'KS1M')
 
@@ -1494,6 +1496,13 @@ class Kobra:
             script.append('G28 Z')
 
         script += ['BED_MESH_CALIBRATE', 'TURN_OFF_HEATERS', 'M106 S0', 'SAVE_CONFIG']
+
+        # Park over the purge chute instead of leaving the head over the last
+        # probe point (#205). After SAVE_CONFIG, so a failed move can't cost the
+        # save. S1 only for now, since that's the one it was tested on.
+        if s1_family and 'TO_THROW_POSITION' in commands:
+            script.append('TO_THROW_POSITION')
+
         return script
 
     def patch_bed_mesh(self):
