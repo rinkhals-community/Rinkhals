@@ -16,6 +16,6 @@ It serves as a resource for developers, contributors, and curious users who want
 * [**Binary Decompilation & Patching**](binary-decompilation-and-patching.md): Methods and findings for analyzing and modifying closed-source Anycubic binaries.
 * [**IPC Commands**](ipc-commands.md): Details on the Inter-Process Communication used by the system UI and services.
 * [**MQTT Protocol**](mqtt.md): How the printer communicates with Anycubic's cloud services and local broker configurations.
-* [**Vanilla Klipper**](vanilla-klipper.md): Current status and research progress towards replacing GoKlipper with standard, open-source Klipper.
+* [**Vanilla Klipper**](vanilla-klipper.md): The app that runs standard, open-source Klipper in place of GoKlipper, and how to set it up with an ACE Pro.
 
 If you are looking to contribute to the development of Rinkhals or modify the core functionality of your printer, these documents provide the essential foundation.
