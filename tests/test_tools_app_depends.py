@@ -115,5 +115,41 @@ class AppDependsTests(unittest.TestCase):
         self.assertEqual(sorted(self.sh('list_apps_in_start_order')[1].split()), ['a', 'b', 'c'])
 
 
+    def test_an_entry_with_alternatives_needs_any_one_of_them(self):
+        self.app('screen', depends=['klipper|tunnel'])
+        code, out = self.sh('enable_app screen')
+        self.assertNotEqual(code, 0)
+        self.assertIn('klipper or tunnel', out)
+
+        self.app('tunnel', enabled=True)
+        self.assertEqual(self.sh('get_app_missing_depends screen')[1], '')
+        self.assertEqual(self.sh('enable_app screen')[0], 0)
+
+    def test_an_alternative_can_go_while_another_remains(self):
+        self.app('klipper', enabled=True)
+        self.app('tunnel', enabled=True)
+        self.app('screen', depends=['klipper|tunnel'], enabled=True)
+
+        # Either can be disabled or removed while the other is there...
+        self.assertEqual(self.sh('get_app_dependents klipper')[1], '')
+        self.assertEqual(self.sh('get_app_dependents tunnel enabled')[1], '')
+        self.assertEqual(self.sh('disable_app klipper')[0], 0)
+
+        # ...but not the last one standing.
+        self.assertEqual(self.sh('get_app_dependents tunnel enabled')[1], 'screen')
+        code, out = self.sh('disable_app tunnel')
+        self.assertNotEqual(code, 0)
+        self.assertIn('screen', out)
+        # klipper is still installed, so removing tunnel would not strand screen
+        self.assertEqual(self.sh('get_app_dependents tunnel')[1], '')
+
+    def test_start_order_waits_for_every_alternative(self):
+        self.app('a-screen', depends=['y-klipper|z-tunnel'])
+        self.app('y-klipper')
+        self.app('z-tunnel')
+        order = self.sh('list_apps_in_start_order')[1].split()
+        self.assertEqual(order.index('a-screen'), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -360,8 +360,10 @@ is_app_enabled() {
 }
 
 # App dependencies. "depends" in an app's app.json lists the apps it can't work
-# without (their folder names). The rules, enforced here so that the touch UI,
-# the web portal and the boot sequence all agree:
+# without (their folder names). An entry can name alternatives, separated by |,
+# when any one of several apps will do: "vanilla-klipper|tunneled-klipper".
+# The rules, enforced here so that the touch UI, the web portal and the boot
+# sequence all agree:
 #   - an app can only be enabled while everything it depends on is installed
 #     and enabled
 #   - an app can't be disabled while an enabled app depends on it
@@ -385,17 +387,40 @@ get_app_depends() {
     grep -q '"depends"' $root/app.json 2> /dev/null || return 0
     sed '/^[[:space:]]*\/\//d' $root/app.json | jq -r '(.depends // []) | .[]' 2> /dev/null
 }
-# Lists the apps that $1 depends on and that are not installed or not enabled
+# Tells whether one "depends" entry ($1, alternatives separated by |) is met:
+# one of its apps is installed and, with "enabled" as $2, enabled too. An app
+# named in $3 is left out, to ask "would it still be met without that app?"
+is_app_depend_met() {
+    local need=$2
+    local without=$3
+    local alternative
+
+    for alternative in $(echo $1 | tr '|' ' '); do
+        if [ "$alternative" = "$without" ] || [ "$(is_app_installed $alternative)" != "1" ]; then
+            continue
+        fi
+        if [ "$need" = "enabled" ] && [ "$(is_app_enabled $alternative)" != "1" ]; then
+            continue
+        fi
+        echo 1
+        return
+    done
+    echo 0
+}
+# Lists the "depends" entries of $1 that are not met: no app in the entry is
+# installed and enabled
 get_app_missing_depends() {
     local dep
 
     for dep in $(get_app_depends $1); do
-        if [ "$(is_app_installed $dep)" != "1" ] || [ "$(is_app_enabled $dep)" != "1" ]; then
+        if [ "$(is_app_depend_met $dep enabled)" != "1" ]; then
             echo $dep
         fi
     done
 }
-# Lists the installed apps that depend on $1. With "enabled" as $2, only the enabled ones
+# Lists the installed apps that would lose a dependency without $1: they name
+# it in a "depends" entry and no alternative in that entry is installed. With
+# "enabled" as $2, lists the enabled apps with no other enabled alternative
 get_app_dependents() {
     local target=$1
     local only=$2
@@ -410,10 +435,14 @@ get_app_dependents() {
             continue
         fi
         for dep in $(get_app_depends $other); do
-            if [ "$dep" = "$target" ]; then
-                echo $other
-                break
-            fi
+            case "|$dep|" in
+                *"|$target|"*)
+                    if [ "$(is_app_depend_met $dep "$only" $target)" != "1" ]; then
+                        echo $other
+                        break
+                    fi
+                    ;;
+            esac
         done
     done
 }
@@ -433,7 +462,7 @@ list_apps_in_start_order() {
 
         for app in $remaining; do
             ready=1
-            for dep in $(get_app_depends $app); do
+            for dep in $(get_app_depends $app | tr '|' ' '); do
                 case " $remaining " in
                     *" $dep "*) [ "$dep" != "$app" ] && ready=0 ;;
                 esac
@@ -465,7 +494,7 @@ enable_app() {
 
     local missing=$(echo $(get_app_missing_depends $app))
     if [ -n "$missing" ]; then
-        echo "Can't enable $app. It needs these apps installed and enabled first: $missing"
+        echo "Can't enable $app. It needs these apps installed and enabled first: $(echo $missing | sed 's/|/ or /g')"
         return 1
     fi
 

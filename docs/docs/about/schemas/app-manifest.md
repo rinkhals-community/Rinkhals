@@ -45,6 +45,13 @@ parsing.
 "depends": [ "vanilla-klipper" ]
 ```
 
+When any one of several apps will do, name them in one entry separated by `|`.
+This app needs Moonraker, and either of two Klipper apps:
+
+```json
+"depends": [ "40-moonraker", "vanilla-klipper|tunneled-klipper" ]
+```
+
 Rinkhals keeps those dependencies intact, the same way from the touch UI, the
 web portal and at startup:
 
@@ -55,6 +62,8 @@ web portal and at startup:
 - An app can't be **disabled** while an enabled app depends on it, and can't be
   **uninstalled** while an installed app depends on it. Disable or uninstall
   the dependent app first.
+- With alternatives, one of them is enough. One alternative can be disabled or
+  uninstalled as long as another is still there to take its place.
 - At startup, apps are started after the apps they depend on.
 
 Rinkhals never installs, enables, disables or removes another app for you: it

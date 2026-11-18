@@ -9,32 +9,47 @@ import (
 
 func TestDependentsOf(t *testing.T) {
 	depends := map[string][]string{
-		"helixscreen":     {"vanilla-klipper"},
+		"helixscreen":     {"vanilla-klipper|tunneled-klipper"},
 		"other-screen":    {"40-moonraker", "vanilla-klipper"},
 		"vanilla-klipper": {"40-moonraker"},
 		"self":            {"self"},
 	}
-	cases := map[string][]string{
-		"vanilla-klipper": {"helixscreen", "other-screen"},
-		"40-moonraker":    {"other-screen", "vanilla-klipper"},
-		"helixscreen":     nil,
-		"self":            nil, // an app naming itself doesn't block its own removal
-		"unknown":         nil,
+	all := func(string) bool { return true }
+	onlyVanilla := func(id string) bool { return id == "vanilla-klipper" || id == "40-moonraker" }
+
+	cases := []struct {
+		target string
+		have   func(string) bool
+		want   []string
+	}{
+		// With tunneled-klipper around, helixscreen can do without vanilla-klipper.
+		{"vanilla-klipper", all, []string{"other-screen"}},
+		// Without it, vanilla-klipper is helixscreen's last alternative.
+		{"vanilla-klipper", onlyVanilla, []string{"helixscreen", "other-screen"}},
+		{"tunneled-klipper", all, nil},
+		{"40-moonraker", all, []string{"other-screen", "vanilla-klipper"}},
+		{"helixscreen", all, nil},
+		{"self", all, nil}, // an app naming itself doesn't block its own removal
+		{"unknown", all, nil},
 	}
-	for target, want := range cases {
-		if got := dependentsOf(target, depends); !reflect.DeepEqual(got, want) {
-			t.Errorf("dependentsOf(%q) = %v, want %v", target, got, want)
+	for _, c := range cases {
+		if got := dependentsOf(c.target, depends, c.have); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("dependentsOf(%q) = %v, want %v", c.target, got, c.want)
 		}
 	}
 }
 
 func TestMissingFrom(t *testing.T) {
-	have := func(id string) bool { return id == "40-moonraker" }
-	if got := missingFrom([]string{"40-moonraker", "vanilla-klipper"}, have); !reflect.DeepEqual(got, []string{"vanilla-klipper"}) {
+	have := func(id string) bool { return id == "40-moonraker" || id == "tunneled-klipper" }
+	needs := []string{"40-moonraker", "vanilla-klipper", "vanilla-klipper|tunneled-klipper", "a|b"}
+	if got := missingFrom(needs, have); !reflect.DeepEqual(got, []string{"vanilla-klipper", "a|b"}) {
 		t.Errorf("missingFrom = %v", got)
 	}
 	if got := missingFrom(nil, have); got != nil {
 		t.Errorf("missingFrom(nil) = %v, want nothing", got)
+	}
+	if got := spellOut([]string{"x", "a|b"}); got != "x, a or b" {
+		t.Errorf("spellOut = %q", got)
 	}
 }
 

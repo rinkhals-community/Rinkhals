@@ -1441,7 +1441,9 @@ class RinkhalsUiApp(BaseApp):
 
         # App dependencies: an app can't be installed before the apps it needs,
         # or removed while an installed app needs it
-        missing_depends = [ d for d in (app_manifest.get('depends') or []) if is_app_installed(d) != '1' ]
+        # (an entry such as "a|b" is met by either app, and reads "a or b")
+        missing_depends = [ d.replace('|', ' or ') for d in (app_manifest.get('depends') or [])
+                            if not any(is_app_installed(a) == '1' for a in d.split('|')) ]
         dependents = (get_app_dependents(app_dir) or '').split() if is_installed else []
 
         if update_available:
