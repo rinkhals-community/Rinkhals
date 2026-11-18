@@ -321,6 +321,10 @@ class MmuAceSkuIdFormatSettingTests(unittest.TestCase):
         self.assertEqual(SKU.parse_sku_id_formats(["spoolkid_ac", "bogus"]),
                          frozenset({"spoolkid_ac"}))
 
+    def test_a_collection_is_read_case_insensitively_like_a_string(self):
+        self.assertEqual(SKU.parse_sku_id_formats({"OpenSpool", " SpoolKid_AC "}),
+                         SKU.parse_sku_id_formats("OpenSpool, SpoolKid_AC"))
+
     def test_split_sku_code(self):
         self.assertEqual(SKU.split_sku_code("ATHPLBK"), ("AT", "PLBK"))
         self.assertEqual(SKU.split_sku_code("HPL18"), ("", "PL18"))

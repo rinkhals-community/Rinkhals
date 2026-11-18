@@ -142,13 +142,14 @@ def parse_sku_id_formats(setting) -> frozenset:
     spoolkid_ac". "all" enables every format and "off" (the default) none. An
     unknown name is skipped with a warning rather than failing the whole line:
     this runs while Moonraker loads its config, and one typo should not cost the
-    names that work. An iterable of names is accepted too, and filtered the same
-    way, without warnings.
+    names that work. A collection of names is accepted too, read the same way
+    (case-insensitive) but filtered without warnings.
     """
     if setting is None:
         return frozenset()
     if not isinstance(setting, str):
-        return frozenset(name for name in setting if name in SKU_ID_FORMATS)
+        names = (str(name).strip().lower() for name in setting)
+        return frozenset(name for name in names if name in SKU_ID_FORMATS)
     formats = set()
     for name in setting.split(","):
         name = name.strip().lower()
@@ -174,7 +175,7 @@ def split_sku_code(code: str) -> Optional[tuple]:
     The format is <vendor>H<filament>: the first H ends the vendor code, so
     "ATHPLBK" is ("AT", "PLBK") and "HPL18" is ("", "PL18"). None when there is
     no H or nothing after it, i.e. the SKU is not in this format. Shared by
-    SkuFormat.parse and SkuFormat.spool_id so the two cannot disagree on
+    SkuFormat.parse and SkuFormat.identify so the two cannot disagree on
     where the vendor ends.
     """
     vendor, found, filament = (code or "").partition("H")

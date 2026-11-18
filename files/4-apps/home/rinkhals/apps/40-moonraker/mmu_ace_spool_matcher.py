@@ -109,30 +109,34 @@ class MmuAceSpoolMatcher:
         spool_id = self.spool_id_from_sku(sku)
         if spool_id is None:
             return None
+        # Name the format in every line below: under "all" it is what tells you
+        # which format to turn off if a tag is read that should not have been.
+        sku_format = (self.sku_format.identify(sku) or ("?",))[0]
+        named = f"SKU {sku} ({sku_format}) names Spoolman spool {spool_id}"
 
         material = (getattr(gate, "material", "") or "").strip()
         if not material or material.lower() == "unknown":
-            logging.info(f"Gate {gate_index}: SKU {sku} names Spoolman spool {spool_id}, "
+            logging.info(f"Gate {gate_index}: {named}, "
                          "but the gate has no material to check it against - not binding")
             return None
 
         spool = await self.get_spool(spool_id)
         if spool is None:
-            logging.info(f"Gate {gate_index}: SKU {sku} names Spoolman spool {spool_id}, "
+            logging.info(f"Gate {gate_index}: {named}, "
                          "which does not exist - not binding")
             return None
         if spool.get("archived"):
-            logging.info(f"Gate {gate_index}: SKU {sku} names Spoolman spool {spool_id}, "
+            logging.info(f"Gate {gate_index}: {named}, "
                          "which is archived - not binding")
             return None
         spool_material = ((spool.get("filament") or {}).get("material") or "").strip()
         if spool_material.casefold() != material.casefold():
-            logging.info(f"Gate {gate_index}: SKU {sku} names Spoolman spool {spool_id}, "
+            logging.info(f"Gate {gate_index}: {named}, "
                          f"but it is {spool_material or 'of no material'} and the gate "
                          f"holds {material} - not binding")
             return None
 
-        logging.info(f"Gate {gate_index}: SKU {sku} names Spoolman spool {spool_id}, "
+        logging.info(f"Gate {gate_index}: {named}, "
                      "which checks out")
         return spool_id
 
