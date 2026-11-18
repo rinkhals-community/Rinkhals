@@ -149,6 +149,35 @@ jobs:
             exit 1
           fi
 
+  patcher:
+    name: Binary patcher tests and ARM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: patcher/go.mod
+          cache: false
+
+      - name: Test and vet
+        working-directory: patcher
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...
+
+      - name: Cross-compile static Linux ARMv7 patcher
+        working-directory: patcher
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/rinkhals-patcher" .
+          readelf -h "$RUNNER_TEMP/rinkhals-patcher" | grep -E 'Machine:.*ARM'
+
   python-tests:
     name: Python component tests
     runs-on: ubuntu-latest

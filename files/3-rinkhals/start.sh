@@ -279,6 +279,8 @@ file_md5() {
     md5sum $1 2> /dev/null | awk '{print $1}'
 }
 
+PATCHER=/opt/rinkhals/tools/rinkhals-patcher
+
 for TARGET in $TARGETS; do
     TARGET_PATCH=/opt/rinkhals/patches/${TARGET}.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh
 
@@ -319,6 +321,35 @@ for TARGET in $TARGETS; do
             rm -f $TARGET.tmp
             continue
         fi
+
+        rm -f $TARGET.original
+        mv $TARGET $TARGET.original
+        mv $TARGET.tmp $TARGET
+        sync
+
+    elif [ -x $PATCHER ]; then
+        # No static patch for this firmware, so it's one we haven't checked and Rinkhals only gets here
+        # when forced with .enable-rinkhals. Let the patcher look for the patch locations itself: it refuses
+        # anything it can't verify, and then the binary starts unpatched like it did before the patcher existed
+        #
+        # There are no MD5s to tell a stock binary from a leftover one here. The patcher does that too:
+        # --check only succeeds on a complete, unpatched binary it knows how to patch
+
+        if [ -f $TARGET.original ] && ! $PATCHER --check --binary $TARGET > /dev/null 2>&1 && $PATCHER --check --binary $TARGET.original > /dev/null 2>&1; then
+            log "/!\ Restoring stock $TARGET left over from an interrupted startup"
+            mv -f $TARGET.original $TARGET
+            sync
+        fi
+
+        rm -f $TARGET.tmp
+        if ! $PATCHER --binary $TARGET --output $TARGET.tmp >> $RINKHALS_LOGS/patcher.log 2>&1; then
+            log "/!\ No Rinkhals patch for $TARGET on this firmware, starting it as it is"
+            rm -f $TARGET.tmp
+            continue
+        fi
+        chmod +x $TARGET.tmp
+        sync
+        log "Patched $TARGET without a verified patch for firmware $KOBRA_VERSION"
 
         rm -f $TARGET.original
         mv $TARGET $TARGET.original
