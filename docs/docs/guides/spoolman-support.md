@@ -382,6 +382,10 @@ A code is 1 to 3 letters (case does not matter), and a code that contains `H` or
 is refused with a warning, as is any entry that is not `CODE=Name`. A vendor code only changes
 the name shown; the ID is read whether or not the code is listed.
 
+`sku_vendor_prefixes` only matters if you write `anycubic_style` tags. OpenSpool and SpoolKid
+SKUs carry no vendor code, and stock Anycubic tags are named without it, so leave it out if
+you don't use hand-written tags.
+
 The material check is what makes this safe to do by hand: a typo in the ID that lands on an
 existing spool of a different material is refused rather than bound.
 

@@ -2124,7 +2124,8 @@ class MmuAcePatcher:
         # product code (#107).
         sku_spool_id = parse_sku_id_formats(config.get("sku_spool_id", "off"))
 
-        # Vendor codes for SKUs you wrote yourself, e.g. "AT=Atomic, T=Tinmorry".
+        # Vendor codes for anycubic_style SKUs you wrote yourself, e.g. "AT=Atomic,
+        # T=Tinmorry". Only those SKUs carry a user vendor code; no other format uses it.
         vendor_prefixes = SkuFormat.parse_prefixes(config.get("sku_vendor_prefixes", ""))
 
         self.ace_controller = MmuAceController(self.server, host, spool_forget_after=spool_forget_after,
