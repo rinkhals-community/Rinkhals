@@ -54,6 +54,9 @@ type CatalogApp struct {
 	Version           string           `json:"version"`
 	Requirements      *AppRequirements `json:"requirements,omitempty"`
 	Depends           []string         `json:"depends,omitempty"`
+	// MissingDepends are the Depends that aren't installed; the app can't be
+	// installed until they are.
+	MissingDepends    []string `json:"missing_depends,omitempty"`
 	AvailableForModel bool             `json:"available_for_model"`
 	DownloadURL       string           `json:"download_url,omitempty"`
 	AssetSize         int64            `json:"asset_size,omitempty"`
@@ -341,8 +344,10 @@ func rebuildCatalog() (*Catalog, error) {
 			Description:  m.Description,
 			Version:      m.AppVersion,
 			Requirements: m.Requirements,
+			Depends:      m.Depends,
 			Upstream:     m.Upstream,
 		}
+		entry.MissingDepends = missingFrom(m.Depends, isAppInstalled)
 		if asset, ok := assetByApp[e.Name]; ok {
 			entry.AvailableForModel = true
 			entry.DownloadURL = asset.url
@@ -513,6 +518,12 @@ func handleCatalogInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	if !entry.AvailableForModel || entry.DownloadURL == "" {
 		http.Error(w, "No SWU available for this printer model", http.StatusUnprocessableEntity)
+		return
+	}
+	// Checked now, not from the cached MissingDepends: something may have been
+	// installed or removed since the catalog was built.
+	if reason := installBlockedBy(id, entry.Depends); reason != "" {
+		refuse(w, http.StatusConflict, reason)
 		return
 	}
 

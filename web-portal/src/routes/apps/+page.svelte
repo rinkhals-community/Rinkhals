@@ -47,6 +47,12 @@
 		enabled: boolean;
 		running: boolean;
 		requirements?: { memory?: number; cpu?: number };
+		// App dependencies: what this app needs, which of those are not installed
+		// or not enabled, and which installed / enabled apps need this one.
+		depends?: string[];
+		missing_depends?: string[];
+		dependents?: string[];
+		enabled_dependents?: string[];
 		properties: Property[];
 	};
 
@@ -57,6 +63,7 @@
 		version: string;
 		requirements?: { memory?: number; cpu?: number };
 		depends?: string[];
+		missing_depends?: string[];
 		available_for_model: boolean;
 		download_url?: string;
 		asset_size?: number;
@@ -747,6 +754,17 @@
 						</div>
 					{/if}
 
+					{#if app.depends?.length}
+						<p class="text-[11px] {app.missing_depends?.length ? 'text-coral' : 'text-ink-faint'}">
+							Needs <span class="font-mono">{app.depends.join(", ")}</span>{#if app.missing_depends?.length}. Install and enable <span class="font-mono">{app.missing_depends.join(", ")}</span> to use this app{/if}
+						</p>
+					{/if}
+					{#if app.dependents?.length}
+						<p class="text-[11px] text-ink-faint">
+							Needed by <span class="font-mono">{app.dependents.join(", ")}</span>
+						</p>
+					{/if}
+
 					<div class="flex items-center gap-2 flex-wrap">
 						<span class="px-2.5 py-1 rounded-full text-[11px] font-semibold uppercase tracking-wider border {pill.classes}">
 							{pill.label}
@@ -809,8 +827,8 @@
 							<button
 								type="button"
 								onclick={() => confirmUninstall(app)}
-								disabled={isBusy || !$printerState.can_install}
-								title={!$printerState.can_install ? "Disabled while printer is busy" : "Uninstall this app"}
+								disabled={isBusy || !$printerState.can_install || !!app.dependents?.length}
+								title={app.dependents?.length ? `Uninstall ${app.dependents.join(", ")} first: it needs this app` : !$printerState.can_install ? "Disabled while printer is busy" : "Uninstall this app"}
 								aria-label="Uninstall {app.name}"
 								class="{hasVisibleProperties(app) ? '' : 'ml-auto '}p-1.5 rounded-lg text-ink-faint hover:text-coral hover:bg-surface-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
@@ -924,6 +942,12 @@
 							</div>
 						{/if}
 
+						{#if entry.depends?.length}
+							<p class="text-[11px] {entry.missing_depends?.length ? 'text-coral' : 'text-ink-faint'}">
+								Needs <span class="font-mono">{entry.depends.join(", ")}</span>{#if entry.missing_depends?.length}. Install <span class="font-mono">{entry.missing_depends.join(", ")}</span> first{/if}
+							</p>
+						{/if}
+
 						<div class="flex items-center gap-2 mt-auto pt-3 border-t border-line-soft">
 							{#if !entry.available_for_model}
 								<span class="text-[11px] text-ink-faint italic">No SWU for this printer</span>
@@ -945,8 +969,8 @@
 								<button
 									type="button"
 									onclick={() => installCatalogApp(entry)}
-									disabled={installing || !$printerState.can_install}
-									title={!$printerState.can_install ? "Disabled while printer is busy" : (upgradeAvailable ? "Upgrade to the latest version" : "Install this app")}
+									disabled={installing || !$printerState.can_install || !!entry.missing_depends?.length}
+									title={entry.missing_depends?.length ? `Install ${entry.missing_depends.join(", ")} first` : !$printerState.can_install ? "Disabled while printer is busy" : (upgradeAvailable ? "Upgrade to the latest version" : "Install this app")}
 									class="flex items-center gap-1.5 px-2.5 py-1.5 bg-brand hover:bg-brand-hover text-white rounded-lg text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 								>
 									{#if installing}

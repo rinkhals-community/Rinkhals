@@ -358,9 +358,116 @@ is_app_enabled() {
         echo 0
     fi
 }
+
+# App dependencies. "depends" in an app's app.json lists the apps it can't work
+# without (their folder names). The rules, enforced here so that the touch UI,
+# the web portal and the boot sequence all agree:
+#   - an app can only be enabled while everything it depends on is installed
+#     and enabled
+#   - an app can't be disabled while an enabled app depends on it
+#   - an app can't be removed while an installed app depends on it (the callers
+#     that remove apps check get_app_dependents)
+
+is_app_installed() {
+    local root=$(get_app_root $1)
+
+    if [ -f $root/app.sh ] && [ -f $root/app.json ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+# Lists the apps that $1 depends on, one per line
+get_app_depends() {
+    local root=$(get_app_root $1)
+
+    # Most apps declare nothing, and this runs for every app at boot: don't start jq for those
+    grep -q '"depends"' $root/app.json 2> /dev/null || return 0
+    sed '/^[[:space:]]*\/\//d' $root/app.json | jq -r '(.depends // []) | .[]' 2> /dev/null
+}
+# Lists the apps that $1 depends on and that are not installed or not enabled
+get_app_missing_depends() {
+    local dep
+
+    for dep in $(get_app_depends $1); do
+        if [ "$(is_app_installed $dep)" != "1" ] || [ "$(is_app_enabled $dep)" != "1" ]; then
+            echo $dep
+        fi
+    done
+}
+# Lists the installed apps that depend on $1. With "enabled" as $2, only the enabled ones
+get_app_dependents() {
+    local target=$1
+    local only=$2
+    local other
+    local dep
+
+    for other in $(list_apps); do
+        if [ "$other" = "$target" ] || [ "$(is_app_installed $other)" != "1" ]; then
+            continue
+        fi
+        if [ "$only" = "enabled" ] && [ "$(is_app_enabled $other)" != "1" ]; then
+            continue
+        fi
+        for dep in $(get_app_depends $other); do
+            if [ "$dep" = "$target" ]; then
+                echo $other
+                break
+            fi
+        done
+    done
+}
+# list_apps, ordered so that every app comes after the apps it depends on
+list_apps_in_start_order() {
+    local remaining="$(list_apps)"
+    local ordered=""
+    local waiting
+    local progress
+    local ready
+    local app
+    local dep
+
+    while [ -n "$remaining" ]; do
+        waiting=""
+        progress=0
+
+        for app in $remaining; do
+            ready=1
+            for dep in $(get_app_depends $app); do
+                case " $remaining " in
+                    *" $dep "*) [ "$dep" != "$app" ] && ready=0 ;;
+                esac
+            done
+
+            if [ "$ready" = "1" ]; then
+                ordered="$ordered $app"
+                progress=1
+            else
+                waiting="$waiting $app"
+            fi
+        done
+
+        remaining=$(echo $waiting)
+
+        # Apps that depend on each other in a loop: keep them in their usual order
+        if [ "$progress" = "0" ]; then
+            ordered="$ordered $remaining"
+            break
+        fi
+    done
+
+    echo $ordered
+}
+
 enable_app() {
     app=$1
     app_root=$(get_app_root $app)
+
+    local missing=$(echo $(get_app_missing_depends $app))
+    if [ -n "$missing" ]; then
+        echo "Can't enable $app. It needs these apps installed and enabled first: $missing"
+        return 1
+    fi
 
     if [ ! -d $RINKHALS_HOME/apps ]; then
         mkdir -p $RINKHALS_HOME/apps
@@ -383,9 +490,19 @@ enable_app() {
         touch $RINKHALS_HOME/apps/$app/.enabled
     fi
 }
+# Pass "force" as $2 to disable an app that enabled apps still depend on, when
+# it is about to be removed along with them
 disable_app() {
     app=$1
     app_root=$(get_app_root $app)
+
+    if [ "$2" != "force" ]; then
+        local dependents=$(echo $(get_app_dependents $app enabled))
+        if [ -n "$dependents" ]; then
+            echo "Can't disable $app. These apps depend on it, disable them first: $dependents"
+            return 1
+        fi
+    fi
 
     if [ ! -d $RINKHALS_HOME/apps ]; then
         mkdir -p $RINKHALS_HOME/apps

@@ -83,7 +83,9 @@ if USING_SIMULATOR:
     def get_app_status(app): return 'started' if is_app_enabled(app) == '1' else 'stopped'
     def get_app_pids(app): return str(os.getpid()) if get_app_status(app) == 'started' else ''
     def enable_app(app): pass
-    def disable_app(app): pass
+    def disable_app(app, force=''): pass
+    def is_app_installed(app): return '1' if os.path.exists(f'{RINKHALS_HOME}/apps/{app}') else '0'
+    def get_app_dependents(app): return ''
     def start_app(app, timeout): pass
     def stop_app(app): pass
     def get_app_property(app, property): return 'https://github.com/rinkhals-community/Rinkhals' if property == 'link_output' else ''
@@ -118,6 +120,8 @@ else:
     is_app_enabled = load_tool_function('is_app_enabled')
     enable_app = load_tool_function('enable_app')
     disable_app = load_tool_function('disable_app')
+    is_app_installed = load_tool_function('is_app_installed')
+    get_app_dependents = load_tool_function('get_app_dependents')
     start_app = load_tool_function('start_app')
     stop_app = load_tool_function('stop_app')
     get_app_property = load_tool_function('get_app_property')
@@ -548,18 +552,23 @@ class RinkhalsUiApp(BaseApp):
 
         if USING_SHELL:
             shell_async(f'df -Ph {RINKHALS_ROOT} | tail -n 1 | awk \'{{print $3 " / " $2 " (" $5 ")"}}\'', update_disk_usage)
+    def app_refused(self, result):
+        # enable_app and disable_app refuse to break an app dependency, and say
+        # why ("Can't enable ..."). Show that and report that nothing changed.
+        if result and result.startswith("Can't"):
+            self.show_text_dialog(result)
+            return True
+        return False
     def show_apps(self):
         def toggle_app(app, checked):
             if checked:
                 logging.info(f'Enabling {app}...')
-                enable_app(app)
-                if get_app_status(app) != 'started':
+                if not self.app_refused(enable_app(app)) and get_app_status(app) != 'started':
                     logging.info(f'Starting {app}...')
                     start_app(app, 5)
             else:
                 logging.info(f'Disabling {app}...')
-                disable_app(app)
-                if get_app_status(app) == 'started':
+                if not self.app_refused(disable_app(app)) and get_app_status(app) == 'started':
                     logging.info(f'Stopping {app}...')
                     stop_app(app)
 
@@ -1126,12 +1135,12 @@ class RinkhalsUiApp(BaseApp):
 
     def enable_app(self, app):
         logging.info(f'Enabling {app}...')
-        enable_app(app)
-        self.show_app(app)
+        if not self.app_refused(enable_app(app)):
+            self.show_app(app)
     def disable_app(self, app):
         logging.info(f'Disabling {app}...')
-        disable_app(app)
-        self.show_app(app)
+        if not self.app_refused(disable_app(app)):
+            self.show_app(app)
     def start_app(self, app):
         logging.info(f'Starting {app}...')
         start_app(app, 5)
@@ -1430,6 +1439,11 @@ class RinkhalsUiApp(BaseApp):
 
         self.screen_store_app.button_action.clear_event_cb()
 
+        # App dependencies: an app can't be installed before the apps it needs,
+        # or removed while an installed app needs it
+        missing_depends = [ d for d in (app_manifest.get('depends') or []) if is_app_installed(d) != '1' ]
+        dependents = (get_app_dependents(app_dir) or '').split() if is_installed else []
+
         if update_available:
             # Single action button, so Update takes priority over Remove while an
             # update is pending. Reinstalling the SWU upgrades in place; the
@@ -1438,6 +1452,15 @@ class RinkhalsUiApp(BaseApp):
             self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_PRIMARY, lv.STATE.DEFAULT)
             self.screen_store_app.button_action.add_event_cb(
                 lambda e, d=app_dir, n=app_name: self.install_store_app(d, n),
+                lv.EVENT_CODE.CLICKED, None
+            )
+        elif is_installed and dependents:
+            self.screen_store_app.button_action.set_text('Remove')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_DANGER, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, n=app_name, others=', '.join(dependents): self.show_text_dialog(
+                    f"Can't remove {n}.\n\nThese apps depend on it, remove them first: {others}"
+                ),
                 lv.EVENT_CODE.CLICKED, None
             )
         elif is_installed:
@@ -1449,6 +1472,15 @@ class RinkhalsUiApp(BaseApp):
                     action='Remove',
                     action_color=lvr.COLOR_DANGER,
                     callback=lambda: self.remove_store_app(d)
+                ),
+                lv.EVENT_CODE.CLICKED, None
+            )
+        elif missing_depends:
+            self.screen_store_app.button_action.set_text('Install')
+            self.screen_store_app.button_action.set_style_text_color(lvr.COLOR_TEXT, lv.STATE.DEFAULT)
+            self.screen_store_app.button_action.add_event_cb(
+                lambda e, n=app_name, others=', '.join(missing_depends): self.show_text_dialog(
+                    f"Can't install {n} yet.\n\nIt needs these apps installed first: {others}"
                 ),
                 lv.EVENT_CODE.CLICKED, None
             )
@@ -1591,9 +1623,14 @@ class RinkhalsUiApp(BaseApp):
         app_path = f'{RINKHALS_HOME}/apps/{app_dir}'
 
         try:
+            dependents = (get_app_dependents(app_dir) or '').split()
+            if dependents:
+                self.show_text_dialog(f"Can't remove {app_dir}.\n\nThese apps depend on it, remove them first: {', '.join(dependents)}")
+                return
+
             if get_app_status(app_dir) != 'stopped':
                 stop_app(app_dir)
-            disable_app(app_dir)
+            disable_app(app_dir, 'force')
 
             if os.path.exists(app_path):
                 shutil.rmtree(app_path)
