@@ -103,6 +103,15 @@ RUN npm ci
 RUN npm run build
 
 ###############################################################
+# build-patcher builds the on-printer binary patcher, the fallback for firmware
+# we ship no static patch for
+FROM golang:1.24-alpine AS build-patcher
+COPY ./patcher /patcher
+WORKDIR /patcher
+RUN go test ./... \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -trimpath -o rinkhals-patcher
+
+###############################################################
 # build-web-backend builds the Go backend
 FROM golang:1.24-alpine AS build-web-backend
 COPY ./files/4-apps/home/rinkhals/apps/65-rinkhals-web /app
@@ -226,6 +235,8 @@ RUN rm -rf /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/ui/* \
 COPY --from=build-web-ui /web-portal/build/ /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/ui/
 COPY --from=build-web-backend /app/rinkhals-web /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
 RUN chmod +x /bundle/rinkhals/home/rinkhals/apps/65-rinkhals-web/rinkhals-web
+COPY --from=build-patcher /patcher/rinkhals-patcher /bundle/rinkhals/opt/rinkhals/tools/rinkhals-patcher
+RUN chmod +x /bundle/rinkhals/opt/rinkhals/tools/rinkhals-patcher
 ARG version="dev"
 RUN /build/prepare-bundle.sh /bundle "$version"
 
