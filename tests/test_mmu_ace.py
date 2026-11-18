@@ -687,18 +687,27 @@ class MmuAcePatchStatusTests(unittest.TestCase):
         patcher.get_status = lambda: mmu_status
         return patcher
 
-    def test_non_subscription_returns_full_snapshot_and_updates_cache(self):
+    def test_non_subscription_returns_full_snapshot_without_claiming_a_push(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
 
         status = patcher.patch_status({}, is_subscription_update=False)
 
         self.assertEqual(status, {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
-        # Regression check for the lost-update hole: the non-subscription
-        # path must also populate the diff cache.
+        # A query answers one client, so it must not mark the values as
+        # pushed to the subscribers (#125). The next push sends them.
+        self.assertEqual(patcher._last_pushed_mmu_status, {})
         self.assertEqual(
-            patcher._last_pushed_mmu_status,
+            patcher.patch_status({}, is_subscription_update=True),
             {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
         )
+
+    def test_query_keeps_cache_entries_that_already_match(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        patcher._last_pushed_mmu_status = {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 2}}
+
+        patcher.patch_status({}, is_subscription_update=False)
+
+        self.assertEqual(patcher._last_pushed_mmu_status, {"mmu": {"gate": 1}})
 
     def test_subscription_suppresses_unchanged_and_emits_changed(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
@@ -743,13 +752,30 @@ class MmuAcePatchStatusTests(unittest.TestCase):
         self.assertEqual(status, {"print_stats": {}})
         self.assertEqual(patcher._last_pushed_mmu_status, {})
 
-    def test_query_requesting_one_mmu_object_adds_and_caches_only_that(self):
+    def test_query_requesting_one_mmu_object_adds_only_that(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        patcher._last_pushed_mmu_status = {"mmu_machine": {"num_units": 1}}
 
         status = patcher.patch_status({}, False, {"mmu"})
 
         self.assertEqual(status, {"mmu": {"gate": 1}})
-        self.assertEqual(patcher._last_pushed_mmu_status, {"mmu": {"gate": 1}})
+        self.assertEqual(patcher._last_pushed_mmu_status, {"mmu_machine": {"num_units": 1}})
+
+    def test_query_for_mmu_cannot_swallow_a_subscriber_update(self):
+        """The #125 scenario itself: clients A and B are subscribed, the ACE
+        changes, and B loads Fluidd (objects/query for mmu) before the next
+        push. B gets the new value from the query; A must still get it from
+        the next push instead of the push finding no difference."""
+        patcher = self._make_patcher({"mmu": {"gate": 0}})
+        patcher.patch_status({}, is_subscription_update=True)      # baseline red
+
+        patcher.get_status = lambda: {"mmu": {"gate": 1}}          # ACE: blue
+        self.assertEqual(patcher.patch_status({}, False, {"mmu"}), {"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, is_subscription_update=True)
+        self.assertEqual(status, {"mmu": {"gate": 1}})
+        # ...and only once.
+        self.assertEqual(patcher.patch_status({}, is_subscription_update=True), {})
 
     def test_polling_client_without_mmu_cannot_swallow_a_subscriber_update(self):
         """A client polling objects/query for other objects used to advance
