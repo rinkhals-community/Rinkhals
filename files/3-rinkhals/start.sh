@@ -363,7 +363,7 @@ log "> Starting apps..."
 OLD_LD_LIBRARY_PATH=$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/lib:/usr/lib:$LD_LIBRARY_PATH
 
-APPS=$(list_apps)
+APPS=$(list_apps_in_start_order)
 for APP in $APPS; do
     APP_ROOT=$(get_app_root $APP)
 
@@ -384,7 +384,11 @@ for APP in $APPS; do
 
     APP_ENABLED=$(is_app_enabled $APP)
 
-    if [ "$APP_ENABLED" = "1" ]; then
+    APP_MISSING_DEPENDS=$(echo $(get_app_missing_depends $APP))
+
+    if [ "$APP_ENABLED" = "1" ] && [ -n "$APP_MISSING_DEPENDS" ]; then
+        log "  - Skipped $APP ($APP_ROOT) as it needs these apps installed and enabled: $APP_MISSING_DEPENDS"
+    elif [ "$APP_ENABLED" = "1" ]; then
         log "  - Starting $APP ($APP_ROOT)..."
         start_app $APP 5
     else

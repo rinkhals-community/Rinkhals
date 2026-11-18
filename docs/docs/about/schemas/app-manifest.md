@@ -26,6 +26,7 @@ parsing.
 | `version` | string | Yes | The app's own version (free-form, e.g. `"1.0"` or a commit hash). |
 | `url` | string | No | App or project URL. |
 | `requirements` | object | No | Resource hints (see below). Informational only; not currently enforced by the loader. |
+| `depends` | array | No | Apps this app can't work without (see below). |
 | `properties` | object | No | User-configurable settings shown in the touch UI (see below). |
 
 ### `requirements`
@@ -34,6 +35,31 @@ parsing.
 | -- | -- | -- |
 | `cpu` | number | Approximate CPU usage, in percent. |
 | `memory` | number | Approximate memory usage, in MB. |
+
+### `depends`
+
+`depends` lists the apps this app needs, by folder name (the app's id, such as
+`vanilla-klipper` or `40-moonraker`):
+
+```json
+"depends": [ "vanilla-klipper" ]
+```
+
+Rinkhals keeps those dependencies intact, the same way from the touch UI, the
+web portal and at startup:
+
+- The app can't be **installed** from the app store until everything it
+  depends on is installed.
+- The app can't be **enabled**, and isn't started at boot, unless everything it
+  depends on is installed and enabled.
+- An app can't be **disabled** while an enabled app depends on it, and can't be
+  **uninstalled** while an installed app depends on it. Disable or uninstall
+  the dependent app first.
+- At startup, apps are started after the apps they depend on.
+
+Rinkhals never installs, enables, disables or removes another app for you: it
+says which app is in the way and leaves the decision to you. The check is on
+the app being present and enabled, not on its version.
 
 ### `properties`
 
@@ -75,6 +101,8 @@ Property `type` values:
         "cpu": 0, // CPU usage in %
         "memory": 0 // Memory usage in MB
     },
+
+    "depends": [ "40-moonraker" ], // Optional: apps this app can't work without
 
     // Those properties will be exposed in Rinkhals UI
     "properties": {

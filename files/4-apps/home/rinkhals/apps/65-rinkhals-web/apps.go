@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 )
 
 // Locations that match tools.sh:
+//
 //   BUILTIN_APP_PATH = $RINKHALS_ROOT/home/rinkhals/apps   (system apps shipped in the SWU)
 //   USER_APP_PATH    = $RINKHALS_HOME/apps                 (user overrides + per-app .config files)
 //   TEMPORARY_APP_PATH = /tmp/rinkhals/apps                (session-only overrides)
@@ -59,6 +61,8 @@ type AppManifest struct {
 	Description  string                            `json:"description"`
 	AppVersion   string                            `json:"version"`
 	Requirements *AppRequirements                  `json:"requirements,omitempty"`
+	// Depends lists the apps (folder names) this one can't work without.
+	Depends    []string                          `json:"depends,omitempty"`
 	Properties   map[string]map[string]interface{} `json:"properties,omitempty"`
 	// Optional upstream-tracking declaration. Only catalog apps (and only those
 	// that actually pull binaries from somewhere) populate this. Local apps
@@ -76,6 +80,14 @@ type App struct {
 	Enabled      bool             `json:"enabled"`
 	Running      bool             `json:"running"`
 	Requirements *AppRequirements `json:"requirements,omitempty"`
+	// Depends is what the app declares. MissingDepends are the ones not
+	// installed or not enabled, which keep it from being enabled. Dependents
+	// are the installed apps that depend on this one (they block uninstalling
+	// it), and EnabledDependents the enabled ones (they block disabling it).
+	Depends           []string      `json:"depends,omitempty"`
+	MissingDepends    []string      `json:"missing_depends,omitempty"`
+	Dependents        []string      `json:"dependents,omitempty"`
+	EnabledDependents []string      `json:"enabled_dependents,omitempty"`
 	Properties   []AppProperty    `json:"properties"`
 }
 
@@ -123,7 +135,18 @@ func readManifest(root string) (*AppManifest, error) {
 	}
 	var m AppManifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
+		// app.json may carry // comment lines, which tools.sh strips before
+		// parsing. Do the same, so the portal and tools.sh read the same
+		// manifest (and the same "depends").
+		var kept [][]byte
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			if !bytes.HasPrefix(bytes.TrimSpace(line), []byte("//")) {
+				kept = append(kept, line)
+			}
+		}
+		if err2 := json.Unmarshal(bytes.Join(kept, []byte("\n")), &m); err2 != nil {
+			return nil, err
+		}
 	}
 	return &m, nil
 }
@@ -312,6 +335,17 @@ func loadApp(id string, state map[string]struct {
 	props := buildProperties(manifest, userCfg, tempCfg)
 
 	s := state[id]
+	dependents := dependentsOf(id, installedDepends())
+	var enabledDependents []string
+	for _, d := range dependents {
+		if state[d].Enabled {
+			enabledDependents = append(enabledDependents, d)
+		}
+	}
+	missing := missingFrom(manifest.Depends, func(dep string) bool {
+		return isAppInstalled(dep) && state[dep].Enabled
+	})
+
 	return &App{
 		ID:           id,
 		Name:         strings.TrimSpace(stringOr(manifest.Name, id)),
@@ -321,6 +355,10 @@ func loadApp(id string, state map[string]struct {
 		Enabled:      s.Enabled,
 		Running:      s.Running,
 		Requirements: manifest.Requirements,
+		Depends:           manifest.Depends,
+		MissingDepends:    missing,
+		Dependents:        dependents,
+		EnabledDependents: enabledDependents,
 		Properties:   props,
 	}, nil
 }
@@ -386,7 +424,9 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case sub == "" && r.Method == "GET":
-		state := queryAppStates([]string{id})
+		// All apps, not just this one: what it depends on and what depends on
+		// it are part of the answer.
+		state := queryAppStates(listAppIDs())
 		app, err := loadApp(id, state)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -415,10 +455,16 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if reason := uninstallBlockedBy(id); reason != "" {
+			refuse(w, http.StatusConflict, reason)
+			return
+		}
+
 		// Best-effort: stop and disable the app before removing files. We don't
 		// fail the uninstall if these fail; an already-stopped app is fine and
-		// disable_app on a missing dir is a no-op.
-		preCmd := fmt.Sprintf(". %s\nstop_app %s 2>/dev/null || true\ndisable_app %s 2>/dev/null || true\n",
+		// disable_app on a missing dir is a no-op. Nothing installed depends
+		// on it at this point, so "force" only skips a check already made.
+		preCmd := fmt.Sprintf(". %s\nstop_app %s 2>/dev/null || true\ndisable_app %s force 2>/dev/null || true\n",
 			toolsSh, shellQuote(id), shellQuote(id))
 		_ = exec.Command("sh", "-c", preCmd).Run()
 
