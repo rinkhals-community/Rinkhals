@@ -40,7 +40,7 @@ from typing import (
 # Import at runtime for actual use
 from ..common import WebRequest, APITransport, RequestType
 from .mmu_ace_spool_store import MmuAceSpoolStore
-from .mmu_ace_sku import SKU_SPOOL_ID_MODES, SkuFormat
+from .mmu_ace_sku import SkuFormat, parse_sku_id_formats
 from .mmu_ace_spool_matcher import MmuAceSpoolMatcher, SpoolmanUnavailable
 
 if TYPE_CHECKING:
@@ -536,7 +536,7 @@ class MmuAceController:
     def __init__(self, server: Server, host: str | None,
                  spool_forget_after: float = MmuAceSpoolStore.DEFAULT_FORGET_AFTER_S,
                  auto_match_mode: str = "off",
-                 sku_spool_id: str = "off",
+                 sku_spool_id="off",
                  vendor_prefixes: Optional[dict] = None):
         self.server = server
         self.eventloop = self.server.get_event_loop()
@@ -2116,15 +2116,13 @@ class MmuAcePatcher:
                             f"Valid: {', '.join(MmuAceSpoolMatcher.MODES)}")
             auto_match_mode = "off"
 
-        # Read the Spoolman ID off the tag: off (default), openspool - only
-        # OS-<id> SKUs written by OpenCubic firmware - or serial, which also reads
-        # <vendor>H<filament>-<id> on tags you wrote yourself. Stock Anycubic SKUs are never
-        # read, as their number is a product code (#107).
-        sku_spool_id = config.get("sku_spool_id", "off").strip().lower()
-        if sku_spool_id not in SKU_SPOOL_ID_MODES:
-            logging.warning(f"[mmu_ace] Unknown sku_spool_id '{sku_spool_id}', using 'off'. "
-                            f"Valid: {', '.join(SKU_SPOOL_ID_MODES)}")
-            sku_spool_id = "off"
+        # Read the Spoolman ID off the tag: a comma-separated list of SKU formats
+        # - openspool (OS-<id>, OpenCubic firmware), spoolkid_ac (SM<id>, SpoolKid's
+        # Anycubic ACE format), anycubic_style (<vendor>H<filament>-<id> on tags you
+        # wrote yourself) - or all, or off (default). Unknown names are skipped with
+        # a warning. Stock Anycubic SKUs are never read, as their number is a
+        # product code (#107).
+        sku_spool_id = parse_sku_id_formats(config.get("sku_spool_id", "off"))
 
         # Vendor codes for SKUs you wrote yourself, e.g. "AT=Atomic, T=Tinmorry".
         vendor_prefixes = SkuFormat.parse_prefixes(config.get("sku_vendor_prefixes", ""))

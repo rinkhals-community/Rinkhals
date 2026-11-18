@@ -198,55 +198,114 @@ class MmuAceSkuSpoolIdTests(unittest.TestCase):
     MmuAceSkuSpoolIdTests in test_mmu_ace.py); this only covers what a SKU says.
     """
 
-    def test_spool_id_edge_cases(self):
+    def test_spool_id_edge_cases_with_every_format(self):
         sku_format = SKU.SkuFormat()
         for sku, expected in [
+            # openspool
             ("OS-24", 24), ("os-24", 24), (" OS-24 ", 24), ("OS-0", None),
             ("OS-2-4", None), ("OS-", None), ("OS-A1", None), ("", None),
-            ("THPLBR-14", 14), ("THPLBR-", None), ("THPLBR-1A", None),
-            ("HPL18-105", None), ("AHPLBK-A106", None), ("OHPLBK-25", 25),
-            # <vendor>H<filament>: any vendor but "" and "A" is read, configured
-            # or not, and it ends at the FIRST H.
-            ("ATHPLBK-4", 4), ("XHPLBK-7", 7), ("THPLBK-25", 25),
-            ("AHPETK-102", None), ("AHHSBK-102", None), ("HHSBK-102", None),
-            # No H, so not this format.
-            ("ATPLBK-25", None), ("OS-24X", None), ("THPLBK-", None),
-            # Nothing after the H.
-            ("AH-25", None), ("XH-25", None),
+            ("OS-24X", None),
             # An all-digit chip UID fits the pattern but is no spool ID.
             ("OS-04123456789012", None), ("OS-2147483647", 2147483647),
             ("OS-2147483648", None),
+            # anycubic_style: any vendor but "" and "A" is read, configured or
+            # not, and it ends at the FIRST H.
+            ("THPLBR-14", 14), ("THPLBR-", None), ("THPLBR-1A", None),
+            ("HPL18-105", None), ("AHPLBK-A106", None), ("OHPLBK-25", 25),
+            ("ATHPLBK-4", 4), ("XHPLBK-7", 7), ("THPLBK-25", 25),
+            ("AHPETK-102", None), ("AHHSBK-102", None), ("HHSBK-102", None),
+            # No H, so not anycubic_style (and not SM<digits> either).
+            ("ATPLBK-25", None), ("THPLBK-", None),
+            # Nothing after the H.
+            ("AH-25", None), ("XH-25", None),
+            # spoolkid_ac
+            ("SM8", 8), ("sm8", 8), (" SM8 ", 8), ("SM08", 8), ("SM2147483647", 2147483647),
+            ("SM0", None), ("SM", None), ("SM-8", None), ("SM8A", None), ("XSM8", None),
+            ("SM2147483648", None),
         ]:
             with self.subTest(sku=sku):
-                self.assertEqual(sku_format.spool_id(sku, "serial"), expected)
+                self.assertEqual(sku_format.spool_id(sku, SKU.SKU_ID_FORMATS), expected)
 
-    def test_an_unknown_mode_reads_nothing(self):
-        for mode in ("bogus", "", None, "SERIAL"):
-            with self.subTest(mode=mode):
-                self.assertIsNone(SKU.SkuFormat().spool_id("OS-24", mode))
-
-    def test_off_reads_nothing(self):
-        for sku in ("OS-24", "THPLBR-14"):
-            with self.subTest(sku=sku):
-                self.assertIsNone(SKU.SkuFormat().spool_id(sku, "off"))
-
-    def test_openspool_reads_only_os_skus(self):
+    def test_each_format_reads_only_its_own_skus(self):
         sku_format = SKU.SkuFormat()
+        skus = {"openspool": "OS-24", "spoolkid_ac": "SM8", "anycubic_style": "THPLBR-14"}
+        ids = {"openspool": 24, "spoolkid_ac": 8, "anycubic_style": 14}
+        for enabled in SKU.SKU_ID_FORMATS:
+            for name, sku in skus.items():
+                with self.subTest(enabled=enabled, sku=sku):
+                    expected = ids[name] if name == enabled else None
+                    self.assertEqual(sku_format.spool_id(sku, {enabled}), expected)
 
-        self.assertEqual(sku_format.spool_id("OS-24", "openspool"), 24)
-        self.assertIsNone(sku_format.spool_id("THPLBR-14", "openspool"))
+    def test_off_and_unknown_formats_read_nothing(self):
+        for formats in ("off", "", None, (), "bogus", {"serial"}, {"SERIAL"}):
+            with self.subTest(formats=formats):
+                for sku in ("OS-24", "SM8", "THPLBR-14"):
+                    self.assertIsNone(SKU.SkuFormat().spool_id(sku, formats))
 
-    def test_the_literal_openspool_carries_no_id_in_any_mode(self):
-        for mode in SKU.SKU_SPOOL_ID_MODES:
-            with self.subTest(mode=mode):
-                self.assertIsNone(SKU.SkuFormat().spool_id("OPENSPOOL", mode))
+    def test_a_setting_string_is_accepted(self):
+        self.assertEqual(SKU.SkuFormat().spool_id("SM8", "openspool, spoolkid_ac"), 8)
+        self.assertEqual(SKU.SkuFormat().spool_id("SM8", "all"), 8)
+
+    def test_the_literal_openspool_carries_no_id_under_any_format(self):
+        for name in SKU.SKU_ID_FORMATS:
+            with self.subTest(format=name):
+                self.assertIsNone(SKU.SkuFormat().spool_id("OPENSPOOL", {name}))
 
     def test_the_vendor_prefix_setting_does_not_change_what_is_read(self):
         # The vendor code only names the tag; it is not needed to read the ID.
         configured = SKU.SkuFormat(SKU.SkuFormat.parse_prefixes("AT=Atomic"))
 
-        self.assertEqual(configured.spool_id("ATHPLBK-4", "serial"), 4)
-        self.assertEqual(SKU.SkuFormat().spool_id("ATHPLBK-4", "serial"), 4)
+        self.assertEqual(configured.spool_id("ATHPLBK-4", {"anycubic_style"}), 4)
+        self.assertEqual(SKU.SkuFormat().spool_id("ATHPLBK-4", {"anycubic_style"}), 4)
+
+    def test_a_spoolkid_sku_is_not_an_anycubic_style_sku(self):
+        # SM8 is named from Spoolman, not from the SKU: it carries no filament code.
+        self.assertEqual(SKU.SkuFormat().parse("SM8")["vendor"], "")
+        self.assertEqual(SKU.SkuFormat().parse("SM8")["material_type"], "")
+
+
+class MmuAceSkuIdFormatSettingTests(unittest.TestCase):
+    """parse_sku_id_formats: the sku_spool_id setting."""
+
+    def test_names_are_read_case_insensitively(self):
+        self.assertEqual(SKU.parse_sku_id_formats("OpenSpool, SpoolKid_AC"),
+                         frozenset({"openspool", "spoolkid_ac"}))
+
+    def test_all_is_every_format(self):
+        self.assertEqual(SKU.parse_sku_id_formats("all"), frozenset(SKU.SKU_ID_FORMATS))
+        self.assertEqual(SKU.parse_sku_id_formats("ALL, openspool"),
+                         frozenset(SKU.SKU_ID_FORMATS))
+
+    def test_off_and_empty_are_nothing(self):
+        for setting in ("off", "OFF", "", " , ", None):
+            with self.subTest(setting=setting):
+                self.assertEqual(SKU.parse_sku_id_formats(setting), frozenset())
+
+    def test_off_in_a_list_adds_nothing(self):
+        self.assertEqual(SKU.parse_sku_id_formats("off, spoolkid_ac"),
+                         frozenset({"spoolkid_ac"}))
+
+    def test_an_unknown_name_is_skipped_with_a_warning(self):
+        with self.assertLogs(level="WARNING") as logs:
+            formats = SKU.parse_sku_id_formats("serial, anycubic_style")
+        self.assertEqual(formats, frozenset({"anycubic_style"}))
+        self.assertIn("serial", logs.output[0])
+
+    def test_the_old_serial_value_says_what_replaces_it(self):
+        with self.assertLogs(level="WARNING") as logs:
+            formats = SKU.parse_sku_id_formats("serial")
+        self.assertEqual(formats, frozenset())
+        self.assertIn("openspool, anycubic_style", logs.output[0])
+
+    def test_a_parsed_set_is_not_parsed_again(self):
+        # spool_id runs on every gate change; a bad name in an already-parsed set
+        # must not log each time.
+        with self.assertNoLogs(level="WARNING"):
+            self.assertIsNone(SKU.SkuFormat().spool_id("SM8", frozenset({"bogus"})))
+
+    def test_a_collection_is_filtered_without_warnings(self):
+        self.assertEqual(SKU.parse_sku_id_formats(["spoolkid_ac", "bogus"]),
+                         frozenset({"spoolkid_ac"}))
 
     def test_split_sku_code(self):
         self.assertEqual(SKU.split_sku_code("ATHPLBK"), ("AT", "PLBK"))
@@ -329,6 +388,14 @@ class MmuAceSkuStoreDataTests(unittest.TestCase):
                                      (material, series))
                     self.assertEqual(info["vendor"], "Anycubic")
         self.assertEqual(checked, 168)
+
+    def test_no_store_sku_is_read_as_a_spool_id(self):
+        # Their number is a product or batch code (#107), whatever formats are on.
+        skus = [sku for group in self.STORE_SKUS.values() for sku in group.split()]
+        self.assertEqual(len(skus), 168)
+        for sku in skus:
+            with self.subTest(sku=sku):
+                self.assertIsNone(SKU.SkuFormat().spool_id(sku, "all"))
 
 
 if __name__ == "__main__":

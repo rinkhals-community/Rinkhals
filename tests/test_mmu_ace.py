@@ -2856,7 +2856,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
     def setUp(self):
         super().setUp()
         self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None))
-        self.controller._matcher.sku_spool_id = "openspool"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("openspool")
 
     def _by_id_requests(self):
         return [u for u in self._urls() if re.search(r"/v1/spool/\d+$", u.partition("?")[0])]
@@ -2877,7 +2877,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(self.controller._spool_store.entries[0]["sku"], "OS-24")
 
     async def test_off_reads_nothing_and_does_not_query_spoolman(self):
-        self.controller._matcher.sku_spool_id = "off"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("off")
 
         await self._rebuild()
 
@@ -2891,7 +2891,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(self._by_id_requests(), [])
 
     async def test_the_literal_openspool_is_not_an_id(self):
-        self.controller._matcher.sku_spool_id = "serial"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("all")
 
         await self._rebuild(self._hub(sku="OPENSPOOL"))
 
@@ -2899,17 +2899,17 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(self._by_id_requests(), [])
 
     async def test_a_stock_anycubic_sku_stays_unbound_when_off(self):
-        self.controller._matcher.sku_spool_id = "off"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("off")
         self.spoolman.set_catalogue((102, "PETG", "000000", None))
 
         await self._rebuild(self._hub(sku="AHPETK-102"))
 
         self.assertNotIn(0, self._overrides())
 
-    async def test_a_stock_anycubic_sku_stays_unbound_under_serial(self):
+    async def test_a_stock_anycubic_sku_stays_unbound_under_anycubic_style(self):
         # 102 is a product code. Even with a real PETG spool 102 in the library it
         # must not be taken for that spool.
-        self.controller._matcher.sku_spool_id = "serial"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
         self.spoolman.set_catalogue((102, "PETG", "000000", None))
 
         await self._rebuild(self._hub(sku="AHPETK-102"))
@@ -2917,18 +2917,18 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertNotIn(0, self._overrides())
         self.assertEqual(self._by_id_requests(), [])
 
-    async def test_a_hand_written_sku_binds_under_serial(self):
-        self.controller._matcher.sku_spool_id = "serial"
+    async def test_a_hand_written_sku_binds_under_anycubic_style(self):
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
         self.spoolman.set_catalogue((1, "PLA", "6B4226", None))
 
         await self._rebuild(self._hub(material="PLA", sku="THPLBR-1"))
 
         self.assertEqual(self._overrides().get(0), 1)
 
-    async def test_a_multi_letter_vendor_code_binds_under_serial(self):
+    async def test_a_multi_letter_vendor_code_binds_under_anycubic_style(self):
         # The vendor code runs up to the first H, so AT is the vendor here; it does
         # not have to be configured for the ID to be read.
-        self.controller._matcher.sku_spool_id = "serial"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
         self.spoolman.set_catalogue((4, "PLA", "000000", None))
 
         await self._rebuild(self._hub(material="PLA", sku="ATHPLBK-4"))
@@ -2937,7 +2937,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
     async def test_a_configured_atomic_tag_is_bound_and_named(self):
         # What the UI ends up showing for Atomic's tags once AT=Atomic is set.
-        self.controller._matcher.sku_spool_id = "serial"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
         self.controller.sku_format = self.module.SkuFormat(
             self.module.SkuFormat.parse_prefixes("AT=Atomic"))
         self.spoolman.set_catalogue((4, "PLA", "000000", None))
@@ -2951,10 +2951,10 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(gate.vendor, "Atomic")
         self.assertEqual(gate.filament_name, "Atomic Basic PLA Black")
 
-    async def test_a_sku_without_the_h_is_not_read_under_serial(self):
+    async def test_a_sku_without_the_h_is_not_read_under_anycubic_style(self):
         # ATPLBK-25 is not <vendor>H<filament>: there is no vendor/filament split
         # to trust, so the 25 is not claimed as a spool ID.
-        self.controller._matcher.sku_spool_id = "serial"
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
         self.spoolman.set_catalogue((25, "PLA", "000000", None))
 
         await self._rebuild(self._hub(material="PLA", sku="ATPLBK-25"))
@@ -2970,11 +2970,80 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertNotIn(0, self._overrides())
         self.assertEqual(self._by_id_requests(), [])
 
-    def test_an_unknown_mode_falls_back_to_off(self):
+    def test_an_unknown_format_falls_back_to_off(self):
         matcher = self.module.MmuAceSpoolMatcher(self.server, "off", "bogus")
 
-        self.assertEqual(matcher.sku_spool_id, "off")
+        self.assertEqual(matcher.sku_spool_id, frozenset())
         self.assertFalse(matcher.sku_spool_id_enabled)
+
+    def test_the_setting_is_read_as_a_set_of_formats(self):
+        matcher = self.module.MmuAceSpoolMatcher(self.server, "off", "openspool, SpoolKid_AC")
+
+        self.assertEqual(matcher.sku_spool_id, frozenset({"openspool", "spoolkid_ac"}))
+        self.assertTrue(matcher.sku_spool_id_enabled)
+
+    # --- spoolkid_ac -------------------------------------------------------------
+
+    async def test_a_spoolkid_sku_binds_under_spoolkid_ac(self):
+        # SpoolKid writes SM<spool ID> on tags in its Anycubic ACE format (#221).
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("spoolkid_ac")
+        self.spoolman.set_catalogue((8, "PLA", "000000", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="SM8"))
+
+        self.assertEqual(self._overrides().get(0), 8)
+
+    async def test_two_spoolkid_tags_of_one_material_bind_to_their_own_spools(self):
+        # The case the article number cannot tell apart: two rolls of one filament.
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("spoolkid_ac")
+        self.spoolman.set_catalogue((8, "PLA", "000000", None), (9, "PLA", "000000", None))
+
+        hub = self._hub(material="PLA", sku="SM8")
+        second = hub["filament_hubs"][0]["slots"][1]
+        second.update(type="PLA", color=[0, 0, 0], sku="SM9", status="ready")
+        await self._rebuild(hub)
+
+        self.assertEqual((self._overrides().get(0), self._overrides().get(1)), (8, 9))
+
+    async def test_a_spoolkid_gate_is_named_from_spoolman(self):
+        # SM8 carries no filament code, so the name has to come from the spool.
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("spoolkid_ac")
+        self.spoolman.set_catalogue((8, "PLA", "000000", None))
+        self.spoolman.set_details(8, name="Matte PLA Black", vendor="Sunlu")
+
+        await self._rebuild(self._hub(material="PLA", sku="SM8"))
+        await self.loop.drain()
+
+        self.assertEqual(self._overrides().get(0), 8)
+        gate = self.controller.ace.units[0].gates[0]
+        self.assertEqual(self.controller.spool_display(gate), ("Sunlu", "Sunlu Matte PLA Black"))
+
+    async def test_a_spoolkid_sku_is_not_read_without_spoolkid_ac(self):
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats(
+            "openspool, anycubic_style")
+        self.spoolman.set_catalogue((8, "PLA", "000000", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="SM8"))
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
+
+    async def test_a_spoolkid_sku_of_another_material_is_refused(self):
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("spoolkid_ac")
+        self.spoolman.set_catalogue((8, "PETG", "000000", None))
+
+        await self._rebuild(self._hub(material="PLA", sku="SM8"))
+
+        self.assertNotIn(0, self._overrides())
+
+    async def test_openspool_is_not_read_under_anycubic_style_alone(self):
+        # Each format is enabled on its own now; anycubic_style no longer implies OS-.
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("anycubic_style")
+
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(self._by_id_requests(), [])
 
     # --- verification ----------------------------------------------------------
 

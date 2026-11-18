@@ -13,7 +13,7 @@ from collections import OrderedDict
 from typing import Optional
 from urllib.parse import quote
 
-from .mmu_ace_sku import NON_IDENTIFYING_SKUS, SKU_SPOOL_ID_MODES, SkuFormat
+from .mmu_ace_sku import NON_IDENTIFYING_SKUS, SkuFormat, parse_sku_id_formats
 
 
 class SpoolmanUnavailable(Exception):
@@ -54,7 +54,6 @@ class MmuAceSpoolMatcher:
     """
 
     MODES = ("off", "unique", "latest")
-    SKU_SPOOL_ID_MODES = SKU_SPOOL_ID_MODES
     CACHE_S = 60.0
     # Spools per request. Bounds the JSON held at once: a library of any size is
     # walked a page at a time and only the matches are kept.
@@ -65,14 +64,15 @@ class MmuAceSpoolMatcher:
     CACHE_ENTRIES = 16
     NON_IDENTIFYING_SKUS = NON_IDENTIFYING_SKUS
 
-    def __init__(self, server, mode: str = "off", sku_spool_id: str = "off",
+    def __init__(self, server, mode: str = "off", sku_spool_id="off",
                  sku_format: Optional[SkuFormat] = None):
         self.server = server
         # What a SKU says is the format's business; this only decides what to do with it.
         self.sku_format = sku_format if sku_format is not None else SkuFormat()
         self.mode = mode if mode in self.MODES else "off"
-        self.sku_spool_id = (sku_spool_id if sku_spool_id in self.SKU_SPOOL_ID_MODES
-                             else "off")
+        # The SKU formats read as a spool ID: a setting string ("openspool,
+        # spoolkid_ac", "all", "off") or a collection of format names.
+        self.sku_spool_id: frozenset = parse_sku_id_formats(sku_spool_id)
         # Short-lived per-query cache. Four gates rebuilt together usually ask
         # overlapping questions, and the answers cannot change that fast.
         self._cache: "OrderedDict[tuple, tuple]" = OrderedDict()
@@ -86,7 +86,7 @@ class MmuAceSpoolMatcher:
 
     @property
     def sku_spool_id_enabled(self) -> bool:
-        return self.sku_spool_id != "off"
+        return bool(self.sku_spool_id)
 
     def spool_id_from_sku(self, sku: str) -> Optional[int]:
         """The Spoolman spool ID a SKU claims to carry under sku_spool_id, or None.

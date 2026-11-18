@@ -246,19 +246,33 @@ If a tag already states which Spoolman spool it belongs to, Rinkhals can simply 
 instead of searching for it. This is **off by default**, and independent of `spool_auto_match`:
 you can trust your own tags without also letting Rinkhals guess from the inventory.
 
+`sku_spool_id` is a comma-separated list of the SKU formats your tags use:
+
 ```ini
 [mmu_ace]
-sku_spool_id: openspool
+sku_spool_id: openspool, spoolkid_ac
 ```
 
-| Value | Reads the ID from |
+| Format | SKU | Example | Written by |
+|---|---|---|---|
+| `openspool` | `OS-<digits>` | `OS-24` is Spoolman spool 24 | OpenCubic firmware on the ACE, for an OpenSpool tag whose `spool_id` is a number. `OS-04A1B2C3D4E5F6` contains letters, so it is a chip UID and is not read as an ID. |
+| `spoolkid_ac` | `SM<digits>` | `SM8` is Spoolman spool 8 | [SpoolKid](#spoolkid-tags), in its Anycubic ACE tag format. Stock ACE firmware is enough. |
+| `anycubic_style` | `<vendor>H<material><colour>-<digits>` | `THPLBK-25` is Spoolman spool 25 | You, with a tag-writing app. See [Writing your own tags](#writing-your-own-tags). |
+
+Two more values stand on their own:
+
+| Value | Meaning |
 |---|---|
-| `off` | Nothing. **Default.** |
-| `openspool` | `OS-<digits>` SKUs, as written by OpenCubic firmware for an OpenSpool tag whose `spool_id` is a number: `OS-24` is Spoolman spool 24. `OS-04A1B2C3D4E5F6` contains letters, so it is a chip UID and is not read as an ID. |
-| `serial` | Everything `openspool` reads, plus the number after the dash of a `<vendor>H<material><colour>-<digits>` SKU, for tags you wrote yourself — see below. |
+| `off` | Read nothing. **Default.** |
+| `all` | Every format above. This also turns on any format added in a later Rinkhals release, so list the formats by name if you want to choose each new one yourself. |
+
+Names are not case-sensitive, and the order does not matter. A name Rinkhals does not know is
+skipped with a warning in the Moonraker log, and the rest of the list still applies. The formats
+cannot overlap (`OS-` then digits, `SM` then digits, and a SKU with an `H` and a dash), so at most
+one of them reads any SKU. A SKU that starts with `OS-` is only ever read by `openspool`.
 
 Stock Anycubic SKUs — those with an empty or `A` vendor code, such as `AHPLBK-105` or
-`HPL18-105` — are **never** read as an ID, under any value. The number after their dash is a product or batch
+`HPL18-105` — are **never** read as an ID, whatever formats are on, including `all`. The number after their dash is a product or batch
 code (101 to 108), not a per-roll serial, and taking it as a spool ID is the behaviour that was
 removed in [#107](https://github.com/rinkhals-community/Rinkhals/issues/107). `OPENSPOOL` carries
 nothing and is ignored.
@@ -289,10 +303,35 @@ you have assigned is left alone, a gate you have cleared stays cleared until the
 changes, and if another gate still holds the roll the spool was bound with (a duplicate tag, say),
 this gate is left unassigned, a warning is logged, and it is looked at again after 5 minutes.
 
+#### SpoolKid tags
+
+SpoolKid writes RFID tags from your phone, with the filament data taken
+straight from Spoolman. Of the tag formats it offers, only its Anycubic ACE one sets a SKU, and
+that SKU is `SM` followed by the Spoolman spool ID: spool 8 is `SM8`. The ACE reads these tags
+with its stock firmware. Turn the format on with:
+
+```ini
+[mmu_ace]
+sku_spool_id: spoolkid_ac
+```
+
+- The ID is a plain decimal number straight after `SM`, with no dash: `SM-8` is not read. A
+  leading zero is allowed (`SM08` is spool 8), and `SM0` is not an ID.
+- An `SM` SKU says nothing about the filament, so the gate is named from the Spoolman spool
+  instead (see [What the gate is called](#what-the-gate-is-called)). The spool is checked
+  against the material the ACE reads off the tag.
+- Because every roll gets its own ID, two rolls of the same filament in the ACE bind to their
+  own Spoolman spools. Matching by `article_number` cannot tell those apart.
+- Rinkhals cannot tell a SpoolKid tag from another brand's tag whose SKU happens to look like
+  `SM<digits>`. With `spoolkid_ac` (or `all`) on, such a SKU is read as a spool ID too: the
+  material check refuses most wrong IDs, and a tag with an ID is never auto-matched instead. If
+  you use spools whose own tags have SKUs like that, leave `spoolkid_ac` off.
+
 #### Writing your own tags
 
-With the Android *ACE RFID* app you can write NTAG215 tags with a SKU of your choosing. Use the
-same layout Anycubic does, with your Spoolman spool ID after the dash:
+This is the `anycubic_style` format. With the Android *ACE RFID* app you can write NTAG215 tags
+with a SKU of your choosing. Use the same layout Anycubic does, with your Spoolman spool ID after
+the dash:
 
 ```
 <vendor>H<material><colour>-<Spoolman spool ID>
@@ -309,8 +348,8 @@ format and is not read.
 - **Spoolman spool ID** is a plain decimal number.
 
 For example `THPLBK-25` is vendor `T`, `PL` basic PLA, `BK` black, Spoolman spool 25, and
-`ATHPLBK-25` is the same with the two-letter vendor `AT`. Set `sku_spool_id: serial` to have
-those read. The filament code is also what Rinkhals uses to name the filament in the UI. The
+`ATHPLBK-25` is the same with the two-letter vendor `AT`. Set `sku_spool_id: anycubic_style` to
+have those read. The filament code is also what Rinkhals uses to name the filament in the UI. The
 material codes are:
 
 | Code | Material |
@@ -333,7 +372,7 @@ comma-separated list of `CODE=Name`:
 
 ```ini
 [mmu_ace]
-sku_spool_id: serial
+sku_spool_id: anycubic_style
 sku_vendor_prefixes: AT=Atomic, T=Tinmorry, V=Verbantin
 ```
 
