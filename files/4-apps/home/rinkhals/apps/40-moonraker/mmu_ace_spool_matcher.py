@@ -13,6 +13,8 @@ from collections import OrderedDict
 from typing import Optional
 from urllib.parse import quote
 
+from .mmu_ace_sku import NON_IDENTIFYING_SKUS, SkuFormat, parse_sku_id_formats
+
 
 class SpoolmanUnavailable(Exception):
     """Spoolman could not be reached or answered unusably.
@@ -29,8 +31,10 @@ class MmuAceSpoolMatcher:
     Two tiers: the RFID SKU against ``article_number``, then material and colour.
     The SKU goes first because a hit is the right product by construction, but it
     is absent or uninformative more often than not - untagged gates have none,
-    every OpenSpool tag reports the literal "OPENSPOOL", and a stock Anycubic SKU
-    is a product code shared by every roll of that product.
+    an OpenSpool tag only says "OPENSPOOL" on older ACE firmware (newer reports
+    "OS-<spool_id>" or "OS-<chip UID>", which are unique per roll but are not an
+    article number), and a stock Anycubic SKU is a product code shared by every
+    roll of that product.
 
     Ambiguity is refused rather than guessed: "unique" returns nothing and the
     user picks, "latest" breaks the tie by last_used. Rolls of one product are
@@ -58,20 +62,83 @@ class MmuAceSpoolMatcher:
     MAX_PAGES = 200
     # Cached query responses kept at once; bounds memory as well as staleness.
     CACHE_ENTRIES = 16
-    # The hub reports the payload's "protocol" field as the SKU, so this is what
-    # every OpenSpool tag looks like.
-    NON_IDENTIFYING_SKUS = frozenset({"OPENSPOOL"})
+    NON_IDENTIFYING_SKUS = NON_IDENTIFYING_SKUS
 
-    def __init__(self, server, mode: str = "off"):
+    def __init__(self, server, mode: str = "off", sku_spool_id="off",
+                 sku_format: Optional[SkuFormat] = None):
         self.server = server
+        # What a SKU says is the format's business; this only decides what to do with it.
+        self.sku_format = sku_format if sku_format is not None else SkuFormat()
         self.mode = mode if mode in self.MODES else "off"
+        # The SKU formats read as a spool ID: a setting string ("openspool,
+        # spoolkid_ac", "all", "off") or a collection of format names.
+        self.sku_spool_id: frozenset = parse_sku_id_formats(sku_spool_id)
         # Short-lived per-query cache. Four gates rebuilt together usually ask
         # overlapping questions, and the answers cannot change that fast.
         self._cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+        # Told of every spool fetched by ID, so what verifying a tag's spool had to
+        # read is not read a second time to describe it.
+        self.on_spool = None
 
     @property
     def enabled(self) -> bool:
         return self.mode != "off"
+
+    @property
+    def sku_spool_id_enabled(self) -> bool:
+        return bool(self.sku_spool_id)
+
+    def spool_id_from_sku(self, sku: str) -> Optional[int]:
+        """The Spoolman spool ID a SKU claims to carry under sku_spool_id, or None.
+
+        Purely syntactic (see SkuFormat.spool_id): whether that spool exists and
+        fits the gate is decided by spool_from_sku.
+        """
+        return self.sku_format.spool_id(sku, self.sku_spool_id)
+
+    async def spool_from_sku(self, gate, gate_index: int) -> Optional[int]:
+        """The spool a tag names for this gate, once Spoolman agrees, or None.
+
+        A tag is something a person (or firmware) wrote, so the ID is checked
+        before it is trusted: the spool must exist, not be archived, and be the
+        gate's material. None is "do not bind", whatever the reason; only an
+        unusable answer from Spoolman raises SpoolmanUnavailable, so the caller
+        retries an outage but not a spool that simply is not there.
+        """
+        sku = (getattr(gate, "sku", "") or "").strip()
+        spool_id = self.spool_id_from_sku(sku)
+        if spool_id is None:
+            return None
+        # Name the format in every line below: under "all" it is what tells you
+        # which format to turn off if a tag is read that should not have been.
+        sku_format = (self.sku_format.identify(sku) or ("?",))[0]
+        named = f"SKU {sku} ({sku_format}) names Spoolman spool {spool_id}"
+
+        material = (getattr(gate, "material", "") or "").strip()
+        if not material or material.lower() == "unknown":
+            logging.info(f"Gate {gate_index}: {named}, "
+                         "but the gate has no material to check it against - not binding")
+            return None
+
+        spool = await self.get_spool(spool_id)
+        if spool is None:
+            logging.info(f"Gate {gate_index}: {named}, "
+                         "which does not exist - not binding")
+            return None
+        if spool.get("archived"):
+            logging.info(f"Gate {gate_index}: {named}, "
+                         "which is archived - not binding")
+            return None
+        spool_material = ((spool.get("filament") or {}).get("material") or "").strip()
+        if spool_material.casefold() != material.casefold():
+            logging.info(f"Gate {gate_index}: {named}, "
+                         f"but it is {spool_material or 'of no material'} and the gate "
+                         f"holds {material} - not binding")
+            return None
+
+        logging.info(f"Gate {gate_index}: {named}, "
+                     "which checks out")
+        return spool_id
 
     async def match(self, gate, gate_index: int) -> Optional[int]:
         """The Spoolman spool this gate should be assigned, or None.
@@ -121,6 +188,44 @@ class MmuAceSpoolMatcher:
                      f"by {described}")
         return spool_id
 
+    def _spoolman(self):
+        spoolman = self.server.lookup_component("spoolman", None)
+        if spoolman is None:
+            raise SpoolmanUnavailable("no spoolman component")
+        return spoolman
+
+    async def get_spool(self, spool_id: int) -> Optional[dict]:
+        """One spool by ID, or None if Spoolman says there is no such spool.
+
+        Not /v1/spool?id=N: an unrecognised filter is answered with the unfiltered
+        list, which would make any ID look like it exists. The by-ID route answers
+        a dict, and its 404 is a definite "no" - unlike every other failure, which
+        raises SpoolmanUnavailable so the caller retries.
+
+        Uncached: it is asked once per change of the spool in a gate, and an
+        archived or deleted spool should not stay bindable for a minute.
+        """
+        spoolman = self._spoolman()
+        path = f"/v1/spool/{int(spool_id)}"
+        try:
+            response = await spoolman.http_client.get(
+                f"{spoolman.spoolman_url}{path}", connect_timeout=2., request_timeout=4.
+            )
+            if response.status_code == 404:
+                return None
+            if response.has_error():
+                raise SpoolmanUnavailable(f"error response from {path}")
+            body = response.json()
+        except SpoolmanUnavailable:
+            raise
+        except Exception as e:
+            raise SpoolmanUnavailable(f"{path}: {e}") from e
+        if not isinstance(body, dict):
+            raise SpoolmanUnavailable(f"{path} did not return a spool")
+        if self.on_spool is not None:
+            self.on_spool(body)
+        return body
+
     async def _get(self, path: str, params: dict) -> list:
         """One GET against Spoolman.
 
@@ -131,9 +236,7 @@ class MmuAceSpoolMatcher:
         no fetch, so this goes over its configured URL with its http client -
         which also means no second place to configure the Spoolman address.
         """
-        spoolman = self.server.lookup_component("spoolman", None)
-        if spoolman is None:
-            raise SpoolmanUnavailable("no spoolman component")
+        spoolman = self._spoolman()
 
         key = (path, tuple(sorted(params.items())))
         cached = self._cache.get(key)

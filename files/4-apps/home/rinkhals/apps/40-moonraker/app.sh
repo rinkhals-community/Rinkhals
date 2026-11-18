@@ -35,6 +35,9 @@ debug() {
 
     cp -rf kobra.py moonraker/moonraker/components/kobra.py
     cp -rf mmu_ace.py moonraker/moonraker/components/mmu_ace.py
+    cp -rf mmu_ace_spool_store.py moonraker/moonraker/components/mmu_ace_spool_store.py
+    cp -rf mmu_ace_sku.py moonraker/moonraker/components/mmu_ace_sku.py
+    cp -rf mmu_ace_spool_matcher.py moonraker/moonraker/components/mmu_ace_spool_matcher.py
     cp -rf mmu_ace_metadata.py moonraker/moonraker/components/mmu_ace_metadata.py
     python /opt/rinkhals/scripts/process-cfg.py moonraker.conf > /userdata/app/gk/printer_data/config/moonraker.generated.conf
     mkdir -p /userdata/app/gk/printer_data/logs
