@@ -320,6 +320,11 @@
 		busyApps = next;
 	}
 
+	// A "depends" entry can list alternatives separated by |: "a|b" reads "a or b".
+	function spellDepends(entries: string[] = []) {
+		return entries.map((e) => e.split("|").join(" or ")).join(", ");
+	}
+
 	async function callApp(id: string, path: string, init: RequestInit = {}) {
 		markBusy(id, true);
 		try {
@@ -756,7 +761,7 @@
 
 					{#if app.depends?.length}
 						<p class="text-[11px] {app.missing_depends?.length ? 'text-coral' : 'text-ink-faint'}">
-							Needs <span class="font-mono">{app.depends.join(", ")}</span>{#if app.missing_depends?.length}. Install and enable <span class="font-mono">{app.missing_depends.join(", ")}</span> to use this app{/if}
+							Needs <span class="font-mono">{spellDepends(app.depends)}</span>{#if app.missing_depends?.length}. Install and enable <span class="font-mono">{spellDepends(app.missing_depends)}</span> to use this app{/if}
 						</p>
 					{/if}
 					{#if app.dependents?.length}
@@ -944,7 +949,7 @@
 
 						{#if entry.depends?.length}
 							<p class="text-[11px] {entry.missing_depends?.length ? 'text-coral' : 'text-ink-faint'}">
-								Needs <span class="font-mono">{entry.depends.join(", ")}</span>{#if entry.missing_depends?.length}. Install <span class="font-mono">{entry.missing_depends.join(", ")}</span> first{/if}
+								Needs <span class="font-mono">{spellDepends(entry.depends)}</span>{#if entry.missing_depends?.length}. Install <span class="font-mono">{spellDepends(entry.missing_depends)}</span> first{/if}
 							</p>
 						{/if}
 
@@ -970,7 +975,7 @@
 									type="button"
 									onclick={() => installCatalogApp(entry)}
 									disabled={installing || !$printerState.can_install || !!entry.missing_depends?.length}
-									title={entry.missing_depends?.length ? `Install ${entry.missing_depends.join(", ")} first` : !$printerState.can_install ? "Disabled while printer is busy" : (upgradeAvailable ? "Upgrade to the latest version" : "Install this app")}
+									title={entry.missing_depends?.length ? `Install ${spellDepends(entry.missing_depends)} first` : !$printerState.can_install ? "Disabled while printer is busy" : (upgradeAvailable ? "Upgrade to the latest version" : "Install this app")}
 									class="flex items-center gap-1.5 px-2.5 py-1.5 bg-brand hover:bg-brand-hover text-white rounded-lg text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 								>
 									{#if installing}

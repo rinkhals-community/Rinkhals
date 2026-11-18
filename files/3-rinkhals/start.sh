@@ -384,7 +384,7 @@ for APP in $APPS; do
 
     APP_ENABLED=$(is_app_enabled $APP)
 
-    APP_MISSING_DEPENDS=$(echo $(get_app_missing_depends $APP))
+    APP_MISSING_DEPENDS=$(echo $(get_app_missing_depends $APP) | sed 's/|/ or /g')
 
     if [ "$APP_ENABLED" = "1" ] && [ -n "$APP_MISSING_DEPENDS" ]; then
         log "  - Skipped $APP ($APP_ROOT) as it needs these apps installed and enabled: $APP_MISSING_DEPENDS"

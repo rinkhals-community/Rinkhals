@@ -335,16 +335,18 @@ func loadApp(id string, state map[string]struct {
 	props := buildProperties(manifest, userCfg, tempCfg)
 
 	s := state[id]
-	dependents := dependentsOf(id, installedDepends())
+	allDepends := installedDepends()
+	enabledAndInstalled := func(dep string) bool {
+		return isAppInstalled(dep) && state[dep].Enabled
+	}
+	dependents := dependentsOf(id, allDepends, isAppInstalled)
 	var enabledDependents []string
-	for _, d := range dependents {
+	for _, d := range dependentsOf(id, allDepends, enabledAndInstalled) {
 		if state[d].Enabled {
 			enabledDependents = append(enabledDependents, d)
 		}
 	}
-	missing := missingFrom(manifest.Depends, func(dep string) bool {
-		return isAppInstalled(dep) && state[dep].Enabled
-	})
+	missing := missingFrom(manifest.Depends, enabledAndInstalled)
 
 	return &App{
 		ID:           id,
