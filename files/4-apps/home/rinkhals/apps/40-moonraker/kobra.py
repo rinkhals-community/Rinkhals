@@ -84,6 +84,49 @@ def _find_pid_by_name(process_name: str) -> int:
     return None
 
 
+STOCK_PRINTER_CFG = "/userdata/app/gk/printer.cfg"
+
+
+def read_led_gpio(path=STOCK_PRINTER_CFG):
+    """Linux GPIO number of the printer's light, from [led_pin] in the stock config.
+
+    The light hangs off the Linux board, not the MCU. Returns None when the
+    config has no such section.
+    """
+    try:
+        with open(path, 'r') as f:
+            in_section = False
+            for line in f:
+                line = line.split('#', 1)[0].strip()
+                if line.startswith('['):
+                    in_section = line == '[led_pin]'
+                elif in_section:
+                    match = re.match(r'gpio\s*[:=]\s*(\d+)$', line)
+                    if match:
+                        return int(match.group(1))
+    except OSError:
+        pass
+    return None
+
+
+def led_power_command(state, gpio):
+    """Shell command that switches the printer's light on (1) or off (0).
+
+    GoKlipper switches it through its led/set_led request. Nothing else
+    answers that request, so when gklib isn't running (Vanilla Klipper,
+    Tunneled Klipper) the Moonraker light device did nothing. In that case
+    drive the GPIO from the stock config directly.
+    """
+    gklib = ("printf '{\"method\":\"led/set_led\",\"params\":{\"S\":%d},\"id\":37}\x03'"
+             " | socat -t0 -,ignoreeof UNIX-CONNECT:/tmp/unix_uds1,escape=0x03" % state)
+    if gpio is None:
+        return gklib
+    pin = f'/sys/class/gpio/gpio{gpio}'
+    return (f"if ps | grep -q '[.]/gklib'; then {gklib}; "
+            f"else [ -d {pin} ] || {{ echo {gpio} > /sys/class/gpio/export; echo out > {pin}/direction; }}; "
+            f"echo {state} > {pin}/value; fi")
+
+
 PRINTER_MUTABLE_CFG = "/userdata/app/gk/printer_data/config/printer_mutable.cfg"
 BED_MESH_PROFILE_ALIASES = ('bed_mesh default', 'bed_mesh "default"')
 
@@ -264,6 +307,7 @@ class Kobra:
         self.get_remote_mode()
 
     async def component_init(self):
+        led_gpio = read_led_gpio()
 
         if self.KOBRA_MODEL_CODE in ('K3', 'K3M', 'K3V2'):
             # Add camera and head lights power devices for K3, K3 Max and K3 V2
@@ -277,8 +321,8 @@ class Kobra:
                 },
                 'power head_light': {
                     'type': 'shell',
-                    'power_on_command': "printf '{\"method\":\"led/set_led\",\"params\":{\"S\":1},\"id\":37}\x03' | socat -t0 -,ignoreeof UNIX-CONNECT:/tmp/unix_uds1,escape=0x03",
-                    'power_off_command': "printf '{\"method\":\"led/set_led\",\"params\":{\"S\":0},\"id\":37}\x03' | socat -t0 -,ignoreeof UNIX-CONNECT:/tmp/unix_uds1,escape=0x03",
+                    'power_on_command': led_power_command(1, led_gpio),
+                    'power_off_command': led_power_command(0, led_gpio),
                     'default_state': 'on'
                 }
             })
@@ -291,8 +335,8 @@ class Kobra:
             config = self.server.config.read_supplemental_dict({
                 'power chamber_light': {
                     'type': 'shell',
-                    'power_on_command': "printf '{\"method\":\"led/set_led\",\"params\":{\"S\":1},\"id\":37}\x03' | socat -t0 -,ignoreeof UNIX-CONNECT:/tmp/unix_uds1,escape=0x03",
-                    'power_off_command': "printf '{\"method\":\"led/set_led\",\"params\":{\"S\":0},\"id\":37}\x03' | socat -t0 -,ignoreeof UNIX-CONNECT:/tmp/unix_uds1,escape=0x03",
+                    'power_on_command': led_power_command(1, led_gpio),
+                    'power_off_command': led_power_command(0, led_gpio),
                     'default_state': 'on'
                 }
             })
