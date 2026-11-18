@@ -226,6 +226,20 @@ class MmuAceSkuSpoolIdTests(unittest.TestCase):
             with self.subTest(sku=sku):
                 self.assertEqual(sku_format.spool_id(sku, SKU.SKU_ID_FORMATS), expected)
 
+    def test_identify_names_the_format_whether_or_not_it_is_enabled(self):
+        for sku, expected in [
+            ("OS-24", ("openspool", 24)), ("SM8", ("spoolkid_ac", 8)),
+            ("THPLBR-14", ("anycubic_style", 14)), ("sm08", ("spoolkid_ac", 8)),
+            # An OS- SKU is only ever openspool: a UID or a second dash is nothing.
+            ("OS-A1", None), ("OS-2-4", None),
+            # SM- is not SpoolKid, and SM has no H, so it is not anycubic_style.
+            ("SM-8", None),
+            ("AHPLBK-105", None), ("HPL18-105", None), ("XH-25", None),
+            ("OPENSPOOL", None), ("", None), (None, None), ("SM0", None),
+        ]:
+            with self.subTest(sku=sku):
+                self.assertEqual(SKU.SkuFormat.identify(sku), expected)
+
     def test_each_format_reads_only_its_own_skus(self):
         sku_format = SKU.SkuFormat()
         skus = {"openspool": "OS-24", "spoolkid_ac": "SM8", "anycubic_style": "THPLBR-14"}

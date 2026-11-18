@@ -119,14 +119,18 @@ SKU_ID_FORMATS = ("openspool", "spoolkid_ac", "anycubic_style")
 # which do identify one roll.
 NON_IDENTIFYING_SKUS = frozenset({"OPENSPOOL"})
 
-# openspool: an OpenSpool SKU carrying a spool_id (or a chip UID, told apart by
-# the digits).
-_OPENSPOOL_SKU = re.compile(r"OS-([0-9]+)")
-# spoolkid_ac: SpoolKid's Anycubic ACE tag format, SM<spool ID> (SM8 is spool 8).
-_SPOOLKID_AC_SKU = re.compile(r"SM([0-9]+)")
-# anycubic_style: <vendor>H<filament>-<digits> on tags written by hand; the H
-# format is checked apart, by split_sku_code, so the code part is captured whole.
-_ANYCUBIC_STYLE_SKU = re.compile(r"([^-]+)-([0-9]+)")
+# Every SKU format that carries a spool ID, in one pattern: the named group that
+# holds the digits is the format's name, so one match says both which format a
+# SKU is and what its ID is.
+# - openspool: OS-<digits>, an OpenSpool spool_id. Tried first, so any OS- SKU is
+#   decided here: OS-A1 (a chip UID) or OS-2-4 matches nothing at all.
+# - spoolkid_ac: SM<digits>, SpoolKid's Anycubic ACE tag format (SM8 is spool 8).
+# - anycubic_style: <vendor>H<filament>-<digits> on tags written by hand; the H
+#   format is checked apart, by split_sku_code, so the code part is captured whole.
+_SPOOL_ID_SKU = re.compile(
+    r"OS-(?P<openspool>[0-9]+)"
+    r"|SM(?P<spoolkid_ac>[0-9]+)"
+    r"|(?P<code>[^-]+)-(?P<anycubic_style>[0-9]+)")
 # Largest ID read from a SKU; beyond a 32-bit row ID it is a UID, not a spool.
 MAX_SPOOL_ID = 2**31 - 1
 
@@ -310,37 +314,47 @@ class SkuFormat:
         - anycubic_style reads <vendor>H<filament>-<digits> for tags written by
           hand (ATHPLBK-25). A SKU with no H (ATPLBK-25) is not that format.
 
-        Whatever the formats, a SKU whose vendor code (before its first H) is
-        empty or "A" is never read: that is a stock Anycubic SKU, and its number
-        is a product code (#107). OPENSPOOL carries nothing.
+        The SKU's format is worked out once (see identify), and its ID is
+        returned only if that format is enabled. Whatever the formats, a stock
+        Anycubic SKU (vendor code empty or "A") is never read, since its number is
+        a product code (#107), and OPENSPOOL carries nothing.
         """
-        sku = (sku or "").strip().upper()
         # The matcher passes its parsed set on every gate change; parse only what
         # has not been parsed, so a bad setting is warned about once, at load.
         if not isinstance(formats, frozenset):
             formats = parse_sku_id_formats(formats)
-        if not formats or not sku or sku in NON_IDENTIFYING_SKUS:
+        if not formats:
             return None
+        identified = self.identify(sku)
+        if identified is None or identified[0] not in formats:
+            return None
+        return identified[1]
 
-        found = None
-        if sku.startswith("OS-"):
-            if "openspool" in formats:
-                found = _OPENSPOOL_SKU.fullmatch(sku)
-        else:
-            vendor, has_h, _ = sku.partition("-")[0].partition("H")
-            if has_h and vendor in STOCK_ANYCUBIC_VENDOR_CODES:
-                return None
-            if "anycubic_style" in formats:
-                found = _ANYCUBIC_STYLE_SKU.fullmatch(sku)
-                if found is not None and split_sku_code(found.group(1)) is None:
-                    found = None
-            if found is None and "spoolkid_ac" in formats:
-                found = _SPOOLKID_AC_SKU.fullmatch(sku)
+    @staticmethod
+    def identify(sku: str) -> Optional[tuple]:
+        """(format name, spool ID) for a SKU in one of SKU_ID_FORMATS, or None.
+
+        Says what the SKU is, whether or not that format is enabled; spool_id
+        decides whether to read it. None for anything that carries no usable ID:
+        no format fits, a stock Anycubic SKU (vendor code empty or "A": its number
+        is a product code, #107), an H-format SKU with nothing after the H, the
+        literal OPENSPOOL, or an ID outside 1 to MAX_SPOOL_ID.
+        """
+        sku = (sku or "").strip().upper()
+        if not sku or sku in NON_IDENTIFYING_SKUS:
+            return None
+        found = _SPOOL_ID_SKU.fullmatch(sku)
         if found is None:
             return None
-        # Every pattern ends in the digit group.
-        spool_id = int(found.group(found.lastindex))
+        sku_format = found.lastgroup
+        if sku_format == "anycubic_style":
+            split = split_sku_code(found.group("code"))
+            if split is None or split[0] in STOCK_ANYCUBIC_VENDOR_CODES:
+                return None
+        spool_id = int(found.group(sku_format))
         # An all-digit chip UID (OS-04123456789012) also fits the pattern. No
         # Spoolman ID gets that large, and asking for one risks a validation error
         # rather than a 404 - which reads as an outage and is retried every poll.
-        return spool_id if 0 < spool_id <= MAX_SPOOL_ID else None
+        if not 0 < spool_id <= MAX_SPOOL_ID:
+            return None
+        return sku_format, spool_id
