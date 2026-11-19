@@ -159,9 +159,11 @@ func handleServices(w http.ResponseWriter, r *http.Request) {
 			{"id": "50-remote-display", "name": "Remote Display", "status": "Stopped"},
 		}
 
+		// From the remembered app states: this used to start a shell per
+		// service on every poll of the dashboard (see appstates.go)
+		states := cachedAppStates()
 		for _, s := range services {
-			out, err := exec.Command("sh", "-c", "source /useremain/rinkhals/.current/tools.sh && get_app_status "+s["id"]).CombinedOutput()
-			if err == nil && strings.Contains(string(out), "started") {
+			if states[s["id"]].Running {
 				s["status"] = "Running"
 			}
 		}
@@ -175,16 +177,38 @@ func handleServices(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	cmdStr := fmt.Sprintf("source /useremain/rinkhals/.current/tools.sh && %s_app %s", req.Action, req.Service)
+	// Both values go into a shell command, so neither is taken as given: the
+	// action must be one we know, and the service a plain app id.
+	if !isServiceAction(req.Action) || !isSafeKey(req.Service) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"output":  "Unknown action or service",
+		})
+		return
+	}
+	service := shellQuote(req.Service)
+	cmdStr := fmt.Sprintf(". %s && %s_app %s", toolsSh, req.Action, service)
 	if req.Action == "restart" {
-		cmdStr = fmt.Sprintf("source /useremain/rinkhals/.current/tools.sh && stop_app %s && sleep 1 && start_app %s", req.Service, req.Service)
+		cmdStr = fmt.Sprintf(". %s && stop_app %s && sleep 1 && start_app %s", toolsSh, service, service)
 	}
 
 	out, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
+	invalidateAppStates()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": err == nil,
 		"output":  string(out),
 	})
+}
+
+// isServiceAction tells whether the dashboard may ask for this action on a
+// service. Each one but "restart" names a tools.sh function, <action>_app.
+func isServiceAction(action string) bool {
+	switch action {
+	case "start", "stop", "restart", "enable", "disable":
+		return true
+	}
+	return false
 }
 
 func handleLogStream(w http.ResponseWriter, r *http.Request) {

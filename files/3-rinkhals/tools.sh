@@ -1,11 +1,42 @@
 export RINKHALS_ROOT=$(realpath /useremain/rinkhals/.current)
-export RINKHALS_VERSION=$(cat $RINKHALS_ROOT/.version)
+
+# Reads the first line of file $2 into variable $1, without starting a process.
+# This file is loaded by every login shell, every SSH command and every app.sh
+# call, and the stock firmware restarts a login shell on its unused console
+# about once a second, forever. Each "$(cat ...)" here used to cost the printer
+# a process every time, so the values below are read with shell builtins.
+read_first_line() {
+    eval "$1="
+    [ -r "$2" ] || return 0
+    IFS= read -r "$1" < "$2" || true
+}
+
+read_first_line RINKHALS_VERSION $RINKHALS_ROOT/.version
+export RINKHALS_VERSION
 export RINKHALS_HOME=/useremain/home/rinkhals
 export RINKHALS_LOGS=/tmp/rinkhals
 
 export ROOT_HOME=/useremain/home/root
 
-export KOBRA_MODEL_ID=$(cat /userdata/app/gk/config/api.cfg | sed -nr 's/.*"modelId"\s*:\s*"([0-9]+)".*/\1/p')
+# The model id is the number in the line  "modelId" : "20025"  of api.cfg
+KOBRA_MODEL_ID=
+if [ -r /userdata/app/gk/config/api.cfg ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            *'"modelId"'*)
+                _line=${_line#*\"modelId\"}
+                _line=${_line#*\"}
+                _line=${_line%%\"*}
+                case "$_line" in
+                    ''|*[!0-9]*) ;;
+                    *) KOBRA_MODEL_ID=$_line; break ;;
+                esac
+                ;;
+        esac
+    done < /userdata/app/gk/config/api.cfg
+fi
+unset _line
+export KOBRA_MODEL_ID
 
 if [ "$KOBRA_MODEL_ID" == "20021" ]; then
     export KOBRA_MODEL="Anycubic Kobra 2 Pro"
@@ -27,8 +58,9 @@ elif [ "$KOBRA_MODEL_ID" == "20029" ]; then
     export KOBRA_MODEL_CODE=KS1M
 fi
 
-export KOBRA_VERSION=$(cat /useremain/dev/version)
-export KOBRA_DEVICE_ID=$(cat /useremain/dev/device_id 2> /dev/null)
+read_first_line KOBRA_VERSION /useremain/dev/version
+read_first_line KOBRA_DEVICE_ID /useremain/dev/device_id
+export KOBRA_VERSION KOBRA_DEVICE_ID
 
 export ORIGINAL_ROOT=/tmp/rinkhals/original
 
