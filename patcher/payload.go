@@ -54,6 +54,7 @@ func (a *assembler) word(w uint32) {
 func (a *assembler) bl(target uint64)  { a.word(BranchLink(a.addr, target)) }
 func (a *assembler) b(target uint64)   { a.word(Branch(a.addr, target)) }
 func (a *assembler) beq(target uint64) { a.word(BranchEqual(a.addr, target)) }
+func (a *assembler) bne(target uint64) { a.word(BranchNotEqual(a.addr, target)) }
 
 // system emits system(str): the string address sits in a literal word that the
 // code jumps over.
@@ -67,10 +68,11 @@ func (a *assembler) system(str, system uint64) {
 // installPayload writes the payload and points the hook at it. If it returns
 // an error, the edits it made so far are dropped.
 //
+//	(pageIsRow only) if this isn't the Support row, go back
 //	system("rinkhals-ui.sh & echo $! > pid")
 //	do { OsSleep(100) } while (system("timeout -t 2 strace -p $(cat pid)") == 15)
 //	system("rm -f pid")
-//	this->AcDisplayWaitHandler(1, 4); this->AcDisplayWaitHide(4)
+//	this->AcDisplayWaitHandler(1, 4); hide the wait overlay again
 //	continue after the Support row
 //
 // strace exits when the UI process does; timeout kills it with SIGTERM (15)
@@ -95,7 +97,7 @@ func (p *Patcher) installPayload(h *hook) (err error) {
 	if err != nil {
 		return err
 	}
-	waitHandler, err := need("_ZN10MainWindow20AcDisplayWaitHandlerEhh")
+	waitHandler, err := need(symWaitHandler)
 	if err != nil {
 		return err
 	}
@@ -125,6 +127,11 @@ func (p *Patcher) installPayload(h *hook) (err error) {
 	entry := (addr + 4) &^ 3
 
 	a := &assembler{p: p, addr: entry, end: end}
+	if g := h.guard; g != nil {
+		a.word(g.replaced)
+		a.word(CmpImm(g.reg, uint32(g.row)))
+		a.bne(g.resume)
+	}
 	a.system(strs[0], system)
 	loop := a.addr
 	a.word(MovImm(0, 100))
@@ -144,12 +151,15 @@ func (p *Patcher) installPayload(h *hook) (err error) {
 	for _, inst := range h.loadThis {
 		a.word(inst)
 	}
-	a.word(MovImm(1, 4))
+	a.word(MovImm(1, h.layout.waitHideArg))
 	a.bl(waitHide)
 
 	a.b(h.returnTo)
 	if a.err != nil {
 		return a.err
+	}
+	if h.ifEqual {
+		return p.write32(h.site, BranchEqual(h.site, entry))
 	}
 	return p.write32(h.site, Branch(h.site, entry))
 }

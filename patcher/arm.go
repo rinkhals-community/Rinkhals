@@ -2,10 +2,11 @@ package main
 
 // ARM32 (A32, little-endian) instruction encoders and decoders. Only what the
 // patcher needs; every encoding here is checked against the static patches by
-// validate.sh.
+// validate.py.
 
 const (
 	condEQ = 0x0
+	condNE = 0x1
 	condAL = 0xE
 )
 
@@ -23,6 +24,9 @@ func BranchLink(from, to uint64) uint32 { return branchWord(condAL, 1, from, to)
 
 // BranchEqual encodes "beq to" placed at from.
 func BranchEqual(from, to uint64) uint32 { return branchWord(condEQ, 0, from, to) }
+
+// BranchNotEqual encodes "bne to" placed at from.
+func BranchNotEqual(from, to uint64) uint32 { return branchWord(condNE, 0, from, to) }
 
 // MovImm encodes "mov rd, #imm" for an 8-bit immediate.
 func MovImm(rd, imm uint32) uint32 { return 0xE3A00000 | rd<<12 | imm&0xFF }

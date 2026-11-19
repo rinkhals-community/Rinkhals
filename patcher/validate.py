@@ -86,14 +86,32 @@ def branch_target(word, vma):
     return vma + 8 + imm * 4
 
 
+def lands_at(elf, vma):
+    """Follow no-ops and unconditional branches from vma to the first real
+    instruction."""
+    for _ in range(8):
+        off = file_offset(elf, vma)
+        if off is None:
+            return None
+        word = struct.unpack_from('<I', elf, off)[0]
+        if word in (0xE1A00000, 0xE320F000):  # nop
+            vma += 4
+        elif word >> 24 == 0xEA:    # b
+            vma = branch_target(word, vma)
+        else:
+            return vma
+    return None
+
+
 def explain(stock, ours, ref):
     """Return None if every difference from the static patch is harmless.
 
     Two kinds are:
     - Bytes of the old menu label after the new label's terminator. The static
       generator also rewrites a leftover "Support" there; nothing reads it.
-    - The payload's final branch going to the Support row's exit target where
-      the static patch goes to the row's closing branch, which jumps there.
+    - The payload's final branch going straight to where the Support row's code
+      ends up, where the static patch goes to a no-op or a branch on the way
+      there.
     """
     diffs = [i for i in range(len(ref)) if ours[i] != ref[i]]
     tails = set()
@@ -109,12 +127,9 @@ def explain(stock, ours, ref):
         a, b = struct.unpack_from('<I', ours, word)[0], struct.unpack_from('<I', ref, word)[0]
         vma = vma_of(stock, word)
         if a >> 24 == 0xEA and b >> 24 == 0xEA and vma is not None:
-            ours_to, ref_to = branch_target(a, vma), branch_target(b, vma)
-            off = file_offset(stock, ref_to)
-            if off is not None:
-                closing = struct.unpack_from('<I', stock, off)[0]
-                if closing >> 24 == 0xEA and branch_target(closing, ref_to) == ours_to:
-                    return None
+            ours_to, ref_to = lands_at(stock, branch_target(a, vma)), lands_at(stock, branch_target(b, vma))
+            if ours_to is not None and ours_to == ref_to:
+                return None
     return '%d bytes differ, first at 0x%x' % (len(rest), rest[0])
 
 

@@ -3,14 +3,10 @@
 #
 # K3SysUi, Kobra 3 family: equivalent. The static patch also rewrites the
 # unreachable tail of the old label, and on older builds returns through the
-# Support row's closing branch instead of straight to its target.
+# Support row's closing branch instead of straight to where it goes.
 #
-# K3SysUi, Kobra 2 Pro: declined. Its menu is not a lambda with a saved closure
-# and the static patch hooks a conditional branch inside the row; the model has
-# seen no firmware since 3.1.4, so the patcher doesn't try.
-#
-# K3SysUi, Kobra S1 up to 2.5.8.8: declined. Service Support was on the General
-# page, which has no jump table.
+# K3SysUi, Kobra 2 Pro: equivalent, for the second reason: the payload returns
+# straight to the end of the row's code.
 #
 # K3SysUi, KS1 2.5.9.9, 2.6.0.0 and KS1M 2.1.6: DIFFERENT. The static patch
 # hooks five instructions into the Support row, behind a row check that is
@@ -19,8 +15,8 @@
 #
 # gkapi: declined where the build has no orcaSim server, so nothing listens on
 # port 80. Those builds have no static gkapi patch either.
-K3SysUi.K2P_3.1.2.3 declined
-K3SysUi.K2P_3.1.4 declined
+K3SysUi.K2P_3.1.2.3 equivalent
+K3SysUi.K2P_3.1.4 equivalent
 K3SysUi.K3_2.4.0 equivalent
 K3SysUi.K3_2.4.0.4 equivalent
 K3SysUi.K3_2.4.1.9 equivalent
@@ -41,13 +37,6 @@ K3SysUi.K3V2_1.0.9.7 equivalent
 K3SysUi.K3V2_1.1.0.1 equivalent
 K3SysUi.K3V2_1.1.0.4 equivalent
 K3SysUi.K3V2_1.1.2.8 equivalent
-K3SysUi.KS1_2.5.2.3 declined
-K3SysUi.KS1_2.5.3.1 declined
-K3SysUi.KS1_2.5.3.5 declined
-K3SysUi.KS1_2.5.3.8 declined
-K3SysUi.KS1_2.5.6.0 declined
-K3SysUi.KS1_2.5.6.4 declined
-K3SysUi.KS1_2.5.8.8 declined
 K3SysUi.KS1_2.5.9.9 DIFFERENT
 K3SysUi.KS1_2.6.0.0 DIFFERENT
 K3SysUi.KS1M_2.1.6 DIFFERENT

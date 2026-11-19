@@ -3,13 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log"
 )
 
 var errAlreadyPatched = errors.New("already patched")
-
-const menuLabel = "Rinkhals"
 
 // PatchUI adds the Rinkhals entry to K3SysUi's settings menu. Everything is
 // located and checked first; the binary is only modified once the whole patch
@@ -28,39 +25,29 @@ func (p *Patcher) PatchUI() error {
 	if err := p.installPayload(h); err != nil {
 		return err
 	}
-	if err := p.relabel(h.layout.label, menuLabel); err != nil {
+	// The bytes after the new label's terminator are left as they were, like
+	// the static patches did.
+	if err := p.writeAt(h.labelAt, append([]byte(h.layout.newLabel), 0)); err != nil {
 		return err
 	}
 	p.patchIsCustomFirmware()
 	return nil
 }
 
-// labelOffset returns the file offset of a NUL-terminated string in .rodata.
+// labelOffset returns the file offset of a whole NUL-terminated string in
+// .rodata: the first place where s sits between two NULs.
 func (p *Patcher) labelOffset(s string) (uint64, bool) {
 	rodata := p.f.Section(".rodata")
 	if rodata == nil {
 		return 0, false
 	}
-	idx := bytes.Index(p.data[rodata.Offset:rodata.Offset+rodata.Size], append([]byte(s), 0))
+	data := p.data[rodata.Offset : rodata.Offset+rodata.Size]
+	needle := append(append([]byte{0}, s...), 0)
+	idx := bytes.Index(data, needle)
 	if idx < 0 {
 		return 0, false
 	}
-	return rodata.Offset + uint64(idx), true
-}
-
-func (p *Patcher) hasCString(s string) bool {
-	_, ok := p.labelOffset(s)
-	return ok
-}
-
-// relabel overwrites the start of a menu label with a shorter one. The bytes
-// after the new terminator are left as they were, like the static patches do.
-func (p *Patcher) relabel(old, new string) error {
-	off, ok := p.labelOffset(old)
-	if !ok || len(new) > len(old) {
-		return fmt.Errorf("can't relabel %q", old)
-	}
-	return p.writeAt(off, append([]byte(new), 0))
+	return rodata.Offset + uint64(idx) + 1, true
 }
 
 // patchIsCustomFirmware makes GobalVar::isCustomFirmware() return 0. On the
