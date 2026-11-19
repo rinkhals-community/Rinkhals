@@ -248,17 +248,40 @@ kill_by_port() {
     kill_by_id $PID $SIGNAL
 }
 
+# Resets the printer's MCUs through the reset line the mainboard gives Linux.
+# Returns 1 on models where we don't know that line.
+reset_mcus() {
+    case "$KOBRA_MODEL_CODE" in
+        KS1) MCU_RESET_GPIO=116 ;;
+        *) return 1 ;;
+    esac
+
+    [ -d /sys/class/gpio/gpio$MCU_RESET_GPIO ] || echo $MCU_RESET_GPIO > /sys/class/gpio/export
+    echo out > /sys/class/gpio/gpio$MCU_RESET_GPIO/direction
+    echo 0 > /sys/class/gpio/gpio$MCU_RESET_GPIO/value
+    sleep 1
+    echo 1 > /sys/class/gpio/gpio$MCU_RESET_GPIO/value
+}
+
+# Waits for something to listen on unix socket $1, for $2 ms. On a timeout it
+# logs $3 and quits, unless $3 is "return": then it only returns 1
 wait_for_socket() {
     DELAY=250
     TOTAL=${2:-30000}
 
     while [ 1 ]; do
-        timeout -t 1 socat $1 $1 2> /dev/null
+        # Only probe a socket that exists: given a path with nothing there,
+        # socat creates an empty file, which then is in the way of the socket
+        [ -S $1 ] && timeout -t 1 socat $1 $1 2> /dev/null
         if [ "$?" -gt 127 ]; then
             return
         fi
 
         if [ "$TOTAL" -lt 0 ]; then
+            if [ "$3" = "return" ]; then
+                return 1
+            fi
+
             if [ "$3" != "" ]; then
                 log "$3"
             else
