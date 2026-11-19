@@ -10,13 +10,6 @@ build/dev.md
 build/1-buildroot/rebuild
 build/1-buildroot/rootfs/rootfs.tar.gz
 
-# Patches system
-files/3-rinkhals/opt/rinkhals/patches/K3SysUi.*.[0-9]
-files/3-rinkhals/opt/rinkhals/patches/K3SysUi.*.patch
-files/3-rinkhals/opt/rinkhals/patches/gk*.*.[0-9]
-files/3-rinkhals/opt/rinkhals/patches/gk*.*.patch
-files/3-rinkhals/opt/rinkhals/patches/cache_*.json
-
 # App specific
 files/4-apps/home/rinkhals/apps/40-moonraker/bin
 

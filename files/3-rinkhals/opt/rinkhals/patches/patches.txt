@@ -1,0 +1,104 @@
+# The Anycubic binaries Rinkhals patches at startup, for every firmware it has
+# been checked on. start.sh reads this file; patcher/validate.py maintains it.
+#
+#   binary  model  firmware  MD5 of the stock binary  result
+#
+# result is the MD5 rinkhals-patcher must produce from that stock binary, or:
+#   unpatched   nothing to change in this binary on this firmware
+#   unverified  patched, but the result has not been recorded yet because we
+#               have no copy of this firmware to run the patcher on
+#
+# A firmware that isn't listed is one Rinkhals hasn't been checked on. If it is
+# started anyway, the patcher runs without a result to compare with.
+K3SysUi K2P  3.1.2.3  f8f1bc1dd2af13201f4f58ee4f79ed66 df4b8ef59e225e4a9cdd1ce17bd7d360
+K3SysUi K2P  3.1.4    690354025e73d8b8e970d236b75f1b87 3ff53ab31000ef9043dd0444ab165722
+K3SysUi K3   2.4.0    9ae93aa475d994aeba1a9e38013b0db8 787822103723475e553a18cec69275e2
+K3SysUi K3   2.4.0.4  1d990eda4e4c4240efbaa0852fba2b2f b557baa6e04b8c877c8adb301f8990cf
+K3SysUi K3   2.4.1.9  1f628e70311f52d934e851d232f66da3 f154746063739ee1113ea787ec019cc2
+K3SysUi K3   2.4.4.3  dd49d388d7f9c8c7c35f21cd984bfe43 feb9334532b29c9b185fd1327f20459d
+K3SysUi K3   2.4.4.7  726d5e85a0207178f3950e9d728e1f9e 81d31e0119cefbd0f07d0486dac6f62b
+K3SysUi K3   2.4.5    a922d283682f2d9cc78bf70fd32b2b8d a37a8f577a603cdaa7149520718366a2
+K3SysUi K3   2.4.6.4  0c94572665312b25074ccd9ad54cf27c unverified
+K3SysUi K3   2.4.6.7  61ef528ac60075a4c2faf5fa0e30a90f f50976f0cc58b50752262128c0c335d7
+K3SysUi K3M  2.4.6    9ae93aa475d994aeba1a9e38013b0db8 787822103723475e553a18cec69275e2
+K3SysUi K3M  2.4.6.5  1d990eda4e4c4240efbaa0852fba2b2f b557baa6e04b8c877c8adb301f8990cf
+K3SysUi K3M  2.4.8.4  1f628e70311f52d934e851d232f66da3 f154746063739ee1113ea787ec019cc2
+K3SysUi K3M  2.5.0.9  dd49d388d7f9c8c7c35f21cd984bfe43 feb9334532b29c9b185fd1327f20459d
+K3SysUi K3M  2.5.1.3  726d5e85a0207178f3950e9d728e1f9e 81d31e0119cefbd0f07d0486dac6f62b
+K3SysUi K3M  2.5.1.7  a922d283682f2d9cc78bf70fd32b2b8d a37a8f577a603cdaa7149520718366a2
+K3SysUi K3M  2.5.2.8  61ef528ac60075a4c2faf5fa0e30a90f f50976f0cc58b50752262128c0c335d7
+K3SysUi K3V2 1.0.5.8  1d990eda4e4c4240efbaa0852fba2b2f b557baa6e04b8c877c8adb301f8990cf
+K3SysUi K3V2 1.0.7.3  1f628e70311f52d934e851d232f66da3 f154746063739ee1113ea787ec019cc2
+K3SysUi K3V2 1.0.9.7  dd49d388d7f9c8c7c35f21cd984bfe43 feb9334532b29c9b185fd1327f20459d
+K3SysUi K3V2 1.1.0.1  726d5e85a0207178f3950e9d728e1f9e 81d31e0119cefbd0f07d0486dac6f62b
+K3SysUi K3V2 1.1.0.4  a922d283682f2d9cc78bf70fd32b2b8d a37a8f577a603cdaa7149520718366a2
+K3SysUi K3V2 1.1.2.5  0c94572665312b25074ccd9ad54cf27c unverified
+K3SysUi K3V2 1.1.2.7  e561df478a385b6cd7fa7f21899c237d unverified
+K3SysUi K3V2 1.1.2.8  61ef528ac60075a4c2faf5fa0e30a90f f50976f0cc58b50752262128c0c335d7
+K3SysUi KS1  2.5.2.3  d316681f09f4bdc9c6427771ff1ba8d9 2e53c775c1c485623188a2e640c9db42
+K3SysUi KS1  2.5.3.1  974d1ef2afa63cb8944079644f3cd8c0 ed105efbb9812ab3ffa7939b19d8578e
+K3SysUi KS1  2.5.3.5  fc674464a870227bf4c860f2086863de 807d278614cce561376af31c5ce1365b
+K3SysUi KS1  2.5.3.8  9eb5d42eca4339ddcfda3edf08c3e407 1aab9cb312888a16afd3992d97f67256
+K3SysUi KS1  2.5.6.0  3dd4b5aed396761f04d580f64f16d643 41cd56d715b577800bc9a4ed2e102506
+K3SysUi KS1  2.5.6.4  b7d4fb56942f64b2b25f5f4d29e82923 92c3a1db9d65016782593fe498fbcd6b
+K3SysUi KS1  2.5.8.8  9d2ff7d2f92c10f709efb3f0003987da a055e33a167a4a208831e5a320fc9788
+K3SysUi KS1  2.5.9.9  eafc70a0ccee6233f4435c4d4e83a231 abe775cd12ccd597c9a2d2c25da1434c
+K3SysUi KS1  2.6.0.0  0c5ce88260bbd01532ba608ac946109e 55bab0697b99db03a3476b5218e427eb
+K3SysUi KS1  2.7.0.7  ba950ecf676fe8f9fd3b92b39dea5d1f unverified
+K3SysUi KS1  2.7.0.9  037ed5133322f457de1bbe8498e54590 7589e45908722e15fd06c45ec9786c44
+K3SysUi KS1  2.7.2.1  429fdc2bb6bdba40b7d695a91bb7a3e4 d57b5f7bb64adfd3c1b44dcd869ea417
+K3SysUi KS1  2.7.2.7  1bd84d3856b09a13a634143bb42378e5 e4f32d218e073b43eafc7d5e98ee5293
+K3SysUi KS1  2.7.3.5  a78d7022704e4d53e9f43b22ea22c698 40c321058549e103819d8cd44071cc43
+K3SysUi KS1M 2.1.6    92d9dd4d001dd0d5bcd7b6aa52b2c05b 6b332a9ba341b58c0cad7a5b92b94c5d
+K3SysUi KS1M 2.6.6    2b7695b63c8587622b7c5bba5d0dec2e 716229218804a960ed965617e496528e
+K3SysUi KS1M 2.6.9.3  25aebde23301907ec74161bdf4a61ee6 23cdc2c7f11f7462b235f30b94857bad
+K3SysUi KS1M 2.6.9.6  501e7f3c1acef958f3cd93be9a00a200 7f1802db0a8fa39bfc8fce0133584df7
+K3SysUi KS1M 2.7.1.4  b970de9971fbd988e42b687ab63afce4 3332d0ac6b1c029b336604942f16596a
+K3SysUi KS1M 2.7.2.1  46fedd9f95d6c582dd20a254270646bc aecea3e7630027fa463ec2f8e47ff0a0
+K3SysUi KS1M 2.7.2.6  62640d466c8617c518f802f1c80cc68c 91807d6c14af62d5b26c0c6143c4e4ea
+gkapi   K2P  3.1.2.3  ed1062d238940a61ca810912b13c477c unpatched
+gkapi   K2P  3.1.4    7ba3b9aca8614e57efe4754682ebf17f unpatched
+gkapi   K3   2.4.0    8905f7ebd7171d04b267944c0a493e6c unpatched
+gkapi   K3   2.4.0.4  9d62f3927c0bf575c0dfedaebfeb293e unpatched
+gkapi   K3   2.4.1.9  de836872712bd0e998d7380821493e71 unpatched
+gkapi   K3   2.4.4.3  4ea16d05b7a0285289579e3b4ebe91bb unpatched
+gkapi   K3   2.4.4.7  c6732b9d419fed042b5cc55db857280e 6da1bee35930cfc63df8ddc4c1a3debc
+gkapi   K3   2.4.5    1c3e02d598b05c163bbce78f8d71a86a 25ade4dbeb3c495c23b6cbc03eb4f90a
+gkapi   K3   2.4.6.4  996da425632d3060e0b33f13813a1f26 ab2d2da8a9cb035ecd5b9fefb16e9c4e
+gkapi   K3   2.4.6.7  25b5e89b7f25ebcb0e45f26dac5fabe6 848c08121f8d050624a8a40c0018a1cc
+gkapi   K3M  2.4.6    267723e4108f27650da82656eb77644a unpatched
+gkapi   K3M  2.4.6.5  c2e0a4cf92f46f06c090690a29248932 unpatched
+gkapi   K3M  2.4.8.4  4d91f390d6d6a56db4737ebcf8d257dd unpatched
+gkapi   K3M  2.5.0.9  3ba253227e2a915470e25856a52fcc35 unpatched
+gkapi   K3M  2.5.1.3  f4e11d9b85f4c25ece1168b77b3cc166 add4c12d9cc4bac921c117a719793e1a
+gkapi   K3M  2.5.1.7  1bbc9f9762610c94a4ae640fff02049b 4eb69fbf4da95bdd329150d683c3707d
+gkapi   K3M  2.5.2.8  1347aeab7c2fada74f2beb807ce393fb 36668b96f37c61723fb0b9dc0e44ccba
+gkapi   K3V2 1.0.5.8  2adb533291cba14eca3ff0ef158fe08c unpatched
+gkapi   K3V2 1.0.7.3  c83c7a9a062e302178eff35d020e0235 unpatched
+gkapi   K3V2 1.0.9.7  cb1c9b37dc424a96fbd8898530c5bc0e unpatched
+gkapi   K3V2 1.1.0.1  5ef080dce06b6a8bcc930c10db513ab8 1c9b7c133fa7ae0025823acaf4f775d6
+gkapi   K3V2 1.1.0.4  dc7c5367bc041577bfb21a37375c5865 7f35a084d7f378851a974f93fea3c416
+gkapi   K3V2 1.1.2.5  a124545f5aca1e7aa1190d07947c20a5 04c36f0bdbec43816ad7d566dcaeb8c9
+gkapi   K3V2 1.1.2.7  14042e624873c36b2492bcada9a65e1f 99808d3f247d05b6f17cbe9da615c9da
+gkapi   K3V2 1.1.2.8  0cebcfbb44ae5ceb3f582ffedaeb6cf2 5c96db99cd98411e834958c074be054a
+gkapi   KS1  2.5.2.3  9b9803336f92c55bc2c031213bc0ad50 unpatched
+gkapi   KS1  2.5.3.1  c60d6621eab246d882bd55e07efd4651 unpatched
+gkapi   KS1  2.5.3.5  47f57edcda7b71d4bd4e0bb9d74df1d9 unpatched
+gkapi   KS1  2.5.3.8  44dabf3f4db7eeafc6d78f275484383f unpatched
+gkapi   KS1  2.5.6.0  3a066082bf0821b5d52f2caa11420824 unpatched
+gkapi   KS1  2.5.6.4  8d7028fe8b646fe31a3667cbbec35077 unpatched
+gkapi   KS1  2.5.8.8  d7e6b51cff19cf08fa8ceaf61deca000 unpatched
+gkapi   KS1  2.5.9.9  1d3bbe1f5a2255bc3cf6fe8464cd9181 3dd2b37cf02ac81029ad1b933746dcce
+gkapi   KS1  2.6.0.0  c705689d74cce5f098fc685753b274b2 cf0eb0222219691a910097d95cb051b7
+gkapi   KS1  2.7.0.7  988971db76662cbbd8d3ef07ed4b6385 82f7a1077be7654e4edb545db553a1d9
+gkapi   KS1  2.7.0.9  19946492d97226450d9ec6eb63305e67 1d3b9cf0f5df130a1cb844ec3c0a57cd
+gkapi   KS1  2.7.2.1  5d65e665bf3343ac2920c4896ce1efca fb62c1b74271d3f9bffff996273f6984
+gkapi   KS1  2.7.2.7  efa64b0be1a947e34127379986fc7257 7664502a40b756946a1588d33205d714
+gkapi   KS1  2.7.3.5  1b4c6496442fd712b2eaae5ff645e80a 5887354547d73ef2b4283a6b84bf4cdc
+gkapi   KS1M 2.1.6    49fb8e909b47bc16ec4d02287b1bc1ac c6455a1cdf64c5a1969335c30cd2d571
+gkapi   KS1M 2.6.6    4768499bf8f7f191dbaddcc77c06dbc0 f3163e53b09fb308ed32f73dec725dd5
+gkapi   KS1M 2.6.9.3  8b4a567cef8127ce97fa8c8f20af71d7 2a96fbade3bb6b059bfb8c01faa357e1
+gkapi   KS1M 2.6.9.6  31980ee1f7457e261c70d8f3cf63ad80 e30c5a50dabec035a8d2592b4ea72223
+gkapi   KS1M 2.7.1.4  1494c17cdda2275b5ae221f40b83887d 349a80a4beb01c33a39c5294fb933f30
+gkapi   KS1M 2.7.2.1  3d2de27fd6e5052fc6b4868d805000b3 eb6bdf6cff1a99940a3cb934b582e160
+gkapi   KS1M 2.7.2.6  b338e0fad8b2bc9bd05822b1337afea8 e9db15da07d600b352232a9f64d10b88

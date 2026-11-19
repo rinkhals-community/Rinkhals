@@ -279,83 +279,79 @@ file_md5() {
     md5sum $1 2> /dev/null | awk '{print $1}'
 }
 
+# Patch gkapi and K3SysUi
+# The patcher finds what to change in the binaries itself, and never touches the file it is given
+# For a firmware Rinkhals has been checked on, patches.txt has the MD5 of the stock binary and the MD5
+# the patched copy must have, and anything else is refused
+# For any other firmware (only when forced with .enable-rinkhals) there is nothing to compare with:
+# the patcher still refuses what it can't verify, and then the binary starts unpatched
+
 PATCHER=/opt/rinkhals/tools/rinkhals-patcher
+PATCHES=/opt/rinkhals/patches/patches.txt
+
+# A complete, unpatched binary: the stock MD5 when we know it, else what the patcher makes of it
+is_stock() {
+    if [ -n "$STOCK_MD5" ]; then
+        [ "$(file_md5 $1)" = "$STOCK_MD5" ]
+    else
+        $PATCHER --check --binary $1 > /dev/null 2>&1
+    fi
+}
 
 for TARGET in $TARGETS; do
-    TARGET_PATCH=/opt/rinkhals/patches/${TARGET}.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh
+    KNOWN=$(awk -v t=$TARGET -v m=$KOBRA_MODEL_CODE -v v=$KOBRA_VERSION '$1 == t && $2 == m && $3 == v { print $4 " " $5 }' $PATCHES 2> /dev/null)
+    STOCK_MD5=${KNOWN% *}
+    PATCHED_MD5=${KNOWN#* }
 
-    if [ -f $TARGET_PATCH ]; then
-        # Little dance to patch binaries
-        # We should be able to delete the file after starting it, Linux will keep the inode alive until the process exits (https://stackoverflow.com/a/196910)
-        # But those binaries checks for their location, so we start the patched copy from the stock path,
-        # then put the stock binary back once the apps are running
-        #
-        # Every step has to survive a power cut (https://github.com/rinkhals-community/Rinkhals/issues/198):
-        # the stock binary is only ever moved, never deleted, and the patched copy is synced and checked
-        # before it takes the stock path, so after a reboot the path holds a complete binary or nothing,
-        # and a missing or damaged one is recovered from $TARGET.original below
+    # Little dance to patch binaries
+    # We should be able to delete the file after starting it, Linux will keep the inode alive until the process exits (https://stackoverflow.com/a/196910)
+    # But those binaries checks for their location, so we start the patched copy from the stock path,
+    # then put the stock binary back once the apps are running
+    #
+    # Every step has to survive a power cut (https://github.com/rinkhals-community/Rinkhals/issues/198):
+    # the stock binary is only ever moved, never deleted, and the patched copy is synced and checked
+    # before it takes the stock path, so after a reboot the path holds a complete binary or nothing,
+    # and a missing or damaged one is recovered from $TARGET.original below
 
-        STOCK_MD5=$(sed -n 's/^# Before MD5: //p' $TARGET_PATCH)
-        PATCHED_MD5=$(sed -n 's/^# After MD5: //p' $TARGET_PATCH)
-
-        # A previous boot didn't get to put the stock binary back
-        if [ -f $TARGET.original ] && [ "$(file_md5 $TARGET)" != "$STOCK_MD5" ] && [ "$(file_md5 $TARGET.original)" = "$STOCK_MD5" ]; then
-            log "/!\ Restoring stock $TARGET left over from an interrupted startup"
-            mv -f $TARGET.original $TARGET
-            sync
-        fi
-
-        if [ "$(file_md5 $TARGET)" != "$STOCK_MD5" ]; then
-            log "/!\ $TARGET doesn't match the stock firmware, starting it as it is"
-            continue
-        fi
-
-        rm -f $TARGET.tmp
-        cp $TARGET $TARGET.tmp
-        $TARGET_PATCH $TARGET.tmp &> /dev/null
-        chmod +x $TARGET.tmp
-        sync
-
-        if [ "$(file_md5 $TARGET.tmp)" != "$PATCHED_MD5" ]; then
-            log "/!\ Failed to patch $TARGET, starting it without the Rinkhals patch"
-            rm -f $TARGET.tmp
-            continue
-        fi
-
-        rm -f $TARGET.original
-        mv $TARGET $TARGET.original
-        mv $TARGET.tmp $TARGET
-        sync
-
-    elif [ -x $PATCHER ]; then
-        # No static patch for this firmware, so it's one we haven't checked and Rinkhals only gets here
-        # when forced with .enable-rinkhals. Let the patcher look for the patch locations itself: it refuses
-        # anything it can't verify, and then the binary starts unpatched like it did before the patcher existed
-        #
-        # There are no MD5s to tell a stock binary from a leftover one here. The patcher does that too:
-        # --check only succeeds on a complete, unpatched binary it knows how to patch
-
-        if [ -f $TARGET.original ] && ! $PATCHER --check --binary $TARGET > /dev/null 2>&1 && $PATCHER --check --binary $TARGET.original > /dev/null 2>&1; then
-            log "/!\ Restoring stock $TARGET left over from an interrupted startup"
-            mv -f $TARGET.original $TARGET
-            sync
-        fi
-
-        rm -f $TARGET.tmp
-        if ! $PATCHER --binary $TARGET --output $TARGET.tmp >> $RINKHALS_LOGS/patcher.log 2>&1; then
-            log "/!\ No Rinkhals patch for $TARGET on this firmware, starting it as it is"
-            rm -f $TARGET.tmp
-            continue
-        fi
-        chmod +x $TARGET.tmp
-        sync
-        log "Patched $TARGET without a verified patch for firmware $KOBRA_VERSION"
-
-        rm -f $TARGET.original
-        mv $TARGET $TARGET.original
-        mv $TARGET.tmp $TARGET
+    # A previous boot didn't get to put the stock binary back
+    if [ -f $TARGET.original ] && ! is_stock $TARGET && is_stock $TARGET.original; then
+        log "/!\ Restoring stock $TARGET left over from an interrupted startup"
+        mv -f $TARGET.original $TARGET
         sync
     fi
+
+    if [ "$PATCHED_MD5" = "unpatched" ]; then
+        continue
+    fi
+    if [ -n "$STOCK_MD5" ] && ! is_stock $TARGET; then
+        log "/!\ $TARGET doesn't match the stock firmware, starting it as it is"
+        continue
+    fi
+
+    rm -f $TARGET.tmp
+    if ! $PATCHER --binary $TARGET --output $TARGET.tmp >> $RINKHALS_LOGS/patcher.log 2>&1; then
+        log "/!\ Could not patch $TARGET, starting it without the Rinkhals patch"
+        rm -f $TARGET.tmp
+        continue
+    fi
+    chmod +x $TARGET.tmp
+    sync
+
+    NEW_MD5=$(file_md5 $TARGET.tmp)
+    if [ -z "$KNOWN" ]; then
+        log "Patched $TARGET for firmware $KOBRA_VERSION, which Rinkhals has not been checked on ($NEW_MD5)"
+    elif [ "$PATCHED_MD5" = "unverified" ]; then
+        log "Patched $TARGET, with no result on record for firmware $KOBRA_VERSION to compare with ($NEW_MD5)"
+    elif [ "$NEW_MD5" != "$PATCHED_MD5" ]; then
+        log "/!\ Failed to patch $TARGET, starting it without the Rinkhals patch"
+        rm -f $TARGET.tmp
+        continue
+    fi
+
+    rm -f $TARGET.original
+    mv $TARGET $TARGET.original
+    mv $TARGET.tmp $TARGET
+    sync
 done
 
 # Tweak processes priority to avoid MCU timing and more generally priting errors. (https://github.com/rinkhals-community/Rinkhals/issues/128)

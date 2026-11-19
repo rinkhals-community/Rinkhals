@@ -31,7 +31,16 @@ MANIFEST=$(cat $MANIFEST_PATH | sed -r 's/^\s*\/\/.*//')
 
 
 ################
-# Create patches
+# Record what the patcher does to the stock binaries
+#
+# Rinkhals patches K3SysUi and gkapi on the printer with rinkhals-patcher (see patcher/). For every supported
+# firmware, files/3-rinkhals/opt/rinkhals/patches/patches.txt holds the MD5 of the stock binaries and of the
+# patched result, and start.sh refuses anything else. This downloads the firmware of every supported version,
+# runs the patcher on its binaries and adds the versions that aren't in patches.txt yet.
+# Needs go and python3.
+
+STOCK_DIRECTORY=$BASE_DIRECTORY/build/tmp/patches
+mkdir -p $STOCK_DIRECTORY
 
 PRINTER_MODEL_CODES=$(echo $MANIFEST | jq -r ".supported_models | keys[]")
 for PRINTER_MODEL_CODE in $PRINTER_MODEL_CODES; do
@@ -80,27 +89,17 @@ for PRINTER_MODEL_CODE in $PRINTER_MODEL_CODES; do
             touch $VERSION_DIRECTORY/update_swu/.complete
         fi
 
-        # Patch K3SysUi
-        DEST_K3SYSUI_PATH=$BASE_DIRECTORY/files/3-rinkhals/opt/rinkhals/patches/K3SysUi.${PRINTER_MODEL_CODE}_${SUPPORTED_VERSION}
-        if [ ! -f $DEST_K3SYSUI_PATH ]; then
-            cp -f $VERSION_DIRECTORY/update_swu/app/K3SysUi $DEST_K3SYSUI_PATH
-        fi
-
-        python $BASE_DIRECTORY/files/3-rinkhals/opt/rinkhals/scripts/create-patch.py $DEST_K3SYSUI_PATH
-
-        # Patch gkapi
-        DEST_GKAPI_PATH=$BASE_DIRECTORY/files/3-rinkhals/opt/rinkhals/patches/gkapi.${PRINTER_MODEL_CODE}_${SUPPORTED_VERSION}
-        if [ ! -f $DEST_GKAPI_PATH ]; then
-            cp -f $VERSION_DIRECTORY/update_swu/app/gkapi $DEST_GKAPI_PATH
-        fi
-        
-        python $BASE_DIRECTORY/files/3-rinkhals/opt/rinkhals/scripts/create-patch.py $DEST_GKAPI_PATH
+        for BINARY in K3SysUi gkapi; do
+            cp -f $VERSION_DIRECTORY/update_swu/app/$BINARY $STOCK_DIRECTORY/$BINARY.${PRINTER_MODEL_CODE}_${SUPPORTED_VERSION}
+        done
 
         # TODO: Hash printer.cfg
 
     done
 
 done
+
+(cd $BASE_DIRECTORY/patcher && go build -o rinkhals-patcher . && python3 validate.py --add $STOCK_DIRECTORY)
 
 
 ################

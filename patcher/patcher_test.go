@@ -199,7 +199,7 @@ func TestBranchEncoding(t *testing.T) {
 			}
 		}
 	}
-	// Known encodings from the static patches: "b" two words ahead, "bl" backwards.
+	// Known encodings: "b" two words ahead, "bl" backwards.
 	if w := Branch(0x1000, 0x1008); w != 0xEA000000 {
 		t.Errorf("b +8 = %08x", w)
 	}

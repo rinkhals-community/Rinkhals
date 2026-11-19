@@ -1,6 +1,5 @@
-// rinkhals-patcher patches Anycubic's K3SysUi and gkapi on the printer, for
-// firmware Rinkhals doesn't ship a static patch for. It does what
-// create-patch.py does at build time, but finds the patch locations itself.
+// rinkhals-patcher patches Anycubic's K3SysUi and gkapi on the printer. start.sh
+// runs it at every startup; it finds the places to change in the binary itself.
 //
 // It never modifies its input. The patched copy is written to --output only
 // when every check passes; on any doubt it exits non-zero and writes nothing.

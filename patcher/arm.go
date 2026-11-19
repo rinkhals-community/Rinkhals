@@ -1,8 +1,8 @@
 package main
 
 // ARM32 (A32, little-endian) instruction encoders and decoders. Only what the
-// patcher needs; every encoding here is checked against the static patches by
-// validate.py.
+// patcher needs; the encodings were checked byte for byte against the static
+// patches Rinkhals used to ship.
 
 const (
 	condEQ = 0x0

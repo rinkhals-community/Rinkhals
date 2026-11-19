@@ -15,10 +15,11 @@ import (
 //
 // We catalog two things:
 //
-//   - Binary patches: files under .current/opt/rinkhals/patches/, named like
-//     K3SysUi.<MODEL>_<VERSION>.* or gkapi.<MODEL>_<VERSION>.*. These are
-//     applied at boot to replace the stock binaries. The file name encodes
-//     which model + firmware version the patch targets.
+//   - Binary patches: K3SysUi and gkapi are patched at boot by
+//     rinkhals-patcher. .current/opt/rinkhals/patches/patches.txt lists the
+//     firmware versions the result has been checked on, one line per binary:
+//     "<binary> <model> <version> <stock MD5> <patched MD5 | unpatched |
+//     unverified>".
 //
 //   - Script-level hooks: things Rinkhals installs into /userdata or /etc to
 //     wire its services into the stock init flow (start.sh patch, DNS hook,
@@ -34,8 +35,7 @@ type binaryPatch struct {
 	Target        string `json:"target"`         // e.g. "/app/K3SysUi"
 	Model         string `json:"model"`          // e.g. "KS1"
 	FirmwareVer   string `json:"firmware_ver"`   // e.g. "2.7.2.1"
-	PatchFileName string `json:"patch_filename"` // raw filename under patches/
-	SizeBytes     int64  `json:"size_bytes"`
+	PatchFileName string `json:"patch_filename"` // file the entry comes from
 	AppliesToThis bool   `json:"applies_to_this"` // matches running model+version
 }
 
@@ -55,49 +55,35 @@ type patchesResponse struct {
 	CompatibleForRun bool          `json:"compatible_for_run"`
 }
 
-// parsePatchFilename interprets filenames like "K3SysUi.KS1_2.7.2.1.sh" or
-// "gkapi.K2P_3.1.4.bsdiff" into (name, model, firmwareVer). Returns empty
-// strings for the components that don't match the pattern.
-func parsePatchFilename(name string) (binName, model, fwVer string) {
-	// Split off extension (everything after the last dot at the end).
-	base := name
-	if i := strings.LastIndex(base, "."); i > 0 {
-		// Common patch extensions: .sh, .bsdiff, .patch, .bin. If the suffix
-		// looks short and alphanumeric, treat it as an extension; otherwise
-		// leave it in (some manifests use multi-part suffixes).
-		ext := base[i+1:]
-		if len(ext) <= 8 && allAlnum(ext) {
-			base = base[:i]
-		}
-	}
-	// Expect: <binName>.<MODEL>_<FW_VER>
-	parts := strings.SplitN(base, ".", 2)
-	if len(parts) != 2 {
-		return "", "", ""
-	}
-	binName = parts[0]
-	rest := parts[1]
-	// rest looks like KS1_2.7.2.1 - underscore separates model from version.
-	us := strings.Index(rest, "_")
-	if us < 0 {
-		return binName, "", ""
-	}
-	model = rest[:us]
-	fwVer = rest[us+1:]
-	return
+// knownBinary is one line of patches.txt.
+type knownBinary struct {
+	Name, Model, FirmwareVer string
+	// Result is the MD5 of the patched binary, "unpatched" when Rinkhals
+	// changes nothing in it on this firmware, or "unverified".
+	Result string
 }
 
-func allAlnum(s string) bool {
-	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
-			return false
-		}
+var patchesFile = "/useremain/rinkhals/.current/opt/rinkhals/patches/patches.txt"
+
+// readKnownBinaries parses patches.txt. It returns an error only when the file
+// can't be read; lines it doesn't understand are skipped.
+func readKnownBinaries(path string) ([]knownBinary, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	return true
+	var out []knownBinary
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 5 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		out = append(out, knownBinary{Name: fields[0], Model: fields[1], FirmwareVer: fields[2], Result: fields[4]})
+	}
+	return out, nil
 }
 
-// patchTargetFromBinName maps the short name in a patch file (the part before
-// the model+version) to the actual path it overwrites at runtime.
+// patchTargetFromBinName maps a binary's name to the path it runs from.
 func patchTargetFromBinName(binName string) string {
 	switch binName {
 	case "K3SysUi":
@@ -108,38 +94,31 @@ func patchTargetFromBinName(binName string) string {
 	return "/app/" + binName
 }
 
-func collectBinaryPatches(currentModel, currentFW string) []binaryPatch {
-	dir := "/useremain/rinkhals/.current/opt/rinkhals/patches"
-	entries, err := os.ReadDir(dir)
+// collectBinaryPatches lists the binaries Rinkhals patches, per firmware.
+// known reports whether the running firmware is in patches.txt at all, which
+// also counts the binaries left unpatched on it.
+func collectBinaryPatches(currentModel, currentFW string) (patches []binaryPatch, known bool) {
+	entries, err := readKnownBinaries(patchesFile)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	out := make([]binaryPatch, 0, len(entries))
+	patches = make([]binaryPatch, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		applies := e.Model == currentModel && e.FirmwareVer == currentFW
+		known = known || applies
+		if e.Result == "unpatched" {
 			continue
 		}
-		name := e.Name()
-		binName, model, fwVer := parsePatchFilename(name)
-		if binName == "" {
-			continue
-		}
-		info, err := e.Info()
-		var size int64
-		if err == nil {
-			size = info.Size()
-		}
-		out = append(out, binaryPatch{
-			Name:          binName,
-			Target:        patchTargetFromBinName(binName),
-			Model:         model,
-			FirmwareVer:   fwVer,
-			PatchFileName: name,
-			SizeBytes:     size,
-			AppliesToThis: model == currentModel && fwVer == currentFW,
+		patches = append(patches, binaryPatch{
+			Name:          e.Name,
+			Target:        patchTargetFromBinName(e.Name),
+			Model:         e.Model,
+			FirmwareVer:   e.FirmwareVer,
+			PatchFileName: filepath.Base(patchesFile),
+			AppliesToThis: applies,
 		})
 	}
-	return out
+	return patches, known
 }
 
 // describedHooks is the static list of script-level modifications Rinkhals
@@ -199,21 +178,12 @@ func handlePatchesList(w http.ResponseWriter, r *http.Request) {
 	fw := currentKobraVersion()
 	rk := currentRinkhalsVersion()
 
-	binaries := collectBinaryPatches(model, fw)
+	// Compatible-for-run = the running (model, firmware) combination is one
+	// Rinkhals has been checked on.
+	binaries, compat := collectBinaryPatches(model, fw)
 	hooks := make([]scriptHook, 0, len(describedHooks))
 	for _, h := range describedHooks {
 		hooks = append(hooks, resolveScriptHook(h))
-	}
-
-	// Compatible-for-run = at least one binary patch matches the running
-	// (model, firmware) combination. When that's false, Rinkhals will fall
-	// back to stock at boot time.
-	compat := false
-	for _, b := range binaries {
-		if b.AppliesToThis {
-			compat = true
-			break
-		}
 	}
 
 	json.NewEncoder(w).Encode(patchesResponse{

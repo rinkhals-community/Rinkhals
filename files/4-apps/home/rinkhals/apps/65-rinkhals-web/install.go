@@ -202,10 +202,9 @@ func validateAssetURL(source, assetURL string) error {
 // --- compatibility check ---
 
 // checkAnycubicCompatibility verifies that the currently-installed Rinkhals
-// has patches for the target Anycubic firmware version. Rinkhals ships patches
-// as files under opt/rinkhals/patches/ named like K3SysUi.KS1_2.7.2.1.* and
-// gkapi.KS1_2.7.2.1.*. If the corresponding files don't exist, Rinkhals's
-// start.sh will refuse to apply the loader and the printer will boot stock.
+// has been checked on the target Anycubic firmware version, which is what
+// opt/rinkhals/patches/patches.txt lists. On any other firmware Rinkhals
+// doesn't start and the printer boots stock.
 func checkAnycubicCompatibility(targetVersion string) *compatibilityReport {
 	report := &compatibilityReport{
 		TargetVersion: targetVersion,
@@ -217,17 +216,15 @@ func checkAnycubicCompatibility(targetVersion string) *compatibilityReport {
 		report.Warnings = append(report.Warnings, "Could not determine current model or target version")
 		return report
 	}
-	patchesDir := "/useremain/rinkhals/.current/opt/rinkhals/patches"
-	entries, err := os.ReadDir(patchesDir)
+	entries, err := readKnownBinaries(patchesFile)
 	if err != nil {
 		// No Rinkhals installed at all - installing a stock Anycubic firmware
 		// is fine in that case (there's nothing to be broken).
 		report.RinkhalsPatchesForTarget = true
 		return report
 	}
-	needle := fmt.Sprintf("%s_%s", model, targetVersion)
 	for _, e := range entries {
-		if strings.Contains(e.Name(), needle) {
+		if e.Model == model && e.FirmwareVer == targetVersion {
 			report.RinkhalsPatchesForTarget = true
 			return report
 		}
@@ -235,10 +232,10 @@ func checkAnycubicCompatibility(targetVersion string) *compatibilityReport {
 	report.RinkhalsPatchesForTarget = false
 	report.Compatible = false
 	report.Warnings = append(report.Warnings, fmt.Sprintf(
-		"The currently-installed Rinkhals does not include patches for %s firmware %s. "+
+		"The currently-installed Rinkhals does not support %s firmware %s. "+
 			"After this install completes, Rinkhals will not start on next boot - the printer "+
-			"will run stock Anycubic firmware until you install a Rinkhals release that ships "+
-			"patches for %s. Make sure you have a compatible Rinkhals release ready to install afterward.",
+			"will run stock Anycubic firmware until you install a Rinkhals release that supports "+
+			"%s. Make sure you have a compatible Rinkhals release ready to install afterward.",
 		model, targetVersion, targetVersion))
 	return report
 }

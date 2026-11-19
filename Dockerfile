@@ -103,8 +103,8 @@ RUN npm ci
 RUN npm run build
 
 ###############################################################
-# build-patcher builds the on-printer binary patcher, the fallback for firmware
-# we ship no static patch for
+# build-patcher builds the binary patcher that start.sh runs on the printer to
+# patch K3SysUi and gkapi (see patcher/README.md).
 FROM golang:1.24-alpine AS build-patcher
 COPY ./patcher /patcher
 WORKDIR /patcher

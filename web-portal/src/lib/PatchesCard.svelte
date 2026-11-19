@@ -8,7 +8,6 @@
 		model: string;
 		firmware_ver: string;
 		patch_filename: string;
-		size_bytes: number;
 		applies_to_this: boolean;
 	}
 
@@ -51,13 +50,6 @@
 		}));
 	});
 
-	function fmtSize(n: number): string {
-		if (!n) return "";
-		if (n < 1024) return `${n} B`;
-		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-	}
-
 	onMount(async () => {
 		try {
 			const res = await fetch(`${apiHost}/api/firmware/patches`);
@@ -79,7 +71,7 @@
 		<div class="flex-1 min-w-0">
 			<h3 class="text-base font-semibold text-ink">Rinkhals patches</h3>
 			<p class="text-ink-muted text-sm mt-1">
-				What Rinkhals modifies on top of the stock Anycubic firmware. Useful before swapping firmware versions: if a binary patch for the target version is missing, Rinkhals will boot stock until you install a matching release.
+				What Rinkhals modifies on top of the stock Anycubic firmware. Useful before swapping firmware versions: if the target version isn't listed, the printer will boot stock until you install a Rinkhals release that supports it.
 			</p>
 		</div>
 	</div>
@@ -97,7 +89,7 @@
 			<div class="bg-coral/10 border border-coral/40 rounded-lg p-3 mb-4 text-sm flex items-start gap-2">
 				<AlertTriangle size={14} class="text-coral shrink-0 mt-0.5" />
 				<div class="text-ink-muted">
-					Rinkhals does not have binary patches for {data.model_code} firmware {data.firmware_version}. The Rinkhals services may not load correctly on this combination.
+					Rinkhals has not been checked on {data.model_code} firmware {data.firmware_version}. The Rinkhals services may not load correctly on this combination.
 				</div>
 			</div>
 		{/if}
@@ -121,7 +113,7 @@
 								{#each group.entries as e}
 									<span
 										class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] {e.applies_to_this ? 'bg-emerald/15 text-emerald font-semibold' : 'bg-surface-warm text-ink-muted'}"
-										title="{e.model} firmware {e.firmware_ver} - {fmtSize(e.size_bytes)}"
+										title="{e.model} firmware {e.firmware_ver}"
 									>
 										{#if e.applies_to_this}
 											<CheckCircle2 size={10} />

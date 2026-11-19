@@ -56,9 +56,10 @@ Then after Ghidra analysis is complete, I usually run `go_func.py` then `find_dy
 
 Rinkhals injects a menu entry in the UI process in order to provide a touch UI experience to manage apps, updates and more. I chose to replace the “Support” menu item to avoid people having issues with Rinkhals calling Anycubic support.
 
-To do that, patch scripts are provided in every Rinkhals release for supported firmware versions.
+To do that, Rinkhals patches the UI process each time it starts, with a small program that runs on the printer (`rinkhals-patcher`, in the `patcher` directory of the repository):
 
-This is the patch generation process (in `/3-rinkhals/opt/rinkhals/patches/create-patches.py`)
-- Using `pwntools` this script will dynamically patch a binary to generate a new patched one
-- Then it will compare the original binary with the patch and generate a diff
-- The diff is then formatted as a patch script that checks for the right input and then apply the patch
+- It finds the Support row in the settings menu and the code that runs when the row is tapped, and makes that code open the Rinkhals UI instead
+- It never modifies the stock binary. It writes a patched copy, which is started in place of the stock one and removed from that path once the printer is up
+- For every supported firmware, Rinkhals ships the checksum of the stock binary and of the patched result (`/opt/rinkhals/patches/patches.txt`). If either doesn't match, the binary starts unpatched
+
+It refuses to patch anything it can't verify, so on a firmware where the menu changed in a way it doesn't know, the printer simply starts with the stock UI.

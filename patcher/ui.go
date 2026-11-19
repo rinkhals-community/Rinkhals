@@ -25,8 +25,8 @@ func (p *Patcher) PatchUI() error {
 	if err := p.installPayload(h); err != nil {
 		return err
 	}
-	// The bytes after the new label's terminator are left as they were, like
-	// the static patches did.
+	// The bytes after the new label's terminator are left as they were;
+	// nothing reads them.
 	if err := p.writeAt(h.labelAt, append([]byte(h.layout.newLabel), 0)); err != nil {
 		return err
 	}
