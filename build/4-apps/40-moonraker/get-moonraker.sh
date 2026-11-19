@@ -21,6 +21,23 @@ mkdir -p $MOONRAKER_DIRECTORY/moonraker
 rm -rf $MOONRAKER_DIRECTORY/moonraker/*
 cp -pr "$WORK"/moonraker/*/* $MOONRAKER_DIRECTORY/moonraker
 
+# Tell Moonraker which version it is. It works that out from a git checkout,
+# and what we ship is a zip of one commit, so it reported "?" to Mainsail,
+# Fluidd and every other client. Without a checkout it reads this file. The
+# name is what "git describe" gives for the pinned commit (v0.9.3-86-g3c1f318),
+# from a clone that fetches the history only, no files. If that fails, the
+# short commit id still beats "?".
+MOONRAKER_DESCRIBE=
+if git clone -q --bare --filter=tree:0 https://github.com/Arksine/moonraker "$WORK/moonraker.git"; then
+	MOONRAKER_DESCRIBE=$(git -C "$WORK/moonraker.git" describe --tags --long "$MOONRAKER_COMMIT" || true)
+fi
+if [ -z "$MOONRAKER_DESCRIBE" ]; then
+	echo "WARNING: could not work out Moonraker's version name, using the commit id" >&2
+	MOONRAKER_DESCRIBE=$(echo $MOONRAKER_COMMIT | cut -c1-7)
+fi
+echo "Moonraker version: $MOONRAKER_DESCRIBE"
+echo "$MOONRAKER_DESCRIBE" > $MOONRAKER_DIRECTORY/moonraker/moonraker/.version
+
 # Apply Rinkhals spoolman compatibility fix directly in Moonraker source.
 # See: https://github.com/utkabobr/DuckPro-Kobra3/issues/54#issuecomment-2540040852
 SPOOLMAN_FILE="$MOONRAKER_DIRECTORY/moonraker/moonraker/components/spoolman.py"
