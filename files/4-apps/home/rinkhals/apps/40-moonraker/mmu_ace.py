@@ -2045,6 +2045,7 @@ class MmuAcePatcher:
         self.register_gcode_handler("MMU_GATE_MAP", self._on_gcode_mmu_gate_map)
         self.register_gcode_handler("MMU_SET_SPOOL", self._on_gcode_mmu_set_spool)
         self.register_gcode_handler("MMU_TTG_MAP", self._on_gcode_mmu_ttg_map)
+        self.register_gcode_handler("MMU_REMAP_TTG", self._on_gcode_mmu_remap_ttg)
         self.register_gcode_handler("MMU_ENDLESS_SPOOL", self._on_gcode_mmu_endless_spool)
         self.register_gcode_handler("MMU_SELECT", self._on_gcode_mmu_select)
         self.register_gcode_handler("MMU_SLICER_TOOL_MAP", self._on_gcode_mmu_slicer_tool_map)
@@ -2759,6 +2760,44 @@ class MmuAcePatcher:
         self.ace_controller.update_ttg_map(ttg_map)
         await self._note_ttg_map_applies_next_print()
 
+    # Triggered when a gate is picked in Mainsail's Tool Mapping dialog (#239)
+    async def _on_gcode_mmu_remap_ttg(self, args: dict[str, str | None], delegate):
+        """MMU_REMAP_TTG TOOL=<t> GATE=<g> maps one tool. In Happy Hare,
+        MMU_TTG_MAP is an alias of this command, so without TOOL/GATE it takes
+        RESET and MAP the same way."""
+        if "TOOL" not in args and "GATE" not in args:
+            return await self._on_gcode_mmu_ttg_map(args, delegate)
+
+        try:
+            tool = self._get_gcode_arg_int("TOOL", args)
+            gate = self._get_gcode_arg_int("GATE", args)
+        except ValueError as e:
+            await self._send_gcode_response(f"MMU_REMAP_TTG: {e}. The tool map was not changed.")
+            return None
+
+        num_gates = sum(len(unit.gates) for unit in self.ace.units)
+        ttg_map = list(self.ace.ttg_map)
+        if not 0 <= tool < len(ttg_map):
+            await self._send_gcode_response(
+                f"MMU_REMAP_TTG: tool {tool} does not exist (tools are 0 to {len(ttg_map) - 1}). "
+                f"The tool map was not changed."
+            )
+            return None
+        if not 0 <= gate < num_gates:
+            await self._send_gcode_response(
+                f"MMU_REMAP_TTG: gate {gate} does not exist (gates are 0 to {num_gates - 1}). "
+                f"The tool map was not changed."
+            )
+            return None
+
+        # No reset cooldown here: it guards against Fluidd re-sending its old
+        # MAP after a RESET, not against a gate the user just picked.
+        ttg_map[tool] = gate
+        logging.info(f"MMU_REMAP_TTG: tool {tool} -> gate {gate}, map {ttg_map}")
+        self.ace_controller.update_ttg_map(ttg_map)
+        await self._note_ttg_map_applies_next_print()
+        return None
+
     async def _note_ttg_map_applies_next_print(self):
         """The tool-to-gate map reaches GoKlipper once, at print start (see
         patch_print_data). Changing it while a print is running only changes
@@ -2780,6 +2819,22 @@ class MmuAcePatcher:
     async def _on_gcode_mmu_endless_spool(self, args: dict[str, str | None], delegate):
         """Configure endless spool groups (Happy Hare compatible)"""
         logging.debug(f"handle _on_gcode_mmu_endless_spool: {json.dumps(args)}")
+        num_gates = sum(len(unit.gates) for unit in self.ace.units)
+
+        # Mainsail's Tool Mapping Reset sends this alongside MMU_TTG_MAP RESET=1
+        # (#239). Every gate in one group is what Rinkhals reports by default.
+        if self._get_gcode_arg_int("RESET", args, default=0) == 1:
+            self.ace.endless_spool_groups = [0] * num_gates
+            self.ace_controller._handle_status_update(force=False)
+            logging.info(f"Endless spool groups reset: {self.ace.endless_spool_groups}")
+            return None
+
+        if "GROUPS" not in args:
+            await self._send_gcode_response(
+                'MMU_ENDLESS_SPOOL: give GROUPS="g0,g1,..." (one group per gate) or RESET=1.'
+            )
+            return None
+
         groups_str = self._get_gcode_arg_str("GROUPS", args)
         logging.debug(f"handle _on_gcode_mmu_endless_spool groups_str: {groups_str}")
 

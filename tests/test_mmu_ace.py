@@ -1,6 +1,7 @@
 import importlib.util
 import re
 import sys
+import time
 import types
 import unittest
 import urllib.parse
@@ -3420,10 +3421,8 @@ class MmuAceAutoFeedSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["FEED_FILAMENT ID=0 INDEX=3 LENGTH=80 SPEED=25"])
 
 
-class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
-    """MMU_TTG_MAP must keep the map the same length as the tool list, reject
-    gates that don't exist, and say when a change can't reach the running print
-    (issue #131)."""
+class _TtgMapPatcherBase(unittest.IsolatedAsyncioTestCase):
+    """A patcher with a four-gate ACE and recorded map updates and responses."""
 
     @classmethod
     def setUpClass(cls):
@@ -3456,6 +3455,13 @@ class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
         patcher._send_gcode_response = send_response
         return patcher, updates, responses
 
+
+
+class MmuAceTtgMapCommandTests(_TtgMapPatcherBase):
+    """MMU_TTG_MAP must keep the map the same length as the tool list, reject
+    gates that don't exist, and say when a change can't reach the running print
+    (issue #131)."""
+
     async def _ttg(self, patcher, args):
         return await self.module.MmuAcePatcher._on_gcode_mmu_ttg_map(patcher, args, None)
 
@@ -3481,3 +3487,108 @@ class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
         patcher, _, responses = self._patcher(state="standby")
         await self._ttg(patcher, {"MAP": "0,2,2,3"})
         self.assertEqual(responses, [])
+
+
+class MmuAceRemapTtgCommandTests(_TtgMapPatcherBase):
+    """MMU_REMAP_TTG is what Mainsail's Tool Mapping dialog sends when a gate
+    is picked for a tool (#239). Rinkhals had no handler, so the pick was
+    forwarded to GoKlipper and lost."""
+
+    async def _remap(self, patcher, args):
+        return await self.module.MmuAcePatcher._on_gcode_mmu_remap_ttg(patcher, args, None)
+
+    async def test_picking_a_gate_maps_only_that_tool(self):
+        # Exactly what Mainsail sends.
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "1", "GATE": "3", "QUIET": "1"})
+        self.assertEqual(updates, [[0, 3, 2, 3]])
+        self.assertEqual(responses, [])
+
+    async def test_a_gate_that_does_not_exist_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "1", "GATE": "7"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("does not exist" in r for r in responses))
+
+    async def test_a_tool_that_does_not_exist_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "4", "GATE": "0"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("does not exist" in r for r in responses))
+
+    async def test_a_non_number_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "x", "GATE": "0"})
+        self.assertEqual(updates, [])
+        self.assertTrue(responses)
+
+    async def test_a_pick_right_after_a_reset_still_applies(self):
+        # The reset cooldown is there for Fluidd re-sending its old MAP, not
+        # for a gate the user just picked.
+        patcher, updates, _ = self._patcher()
+        patcher._last_ttg_reset_time = time.time()
+        await self._remap(patcher, {"TOOL": "0", "GATE": "2"})
+        self.assertEqual(updates, [[2, 1, 2, 3]])
+
+    async def test_remapping_mid_print_says_it_applies_next_print(self):
+        patcher, updates, responses = self._patcher(state="printing")
+        await self._remap(patcher, {"TOOL": "1", "GATE": "3"})
+        self.assertEqual(updates, [[0, 3, 2, 3]])
+        self.assertTrue(any("next print" in r for r in responses))
+
+    async def test_reset_and_map_behave_like_mmu_ttg_map(self):
+        # In Happy Hare MMU_TTG_MAP is an alias of MMU_REMAP_TTG.
+        patcher, updates, _ = self._patcher()
+        patcher.ace.ttg_map = [3, 2, 1, 0]
+        await self._remap(patcher, {"RESET": "1"})
+        self.assertEqual(updates, [[0, 1, 2, 3]])
+
+        patcher._last_ttg_reset_time = 0.0
+        await self._remap(patcher, {"MAP": "1,0"})
+        self.assertEqual(updates[-1], [1, 0, 2, 3])
+
+
+class MmuAceEndlessSpoolCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Mainsail's Reset in the Tool Mapping dialog sends MMU_ENDLESS_SPOOL
+    RESET=1, which used to throw because GROUPS was required (#239)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def _patcher(self, groups):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        patcher.ace = types.SimpleNamespace(
+            units=[types.SimpleNamespace(gates=[object()] * 4)],
+            endless_spool_groups=list(groups),
+        )
+        pushes, responses = [], []
+        patcher.ace_controller = types.SimpleNamespace(
+            _handle_status_update=lambda force=False: pushes.append(force),
+        )
+
+        async def send_response(message):
+            responses.append(message)
+
+        patcher._send_gcode_response = send_response
+        return patcher, pushes, responses
+
+    async def _endless(self, patcher, args):
+        return await self.module.MmuAcePatcher._on_gcode_mmu_endless_spool(patcher, args, None)
+
+    async def test_reset_puts_every_gate_back_in_one_group(self):
+        patcher, pushes, _ = self._patcher([0, 1, 2, 3])
+        await self._endless(patcher, {"RESET": "1", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 0, 0, 0])
+        self.assertTrue(pushes)
+
+    async def test_groups_still_set_the_groups(self):
+        patcher, _, _ = self._patcher([0, 0, 0, 0])
+        await self._endless(patcher, {"GROUPS": "0,0,2,2", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 0, 2, 2])
+
+    async def test_no_groups_and_no_reset_explains_instead_of_throwing(self):
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(any("GROUPS" in r for r in responses))
