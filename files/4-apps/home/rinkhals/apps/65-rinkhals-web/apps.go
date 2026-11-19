@@ -385,7 +385,7 @@ func handleAppsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ids := listAppIDs()
-	state := queryAppStates(ids)
+	state := cachedAppStates()
 
 	apps := make([]*App, 0, len(ids))
 	for _, id := range ids {
@@ -428,7 +428,7 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	case sub == "" && r.Method == "GET":
 		// All apps, not just this one: what it depends on and what depends on
 		// it are part of the answer.
-		state := queryAppStates(listAppIDs())
+		state := cachedAppStates()
 		app, err := loadApp(id, state)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -484,6 +484,7 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 
 		// Catalog "Installed" state derives from app dirs on disk, so bust it.
 		invalidateCatalog()
+		invalidateAppStates()
 
 		resp := map[string]interface{}{
 			"success": len(rmErrs) == 0,
@@ -599,6 +600,8 @@ func runAppHelper(w http.ResponseWriter, helper, id string) {
 func runAppCmd(w http.ResponseWriter, body string) {
 	cmd := fmt.Sprintf(". %s\n%s\n", toolsSh, body)
 	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	// Whatever this did to an app, the remembered states may be out of date
+	invalidateAppStates()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": err == nil,
 		"output":  string(out),

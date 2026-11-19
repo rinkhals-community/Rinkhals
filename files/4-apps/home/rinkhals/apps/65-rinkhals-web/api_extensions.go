@@ -159,9 +159,11 @@ func handleServices(w http.ResponseWriter, r *http.Request) {
 			{"id": "50-remote-display", "name": "Remote Display", "status": "Stopped"},
 		}
 
+		// From the remembered app states: this used to start a shell per
+		// service on every poll of the dashboard (see appstates.go)
+		states := cachedAppStates()
 		for _, s := range services {
-			out, err := exec.Command("sh", "-c", "source /useremain/rinkhals/.current/tools.sh && get_app_status "+s["id"]).CombinedOutput()
-			if err == nil && strings.Contains(string(out), "started") {
+			if states[s["id"]].Running {
 				s["status"] = "Running"
 			}
 		}
@@ -181,6 +183,7 @@ func handleServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
+	invalidateAppStates()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": err == nil,
 		"output":  string(out),
