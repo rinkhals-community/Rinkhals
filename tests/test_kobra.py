@@ -110,9 +110,10 @@ def _build_klippy_connection_module():
     klippy_connection_module = types.ModuleType(KLIPPY_CONNECTION_NAME)
 
     class KlippyConnection:
-        def __init__(self, available_heaters=None, heater_error=None):
+        def __init__(self, available_heaters=None, heater_error=None, help_commands=None):
             self.available_heaters = available_heaters or []
             self.heater_error = heater_error
+            self.help_commands = help_commands or {"TEST_MACRO": "test"}
             self.requests = []
 
         async def request(self, web_request):
@@ -120,7 +121,7 @@ def _build_klippy_connection_module():
             self.requests.append((endpoint, copy.deepcopy(web_request.get_args())))
 
             if endpoint == "gcode/help":
-                return {"TEST_MACRO": "test"}
+                return dict(self.help_commands)
             if endpoint == "objects/query":
                 if self.heater_error is not None:
                     raise self.heater_error
@@ -289,13 +290,15 @@ class KobraObjectsListPatchTests(unittest.IsolatedAsyncioTestCase):
         self.kobra = self.module.Kobra.__new__(self.module.Kobra)
         self.kobra.is_goklipper_running = lambda: True
 
-    async def _objects_for(self, model, version, available_heaters=None, heater_error=None):
+    async def _objects_for(self, model, version, available_heaters=None, heater_error=None,
+                           help_commands=None):
         self.kobra.KOBRA_MODEL_CODE = model
         self.kobra.KOBRA_VERSION = version
         self.kobra.patch_objects_list()
         connection = self.klippy_connection_module.KlippyConnection(
             available_heaters=available_heaters,
             heater_error=heater_error,
+            help_commands=help_commands,
         )
         result = await connection.request(DummyWebRequest("objects/list"))
         return result["objects"], connection.requests
@@ -350,7 +353,26 @@ class KobraObjectsListPatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fan_generic exhaust_fan", objects)
         self.assertNotIn("controller_fan controller_fan", objects)
 
-    async def test_heater_discovery_failure_does_not_advertise_chamber(self):
+    async def test_mmu_software_vars_is_listed_for_mainsail(self):
+        # Mainsail's Tool Mapping dialog reads automap_strategy from this
+        # object with no fallback, and only subscribes to listed objects (#239).
+        objects, _requests = await self._objects_for("KS1", "2.7.2.7")
+
+        self.assertIn("gcode_macro _MMU_SOFTWARE_VARS", objects)
+        self.assertEqual(objects.count("gcode_macro _MMU_SOFTWARE_VARS"), 1)
+
+    async def test_macro_matching_a_listed_name_is_not_listed_twice(self):
+        # A user config could define the real Happy Hare macro; gcode/help
+        # then reports it too, and Mainsail would see the object twice.
+        objects, _requests = await self._objects_for(
+            "KS1", "2.7.2.7",
+            help_commands={"_MMU_SOFTWARE_VARS": "", "TEST_MACRO": "test"},
+        )
+
+        self.assertEqual(objects.count("gcode_macro _MMU_SOFTWARE_VARS"), 1)
+        self.assertIn("gcode_macro TEST_MACRO", objects)
+
+
         objects, _requests = await self._objects_for(
             "KS1M",
             "2.7.1.4",
@@ -400,6 +422,18 @@ class KobraMmuObjectStrippingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('mmu_machine', captured['objects'])
         self.assertIn('toolhead', captured['objects'])
         self.assertEqual(result, {"status": {}})
+
+    async def test_mmu_software_vars_stripped_when_goklipper_running(self):
+        captured = await self._install_fake_and_patch(goklipper_pid=12345)
+
+        web_request = FakeObjectsWebRequest(
+            "objects/subscribe",
+            {"objects": {"gcode_macro _MMU_SOFTWARE_VARS": None, "toolhead": None}},
+        )
+        await self.klippy_connection_module.KlippyConnection._request_standard(None, web_request)
+
+        self.assertNotIn('gcode_macro _MMU_SOFTWARE_VARS', captured['objects'])
+        self.assertIn('toolhead', captured['objects'])
 
     async def test_mmu_objects_not_stripped_when_goklipper_not_running(self):
         captured = await self._install_fake_and_patch(goklipper_pid=None)

@@ -181,6 +181,15 @@ class MmuAceStatus:
     mmu: MmuStatus
     mmu_machine: MmuMachineStatus
 
+# Happy Hare's settings macro. Mainsail's Tool Mapping dialog reads
+# automap_strategy from it with no fallback, so without it the dialog throws
+# and never opens (#239). Rinkhals never automaps (MMU_SLICER_TOOL_MAP
+# SKIP_AUTOMAP is a no-op), so the strategy is "none", which also hides the
+# dialog's skip-automap toggle.
+MMU_SOFTWARE_VARS_STATUS = {
+    "gcode_macro _MMU_SOFTWARE_VARS": {"automap_strategy": "none"},
+}
+
 GATE_UNKNOWN = -1
 GATE_EMPTY = 0
 GATE_AVAILABLE = 1 # Available to load from either buffer or spool
@@ -3102,7 +3111,7 @@ class MmuAcePatcher:
         the clients that are subscribed to mmu (issues #140, #125).
         """
 
-        mmu_status = self.get_status()
+        mmu_status = {**self.get_status(), **MMU_SOFTWARE_VARS_STATUS}
 
         # return the full, current status
         if not is_subscription_update:

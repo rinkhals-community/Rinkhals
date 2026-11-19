@@ -692,24 +692,25 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
         status = patcher.patch_status({}, is_subscription_update=False)
 
-        self.assertEqual(status, {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        expected = {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1},
+                    **self.module.MMU_SOFTWARE_VARS_STATUS}
+        self.assertEqual(status, expected)
         # Regression check for the lost-update hole: the non-subscription
         # path must also populate the diff cache.
-        self.assertEqual(
-            patcher._last_pushed_mmu_status,
-            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
-        )
+        self.assertEqual(patcher._last_pushed_mmu_status, expected)
 
     def test_subscription_suppresses_unchanged_and_emits_changed(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
-        patcher._last_pushed_mmu_status = {"mmu": {"gate": 0}, "mmu_machine": {"num_units": 1}}
+        patcher._last_pushed_mmu_status = {"mmu": {"gate": 0}, "mmu_machine": {"num_units": 1},
+                                           **self.module.MMU_SOFTWARE_VARS_STATUS}
 
         status = patcher.patch_status({}, is_subscription_update=True)
 
         self.assertEqual(status, {"mmu": {"gate": 1}})
         self.assertEqual(
             patcher._last_pushed_mmu_status,
-            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
+            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1},
+             **self.module.MMU_SOFTWARE_VARS_STATUS},
         )
 
     def test_query_between_subscription_pushes_does_not_leave_stale_cache(self):
@@ -763,6 +764,33 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
         status = patcher.patch_status({}, is_subscription_update=True)
         self.assertEqual(status, {"mmu": {"gate": 1}})
+
+    SOFTWARE_VARS = "gcode_macro _MMU_SOFTWARE_VARS"
+
+    def test_query_adds_mmu_software_vars_for_mainsail(self):
+        # Mainsail's Tool Mapping dialog throws without this object (#239).
+        # Rinkhals never automaps, so the strategy is "none".
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+
+        self.assertEqual(status, {self.SOFTWARE_VARS: {"automap_strategy": "none"}})
+
+    def test_query_without_requested_adds_mmu_software_vars(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, is_subscription_update=False)
+
+        self.assertEqual(status[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+
+    def test_mmu_software_vars_pushed_once_to_subscribers(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        first = patcher.patch_status({}, is_subscription_update=True)
+        second = patcher.patch_status({}, is_subscription_update=True)
+
+        self.assertEqual(first[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+        self.assertNotIn(self.SOFTWARE_VARS, second)
 
     def test_reinit_resets_mmu_status_cache(self):
         patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
