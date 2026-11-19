@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Locations that match tools.sh:
@@ -191,50 +194,78 @@ func readTempConfig(id string) map[string]string {
 	return readConfigFile(filepath.Join(temporaryAppPath, id+".config"))
 }
 
-// queryAppStates runs a single shell invocation that emits a line per app
-// with enabled and running flags. This keeps the cost flat (one fork) instead
-// of paying it per-app.
-func queryAppStates(ids []string) map[string]struct {
-	Enabled bool
-	Running bool
-} {
-	result := map[string]struct {
-		Enabled bool
-		Running bool
-	}{}
-	if len(ids) == 0 {
-		return result
-	}
+// isAppEnabled follows tools.sh's is_app_enabled: an enabled flag and no
+// disabled flag, each either in the app's folder or next to it in the user
+// apps folder.
+func isAppEnabled(id string) bool {
+	root, _ := resolveAppRoot(id)
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
 
-	// Build a small shell snippet that prints "<id>|<enabled>|<status>" for each.
-	// is_app_enabled prints 1 when enabled, blank otherwise. get_app_status
-	// prints "started" or "stopped".
-	var b strings.Builder
-	fmt.Fprintf(&b, ". %s\n", toolsSh)
-	for _, id := range ids {
-		fmt.Fprintf(&b,
-			"printf '%s|%%s|%%s\\n' \"$(is_app_enabled %s 2>/dev/null)\" \"$(get_app_status %s 2>/dev/null)\"\n",
-			id, id, id)
-	}
+	return (exists(filepath.Join(root, ".enabled")) || exists(filepath.Join(userAppPath, id+".enabled"))) &&
+		!exists(filepath.Join(root, ".disabled")) && !exists(filepath.Join(userAppPath, id+".disabled"))
+}
 
-	out, err := exec.Command("sh", "-c", b.String()).Output()
+// queryAppState asks one app whether it is running, and with which processes:
+// what its own "app.sh status" reports. The script is run directly and at the
+// lowest priority, so that asking never competes with Klipper for the
+// printer's one core.
+func queryAppState(id string) (appState, []int) {
+	state := appState{Enabled: isAppEnabled(id)}
+
+	root, _ := resolveAppRoot(id)
+	script := filepath.Join(root, "app.sh")
+	st, err := os.Stat(script)
 	if err != nil {
-		return result
+		return state, nil
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		result[parts[0]] = struct {
-			Enabled bool
-			Running bool
-		}{
-			Enabled: strings.TrimSpace(parts[1]) == "1",
-			Running: strings.Contains(parts[2], "started"),
+	if st.Mode()&0111 == 0 {
+		_ = os.Chmod(script, st.Mode()|0755)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "nice", appStatusArgs(script)...).Output()
+
+	var pids []int
+	state.Running, pids = parseAppStatus(string(out))
+	return state, pids
+}
+
+// appStatusArgs gives the arguments for "nice" that run an app's status
+// script the way a shell would: by itself when it names its interpreter, and
+// with sh when it doesn't. Most app.sh files have no "#!" line.
+func appStatusArgs(script string) []string {
+	args := []string{"-n", "19"}
+	head := make([]byte, 2)
+	if f, err := os.Open(script); err == nil {
+		n, _ := f.Read(head)
+		f.Close()
+		if n == 2 && string(head) == "#!" {
+			return append(args, script, "status")
 		}
 	}
-	return result
+	return append(args, "sh", script, "status")
+}
+
+// parseAppStatus reads the "Status:" and "PIDs:" lines that report_status
+// prints from an app.sh.
+func parseAppStatus(out string) (started bool, pids []int) {
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Status:"); ok {
+			fields := strings.Fields(rest)
+			started = len(fields) > 0 && fields[0] == "started"
+		}
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "PIDs:"); ok {
+			for _, field := range strings.Fields(rest) {
+				if pid, err := strconv.Atoi(field); err == nil && pid > 0 {
+					pids = append(pids, pid)
+				}
+			}
+		}
+	}
+	if !started {
+		pids = nil
+	}
+	return started, pids
 }
 
 // buildProperties merges app.json's property declarations with the persisted
