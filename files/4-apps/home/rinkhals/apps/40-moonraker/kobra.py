@@ -214,6 +214,12 @@ LIVE_BED_MESH_VERIFIED = (
 )
 
 
+# Happy Hare settings macro Mainsail's Tool Mapping dialog reads with no
+# fallback (#239). Listed and kept away from GoKlipper here; mmu_ace.py fills it
+# in under the same name (tests check both match).
+MMU_SOFTWARE_VARS_OBJECT = "gcode_macro _MMU_SOFTWARE_VARS"
+
+
 class Kobra:
     # Environment
     KOBRA_MODEL_ID = None
@@ -1755,7 +1761,8 @@ class Kobra:
                         "bed_mesh \"default\"",
                         "idle_timeout",
                         "mmu",
-                        "mmu_machine"
+                        "mmu_machine",
+                        MMU_SOFTWARE_VARS_OBJECT
                     ]
 
                     # For KS1M: Do not expose motion_report to avoid GoKlipper panic:
@@ -1767,7 +1774,8 @@ class Kobra:
                     web_request.endpoint = 'gcode/help'
                     result = await original_request(me, web_request)
                     for gcode in result:
-                        objects.append(f"gcode_macro {gcode}")
+                        if f"gcode_macro {gcode}" not in objects:
+                            objects.append(f"gcode_macro {gcode}")
                     
                     if self.KOBRA_MODEL_CODE == 'KS1' or self.KOBRA_MODEL_CODE == 'KS1M':
                         objects.append("fan_generic air_filter_fan")
@@ -1828,6 +1836,7 @@ class Kobra:
                         web_request.get_endpoint() in ('objects/query', 'objects/subscribe')):
                     args['objects'].pop('mmu', None)
                     args['objects'].pop('mmu_machine', None)
+                    args['objects'].pop(MMU_SOFTWARE_VARS_OBJECT, None)
 
                 return await original__request_standard(me, web_request, timeout)
             return _request_standard
