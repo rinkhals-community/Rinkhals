@@ -3110,14 +3110,16 @@ class MmuAcePatcher:
                 if requested is not None and key not in requested:
                     continue
                 status[key] = value
-                # Keep the diff cache in sync even on the non-subscription
-                # (query) path. Without this, a query response can hand a
-                # client a value the subscription-diff cache never learns
-                # about; if the state later reverts, the next subscribed
-                # push compares against the stale pre-query cache, finds
-                # no difference, and the client is stuck showing the
-                # queried value indefinitely.
-                self._last_pushed_mmu_status[key] = value
+                # The diff cache stands for what every subscriber was last
+                # pushed, but this response goes to one client. Writing the
+                # value into the cache would let the next push skip it, so
+                # subscribers that did not ask would never see the change
+                # (#125). Leaving the cache alone would let this client get
+                # stuck on the queried value if the state later reverts.
+                # Forgetting the key does both: the next push sends the
+                # current value to everyone, at worst once more than needed.
+                if self._last_pushed_mmu_status.get(key) != value:
+                    self._last_pushed_mmu_status.pop(key, None)
             return status
 
         # Subscription-update when changed
