@@ -7,8 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"runtime"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -49,23 +48,44 @@ func getProcessID(processName string) (int, error) {
 		}
 		return 0, fmt.Errorf("process %s not found", processName)
 	}
-	if runtime.GOOS != "linux" {
-		return 0, fmt.Errorf("getProcessID is only supported on Linux")
+	// Looked up in /proc: this used to be a "ps | grep" shell per process, and
+	// it is asked again and again for every process that isn't running.
+	// processName only ever comes from processCommands above.
+	self := os.Getpid()
+	for _, e := range procEntries() {
+		if e.pid != self && strings.Contains(e.cmdline, processName) {
+			return e.pid, nil
+		}
 	}
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("ps | grep %s | grep -v grep | awk '{print $1}'", processName))
-	output, err := cmd.Output()
+	return 0, fmt.Errorf("process %s not found", processName)
+}
+
+type procEntry struct {
+	pid     int
+	cmdline string
+}
+
+// procEntries lists the running processes with their command lines, arguments
+// separated by spaces, the way ps shows them.
+func procEntries() []procEntry {
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0, err
+		return nil
 	}
-	pidStr := strings.TrimSpace(string(output))
-	if pidStr == "" {
-		return 0, fmt.Errorf("process %s not found", processName)
+	var result []procEntry
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		cmdline := strings.ReplaceAll(strings.TrimRight(string(raw), "\x00"), "\x00", " ")
+		result = append(result, procEntry{pid, cmdline})
 	}
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil {
-		return 0, err
-	}
-	return pid, nil
+	return result
 }
 func isProcessAlive(pid int) bool {
 	p, err := os.FindProcess(pid)

@@ -91,7 +91,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,sharing=locked,target=/var/cache/apt \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        wget sed rsync zip unzip ca-certificates && \
+        wget sed rsync zip unzip ca-certificates git && \
     rm -rf /var/lib/apt/lists/*
 
 ###############################################################

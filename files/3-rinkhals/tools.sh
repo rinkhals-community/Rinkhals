@@ -1,11 +1,42 @@
 export RINKHALS_ROOT=$(realpath /useremain/rinkhals/.current)
-export RINKHALS_VERSION=$(cat $RINKHALS_ROOT/.version)
+
+# Reads the first line of file $2 into variable $1, without starting a process.
+# This file is loaded by every login shell, every SSH command and every app.sh
+# call, and the stock firmware restarts a login shell on its unused console
+# about once a second, forever. Each "$(cat ...)" here used to cost the printer
+# a process every time, so the values below are read with shell builtins.
+read_first_line() {
+    eval "$1="
+    [ -r "$2" ] || return 0
+    IFS= read -r "$1" < "$2" || true
+}
+
+read_first_line RINKHALS_VERSION $RINKHALS_ROOT/.version
+export RINKHALS_VERSION
 export RINKHALS_HOME=/useremain/home/rinkhals
 export RINKHALS_LOGS=/tmp/rinkhals
 
 export ROOT_HOME=/useremain/home/root
 
-export KOBRA_MODEL_ID=$(cat /userdata/app/gk/config/api.cfg | sed -nr 's/.*"modelId"\s*:\s*"([0-9]+)".*/\1/p')
+# The model id is the number in the line  "modelId" : "20025"  of api.cfg
+KOBRA_MODEL_ID=
+if [ -r /userdata/app/gk/config/api.cfg ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            *'"modelId"'*)
+                _line=${_line#*\"modelId\"}
+                _line=${_line#*\"}
+                _line=${_line%%\"*}
+                case "$_line" in
+                    ''|*[!0-9]*) ;;
+                    *) KOBRA_MODEL_ID=$_line; break ;;
+                esac
+                ;;
+        esac
+    done < /userdata/app/gk/config/api.cfg
+fi
+unset _line
+export KOBRA_MODEL_ID
 
 if [ "$KOBRA_MODEL_ID" == "20021" ]; then
     export KOBRA_MODEL="Anycubic Kobra 2 Pro"
@@ -27,8 +58,9 @@ elif [ "$KOBRA_MODEL_ID" == "20029" ]; then
     export KOBRA_MODEL_CODE=KS1M
 fi
 
-export KOBRA_VERSION=$(cat /useremain/dev/version)
-export KOBRA_DEVICE_ID=$(cat /useremain/dev/device_id 2> /dev/null)
+read_first_line KOBRA_VERSION /useremain/dev/version
+read_first_line KOBRA_DEVICE_ID /useremain/dev/device_id
+export KOBRA_VERSION KOBRA_DEVICE_ID
 
 export ORIGINAL_ROOT=/tmp/rinkhals/original
 
@@ -248,17 +280,40 @@ kill_by_port() {
     kill_by_id $PID $SIGNAL
 }
 
+# Resets the printer's MCUs through the reset line the mainboard gives Linux.
+# Returns 1 on models where we don't know that line.
+reset_mcus() {
+    case "$KOBRA_MODEL_CODE" in
+        KS1) MCU_RESET_GPIO=116 ;;
+        *) return 1 ;;
+    esac
+
+    [ -d /sys/class/gpio/gpio$MCU_RESET_GPIO ] || echo $MCU_RESET_GPIO > /sys/class/gpio/export
+    echo out > /sys/class/gpio/gpio$MCU_RESET_GPIO/direction
+    echo 0 > /sys/class/gpio/gpio$MCU_RESET_GPIO/value
+    sleep 1
+    echo 1 > /sys/class/gpio/gpio$MCU_RESET_GPIO/value
+}
+
+# Waits for something to listen on unix socket $1, for $2 ms. On a timeout it
+# logs $3 and quits, unless $3 is "return": then it only returns 1
 wait_for_socket() {
     DELAY=250
     TOTAL=${2:-30000}
 
     while [ 1 ]; do
-        timeout -t 1 socat $1 $1 2> /dev/null
+        # Only probe a socket that exists: given a path with nothing there,
+        # socat creates an empty file, which then is in the way of the socket
+        [ -S $1 ] && timeout -t 1 socat $1 $1 2> /dev/null
         if [ "$?" -gt 127 ]; then
             return
         fi
 
         if [ "$TOTAL" -lt 0 ]; then
+            if [ "$3" = "return" ]; then
+                return 1
+            fi
+
             if [ "$3" != "" ]; then
                 log "$3"
             else

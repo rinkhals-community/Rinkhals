@@ -574,6 +574,7 @@ func handleCatalogInstall(w http.ResponseWriter, r *http.Request) {
 
 	// Bust the catalog cache so a subsequent GET shows "installed: true".
 	invalidateCatalog()
+	invalidateAppStates()
 	json.NewEncoder(w).Encode(resp)
 }
 

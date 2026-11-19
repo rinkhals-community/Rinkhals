@@ -381,7 +381,19 @@ for TARGET in $TARGETS; do
     fi
 done
 
-wait_for_socket /tmp/unix_uds1 30000 "/!\ Timeout waiting for gklib to start"
+# gklib configures the MCUs when it starts. If another Klipper host configured them last and they have
+# not lost power since, it can't: that is a reboot with Klipper (vanilla) or a tunneled Klipper running.
+# gklib then hangs without ever opening its socket. Reset the MCUs and start it once more before giving up
+if ! wait_for_socket /tmp/unix_uds1 15000 return; then
+    if reset_mcus; then
+        log "/!\ gklib is not starting. Its MCUs may still be set up by another Klipper: they were reset, starting gklib again"
+        kill_by_name gklib
+        rm -f /tmp/unix_uds1
+        nice -n -5 ./gklib -a /tmp/unix_uds1 rinkhals_gklib.cfg >> $RINKHALS_LOGS/gklib.log 2>&1 &
+    fi
+
+    wait_for_socket /tmp/unix_uds1 30000 "/!\ Timeout waiting for gklib to start"
+fi
 
 
 ################
