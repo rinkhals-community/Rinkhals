@@ -2723,6 +2723,13 @@ class MmuAcePatcher:
             await self._note_ttg_map_applies_next_print()
             return None
 
+        # No MAP: show the current map, as Happy Hare does, instead of failing
+        # on the missing argument.
+        if "MAP" not in args:
+            mapping = ", ".join(f"T{tool}>G{gate}" for tool, gate in enumerate(self.ace.ttg_map))
+            await self._send_gcode_response(f"MMU_TTG_MAP: {mapping or 'tool map not known yet'}")
+            return None
+
         # Check if we're within cooldown period after a reset
         cooldown_period = 2.0  # seconds
         time_since_reset = time.time() - self._last_ttg_reset_time
@@ -2777,6 +2784,12 @@ class MmuAcePatcher:
 
         num_gates = sum(len(unit.gates) for unit in self.ace.units)
         ttg_map = list(self.ace.ttg_map)
+        if not ttg_map:
+            await self._send_gcode_response(
+                "MMU_REMAP_TTG: the tool map is not known yet (waiting for the ACE). "
+                "The tool map was not changed."
+            )
+            return None
         if not 0 <= tool < len(ttg_map):
             await self._send_gcode_response(
                 f"MMU_REMAP_TTG: tool {tool} does not exist (tools are 0 to {len(ttg_map) - 1}). "
@@ -2835,18 +2848,27 @@ class MmuAcePatcher:
             )
             return None
 
-        groups_str = self._get_gcode_arg_str("GROUPS", args)
+        groups_str = self._get_gcode_arg_str("GROUPS", args) or ""
         logging.debug(f"handle _on_gcode_mmu_endless_spool groups_str: {groups_str}")
 
         # Parse groups: "0,0,1,1" means gate 0+1 are group 0, gate 2+3 are group 1
         # Handle empty strings (e.g., ",,0" becomes [0, 0, 0])
-        groups = [int(g) if g.strip() else 0 for g in groups_str.split(",")]
+        try:
+            groups = [int(g) if g.strip() else 0 for g in groups_str.split(",")]
+        except ValueError:
+            await self._send_gcode_response(
+                f"MMU_ENDLESS_SPOOL: GROUPS={groups_str} is not a list of group numbers. "
+                f"The groups were not changed."
+            )
+            return None
 
-        # Validate
-        num_gates = sum(len(unit.gates) for unit in self.ace.units)
         if len(groups) != num_gates:
             logging.error(f"GROUPS length {len(groups)} != num_gates {num_gates}")
-            return
+            await self._send_gcode_response(
+                f"MMU_ENDLESS_SPOOL: GROUPS needs {num_gates} entries, one per gate, "
+                f"got {len(groups)}. The groups were not changed."
+            )
+            return None
 
         self.ace.endless_spool_groups = groups
         self.ace_controller._handle_status_update(force=False)  # Debounce
@@ -3166,7 +3188,9 @@ class MmuAcePatcher:
         the clients that are subscribed to mmu (issues #140, #125).
         """
 
-        mmu_status = {**self.get_status(), **MMU_SOFTWARE_VARS_STATUS}
+        # Fresh copies: status values can end up in caches that update in place.
+        mmu_status = {**self.get_status(),
+                      **{name: dict(value) for name, value in MMU_SOFTWARE_VARS_STATUS.items()}}
 
         # return the full, current status
         if not is_subscription_update:

@@ -784,6 +784,15 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
         self.assertEqual(status[self.SOFTWARE_VARS], {"automap_strategy": "none"})
 
+    def test_mmu_software_vars_are_a_fresh_copy_each_time(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+        status[self.SOFTWARE_VARS]["automap_strategy"] = "changed"
+
+        again = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+        self.assertEqual(again[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+
     def test_mmu_software_vars_pushed_once_to_subscribers(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}})
 
@@ -3536,6 +3545,20 @@ class MmuAceRemapTtgCommandTests(_TtgMapPatcherBase):
         self.assertEqual(updates, [[0, 3, 2, 3]])
         self.assertTrue(any("next print" in r for r in responses))
 
+    async def test_unknown_tool_map_says_so(self):
+        patcher, updates, responses = self._patcher()
+        patcher.ace.ttg_map = []
+        await self._remap(patcher, {"TOOL": "0", "GATE": "1"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("not known yet" in r for r in responses))
+
+    async def test_bare_command_shows_the_map_instead_of_throwing(self):
+        patcher, updates, responses = self._patcher()
+        patcher.ace.ttg_map = [0, 3, 2, 1]
+        await self._remap(patcher, {})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("T1" in r and "3" in r for r in responses))
+
     async def test_reset_and_map_behave_like_mmu_ttg_map(self):
         # In Happy Hare MMU_TTG_MAP is an alias of MMU_REMAP_TTG.
         patcher, updates, _ = self._patcher()
@@ -3586,6 +3609,19 @@ class MmuAceEndlessSpoolCommandTests(unittest.IsolatedAsyncioTestCase):
         patcher, _, _ = self._patcher([0, 0, 0, 0])
         await self._endless(patcher, {"GROUPS": "0,0,2,2", "QUIET": "1"})
         self.assertEqual(patcher.ace.endless_spool_groups, [0, 0, 2, 2])
+
+    async def test_wrong_length_groups_say_so(self):
+        # Fluidd sends GROUPS="" when no groups are set.
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {"GROUPS": "", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(any("4" in r for r in responses))
+
+    async def test_non_number_groups_say_so_instead_of_throwing(self):
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {"GROUPS": "a,0,0,0"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(responses)
 
     async def test_no_groups_and_no_reset_explains_instead_of_throwing(self):
         patcher, _, responses = self._patcher([0, 1, 0, 1])
