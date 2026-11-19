@@ -459,6 +459,89 @@ class KobraMmuObjectStrippingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('mmu', captured['objects'])
 
 
+class GcodeScriptWebRequest:
+    def __init__(self, script: str):
+        self._args = {"script": script}
+
+    def get_endpoint(self):
+        return "gcode/script"
+
+    def get_args(self):
+        return self._args
+
+    def get_str(self, name, default=None):
+        return self._args.get(name, default)
+
+
+class KobraGcodeHandlerSplitTests(unittest.IsolatedAsyncioTestCase):
+    """Mainsail sends several commands as one gcode/script. kobra.py has to
+    split them so each registered handler runs; otherwise only the first
+    command is handled and the rest are lost (#239)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_kobra_module()
+
+    def setUp(self):
+        self.klippy_connection_module = _build_klippy_connection_module()
+        self.forwarded = []
+
+        async def original_request(me, web_request):
+            self.forwarded.append(web_request.get_args().get("script"))
+            return "forwarded"
+
+        self.klippy_connection_module.KlippyConnection.request = original_request
+
+        apis_name = "testsupport.moonraker.components.klippy_apis"
+        apis_module = types.ModuleType(apis_name)
+
+        class KlippyAPI:
+            async def run_gcode(me, script, default=None):
+                return "forwarded"
+
+        apis_module.KlippyAPI = KlippyAPI
+        sys.modules[apis_name] = apis_module
+
+        self.kobra = self.module.Kobra.__new__(self.module.Kobra)
+        self.kobra.gcode_handlers = {}
+        self.kobra._normalize_exclude_object_script = lambda script: script
+        self.kobra._normalize_print_file_script = lambda script: script
+        self.kobra.patch_gcode_handler()
+
+        self.calls = []
+
+        def recorder(name):
+            async def handler(args, delegate):
+                self.calls.append((name, dict(args)))
+                return None
+            return handler
+
+        for name in ("MMU_TTG_MAP", "MMU_ENDLESS_SPOOL", "MMU_REMAP_TTG"):
+            self.kobra.register_gcode_handler(name, recorder(name))
+
+    async def _send(self, script):
+        connection = self.klippy_connection_module.KlippyConnection()
+        return await connection.request(GcodeScriptWebRequest(script))
+
+    async def test_mainsail_tool_map_reset_runs_both_commands(self):
+        # Exactly what Mainsail 2.17.0's Tool Mapping Reset sends.
+        await self._send("MMU_TTG_MAP RESET=1\nMMU_ENDLESS_SPOOL RESET=1")
+
+        self.assertEqual(self.calls, [
+            ("MMU_TTG_MAP", {"RESET": "1"}),
+            ("MMU_ENDLESS_SPOOL", {"RESET": "1"}),
+        ])
+        self.assertEqual(self.forwarded, [])
+
+    async def test_mainsail_gate_pick_reaches_the_remap_handler(self):
+        await self._send("MMU_REMAP_TTG TOOL=1 GATE=3 QUIET=1")
+
+        self.assertEqual(self.calls, [
+            ("MMU_REMAP_TTG", {"TOOL": "1", "GATE": "3", "QUIET": "1"}),
+        ])
+        self.assertEqual(self.forwarded, [])
+
+
 class KobraStatusPatcherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

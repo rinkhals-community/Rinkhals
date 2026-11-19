@@ -3571,6 +3571,41 @@ class MmuAceRemapTtgCommandTests(_TtgMapPatcherBase):
         self.assertEqual(updates[-1], [1, 0, 2, 3])
 
 
+class MmuSoftwareVarsNameTests(unittest.TestCase):
+    """kobra.py lists and strips the object, mmu_ace.py fills it in. If the
+    names drift, Mainsail subscribes to an object nobody fills (#239)."""
+
+    def test_kobra_and_mmu_ace_use_the_same_object_name(self):
+        try:
+            from test_kobra import load_kobra_module
+        except ImportError:
+            from tests.test_kobra import load_kobra_module
+        kobra = load_kobra_module()
+        mmu_ace = load_mmu_ace_module()
+
+        self.assertEqual(kobra.MMU_SOFTWARE_VARS_OBJECT, "gcode_macro _MMU_SOFTWARE_VARS")
+        self.assertEqual(mmu_ace.MMU_SOFTWARE_VARS_OBJECT, kobra.MMU_SOFTWARE_VARS_OBJECT)
+        self.assertEqual(list(mmu_ace.MMU_SOFTWARE_VARS_STATUS), [kobra.MMU_SOFTWARE_VARS_OBJECT])
+
+
+class MmuAceGcodeHandlerTableTests(unittest.TestCase):
+    """The commands the web UIs send must be registered, or they go to
+    GoKlipper and are lost (#239: MMU_REMAP_TTG had no handler)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def test_tool_mapping_commands_are_registered(self):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        handlers = patcher._gcode_handlers()
+
+        self.assertEqual(handlers["MMU_REMAP_TTG"], patcher._on_gcode_mmu_remap_ttg)
+        self.assertEqual(handlers["MMU_TTG_MAP"], patcher._on_gcode_mmu_ttg_map)
+        self.assertEqual(handlers["MMU_ENDLESS_SPOOL"], patcher._on_gcode_mmu_endless_spool)
+        self.assertEqual(handlers["MMU_GATE_MAP"], patcher._on_gcode_mmu_gate_map)
+
+
 class MmuAceEndlessSpoolCommandTests(unittest.IsolatedAsyncioTestCase):
     """Mainsail's Reset in the Tool Mapping dialog sends MMU_ENDLESS_SPOOL
     RESET=1, which used to throw because GROUPS was required (#239)."""

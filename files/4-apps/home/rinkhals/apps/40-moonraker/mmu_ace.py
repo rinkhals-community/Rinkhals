@@ -186,8 +186,10 @@ class MmuAceStatus:
 # and never opens (#239). Rinkhals never automaps (MMU_SLICER_TOOL_MAP
 # SKIP_AUTOMAP is a no-op), so the strategy is "none", which also hides the
 # dialog's skip-automap toggle.
+# kobra.py lists the object under the same name (tests check both match).
+MMU_SOFTWARE_VARS_OBJECT = "gcode_macro _MMU_SOFTWARE_VARS"
 MMU_SOFTWARE_VARS_STATUS = {
-    "gcode_macro _MMU_SOFTWARE_VARS": {"automap_strategy": "none"},
+    MMU_SOFTWARE_VARS_OBJECT: {"automap_strategy": "none"},
 }
 
 GATE_UNKNOWN = -1
@@ -2042,24 +2044,8 @@ class MmuAcePatcher:
         self.server.register_notification("mmu_ace:status_update", "mmu_ace_status_update")
 
         # gcode handlers
-        self.register_gcode_handler("MMU_GATE_MAP", self._on_gcode_mmu_gate_map)
-        self.register_gcode_handler("MMU_SET_SPOOL", self._on_gcode_mmu_set_spool)
-        self.register_gcode_handler("MMU_TTG_MAP", self._on_gcode_mmu_ttg_map)
-        self.register_gcode_handler("MMU_REMAP_TTG", self._on_gcode_mmu_remap_ttg)
-        self.register_gcode_handler("MMU_ENDLESS_SPOOL", self._on_gcode_mmu_endless_spool)
-        self.register_gcode_handler("MMU_SELECT", self._on_gcode_mmu_select)
-        self.register_gcode_handler("MMU_SLICER_TOOL_MAP", self._on_gcode_mmu_slicer_tool_map)
-        self.register_gcode_handler("MMU_LOAD", self._on_gcode_mmu_load)
-        self.register_gcode_handler("MMU_UNLOAD", self._on_gcode_mmu_unload)
-        self.register_gcode_handler("MMU_EJECT", self._on_gcode_mmu_eject)
-        self.register_gcode_handler("MMU_HOME", self._on_gcode_mmu_home)
-        self.register_gcode_handler("MMU_CHECK_GATE", self._on_gcode_mmu_check_gate)
-        self.register_gcode_handler("MMU_CHECK_GATES", self._on_gcode_mmu_check_gates)
-        self.register_gcode_handler("MMU_GATE_SKUS", self._on_gcode_mmu_gate_skus)
-        self.register_gcode_handler("MMU_RECOVER", self._on_gcode_mmu_recover)
-        self.register_gcode_handler("MMU_DRYER_START", self._on_gcode_dryer_start)
-        self.register_gcode_handler("MMU_DRYER_STOP", self._on_gcode_dryer_stop)
-        self.register_gcode_handler("MMU_DRYER_FAN_SPEED", self._on_gcode_dryer_fan_speed)
+        for cmd, handler in self._gcode_handlers().items():
+            self.register_gcode_handler(cmd, handler)
 
         self.kobra.register_status_patcher(self.patch_status)
 
@@ -2086,6 +2072,29 @@ class MmuAcePatcher:
 
         # Add AnycubicSlicerNext to supported slicers
         self.setup_anycubic_slicer()
+
+    def _gcode_handlers(self) -> Dict[str, FlexCallback]:
+        """Commands handled here instead of being forwarded to GoKlipper."""
+        return {
+            "MMU_GATE_MAP": self._on_gcode_mmu_gate_map,
+            "MMU_SET_SPOOL": self._on_gcode_mmu_set_spool,
+            "MMU_TTG_MAP": self._on_gcode_mmu_ttg_map,
+            "MMU_REMAP_TTG": self._on_gcode_mmu_remap_ttg,
+            "MMU_ENDLESS_SPOOL": self._on_gcode_mmu_endless_spool,
+            "MMU_SELECT": self._on_gcode_mmu_select,
+            "MMU_SLICER_TOOL_MAP": self._on_gcode_mmu_slicer_tool_map,
+            "MMU_LOAD": self._on_gcode_mmu_load,
+            "MMU_UNLOAD": self._on_gcode_mmu_unload,
+            "MMU_EJECT": self._on_gcode_mmu_eject,
+            "MMU_HOME": self._on_gcode_mmu_home,
+            "MMU_CHECK_GATE": self._on_gcode_mmu_check_gate,
+            "MMU_CHECK_GATES": self._on_gcode_mmu_check_gates,
+            "MMU_GATE_SKUS": self._on_gcode_mmu_gate_skus,
+            "MMU_RECOVER": self._on_gcode_mmu_recover,
+            "MMU_DRYER_START": self._on_gcode_dryer_start,
+            "MMU_DRYER_STOP": self._on_gcode_dryer_stop,
+            "MMU_DRYER_FAN_SPEED": self._on_gcode_dryer_fan_speed,
+        }
 
     def register_gcode_handler(self, cmd, callback: FlexCallback):
         self.kobra.register_gcode_handler(cmd, callback)
