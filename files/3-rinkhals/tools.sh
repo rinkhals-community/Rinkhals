@@ -410,6 +410,29 @@ recover_stock_binaries() {
 
     return $restored
 }
+# For uninstalling: restores the stock binaries in $1 (pairs of name and stock MD5, as for
+# recover_stock_binaries), then removes .patch, .tmp and stock .original copies. An .original that
+# isn't stock is kept for a human to look at
+cleanup_patched_binaries() {
+    local gk_dir=$1 target stock_md5
+
+    recover_stock_binaries "$@"
+    shift
+
+    while [ $# -ge 2 ]; do
+        target=$1 stock_md5=$2
+        shift 2
+
+        rm -f $gk_dir/$target.patch $gk_dir/$target.tmp
+        [ -e $gk_dir/$target.original ] || continue
+
+        if [ -n "$stock_md5" ] && [ "$(stock_binary_md5 $gk_dir/$target.original)" = "$stock_md5" ]; then
+            rm -f $gk_dir/$target.original
+        else
+            log "/!\ Keeping $gk_dir/$target.original, it doesn't match the stock firmware"
+        fi
+    done
+}
 
 export APP_STATUS_STARTED=started
 export APP_STATUS_STOPPED=stopped

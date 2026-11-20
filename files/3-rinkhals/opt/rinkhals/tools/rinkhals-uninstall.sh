@@ -28,11 +28,19 @@ if [ -e /useremain/rinkhals/.current/stop.sh ]; then
     /useremain/rinkhals/.current/stop.sh
 fi
 
+# Put the stock gkapi/K3SysUi back and remove the patched copies, while the patch scripts still exist
+if [ -f /useremain/rinkhals/.current/tools.sh ]; then
+    . /useremain/rinkhals/.current/tools.sh
+    PATCHES=/useremain/rinkhals/.current/opt/rinkhals/patches
+    cleanup_patched_binaries /userdata/app/gk \
+        gkapi "$(stock_md5_of $PATCHES/gkapi.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh)" \
+        K3SysUi "$(stock_md5_of $PATCHES/K3SysUi.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh)"
+fi
+
 # Delete Rinkhals completely
 rm -rf /useremain/rinkhals 2> /dev/null
 rm -rf /useremain/home/rinkhals 2> /dev/null
 rm -rf /useremain/home/root 2> /dev/null
-rm -rf /userdata/app/gk/K3SysUi.patch 2> /dev/null
 
 sed -i '/# Rinkhals\/begin/,/# Rinkhals\/end/d' /userdata/app/gk/start.sh
 if [ -f /userdata/app/gk/restart_k3c.sh ]; then
