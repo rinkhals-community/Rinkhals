@@ -2274,6 +2274,16 @@ class Kobra:
         setattr(KlippyConnection, 'request', wrap_request(KlippyConnection.request))
 
 
+# A shell power command that hangs must not hang Moonraker with it
+SHELL_POWER_TIMEOUT = 10
+
+
+def run_shell_power_command(command: str, timeout: float = SHELL_POWER_TIMEOUT) -> str:
+    # Raises subprocess.TimeoutExpired when the command runs longer than timeout seconds
+    result = subprocess.check_output(['sh', '-c', command], timeout=timeout)
+    return result.decode('utf-8').strip()
+
+
 class ShellPowerDevice(PowerDevice):
     def __init__(self, config):
         super().__init__(config)
@@ -2295,8 +2305,7 @@ class ShellPowerDevice(PowerDevice):
 
         try:
             command = self.get_state_command
-            result = subprocess.check_output(['sh', '-c', command])
-            result = result.decode('utf-8').strip()
+            result = run_shell_power_command(command)
             logging.debug(f'ShellPowerDevice "{command}" => "{result}"')
 
             previous_state = self.state
@@ -2320,8 +2329,7 @@ class ShellPowerDevice(PowerDevice):
 
         try:
             command = self.power_on_command if state else self.power_off_command
-            result = subprocess.check_output(['sh', '-c', command])
-            result = result.decode('utf-8').strip()
+            result = run_shell_power_command(command)
             logging.debug(f'ShellPowerDevice "{command}" => "{result}"')
         except:
             logging.exception(f"ShellPowerDevice error: {self.name}")
