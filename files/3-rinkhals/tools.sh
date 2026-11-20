@@ -89,7 +89,8 @@ free_space_kb() {
 }
 
 check_compatibility() {
-    if [ "$KOBRA_MODEL_CODE" != "K2P" ] && [ "$KOBRA_MODEL_CODE" == "K3" ] && [ "$KOBRA_MODEL_CODE" == "KS1" ] && [ "$KOBRA_MODEL_CODE" == "K3M" ]; then
+    # KOBRA_MODEL_CODE is only set for the model ids tools.sh knows
+    if [ -z "$KOBRA_MODEL_CODE" ]; then
         log "Your printer's model is not recognized, exiting"
         quit
     fi
