@@ -289,6 +289,10 @@ file_md5() {
 PATCHER=/opt/rinkhals/tools/rinkhals-patcher
 PATCHES=/opt/rinkhals/patches/patches.txt
 
+if [ ! -s $PATCHES ]; then
+    log "/!\ $PATCHES is missing, the patched binaries can't be verified"
+fi
+
 # A complete, unpatched binary: the stock MD5 when we know it, else what the patcher makes of it
 is_stock() {
     if [ -n "$STOCK_MD5" ]; then

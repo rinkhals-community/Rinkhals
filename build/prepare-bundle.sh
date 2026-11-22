@@ -14,8 +14,13 @@ set -e
 BUNDLE_DIR=${1:-/bundle}
 VERSION=${2:-dev}
 
-# Remove everything but shell patches
-find "$BUNDLE_DIR/rinkhals/opt/rinkhals/patches" -type f ! -name "*.sh" -exec rm {} +
+# Keep only patches.txt (stock binaries left there by older tooling must not ship),
+# and refuse to build a bundle that start.sh couldn't verify its patches with
+find "$BUNDLE_DIR/rinkhals/opt/rinkhals/patches" -type f ! -name "patches.txt" -exec rm {} +
+if [ ! -s "$BUNDLE_DIR/rinkhals/opt/rinkhals/patches/patches.txt" ]; then
+    echo "patches.txt is missing from the bundle" >&2
+    exit 1
+fi
 
 # Rename busybox (to avoid conflict with stock) and update all symlinks
 mv "$BUNDLE_DIR/rinkhals/bin/busybox" "$BUNDLE_DIR/rinkhals/bin/busybox.rinkhals"
