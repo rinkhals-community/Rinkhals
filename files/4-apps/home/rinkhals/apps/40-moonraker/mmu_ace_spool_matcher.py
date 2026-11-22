@@ -79,6 +79,10 @@ class MmuAceSpoolMatcher:
         # Told of every spool fetched by ID, so what verifying a tag's spool had to
         # read is not read a second time to describe it.
         self.on_spool = None
+        # What the last request that reached the network showed. A lookup can
+        # return without asking (cache hit, nothing to ask), which must not be
+        # taken for Spoolman having come back.
+        self.reachable = True
 
     @property
     def enabled(self) -> bool:
@@ -216,16 +220,20 @@ class MmuAceSpoolMatcher:
                 f"{spoolman.spoolman_url}{path}", connect_timeout=2., request_timeout=4.
             )
             if response.status_code == 404:
+                self.reachable = True
                 return None
             if response.has_error():
                 raise SpoolmanUnavailable(f"error response from {path}")
             body = response.json()
+            if not isinstance(body, dict):
+                raise SpoolmanUnavailable(f"{path} did not return a spool")
         except SpoolmanUnavailable:
+            self.reachable = False
             raise
         except Exception as e:
+            self.reachable = False
             raise SpoolmanUnavailable(f"{path}: {e}") from e
-        if not isinstance(body, dict):
-            raise SpoolmanUnavailable(f"{path} did not return a spool")
+        self.reachable = True
         if self.on_spool is not None:
             self.on_spool(body)
         return body
@@ -259,12 +267,15 @@ class MmuAceSpoolMatcher:
             if response.has_error():
                 raise SpoolmanUnavailable(f"error response from {path}")
             rows = response.json()
+            if not isinstance(rows, list):
+                raise SpoolmanUnavailable(f"{path} did not return a list")
         except SpoolmanUnavailable:
+            self.reachable = False
             raise
         except Exception as e:
+            self.reachable = False
             raise SpoolmanUnavailable(f"{path}: {e}") from e
-        if not isinstance(rows, list):
-            raise SpoolmanUnavailable(f"{path} did not return a list")
+        self.reachable = True
         self._cache[key] = (now, rows)
         while len(self._cache) > self.CACHE_ENTRIES:
             self._cache.popitem(last=False)

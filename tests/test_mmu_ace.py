@@ -3164,10 +3164,11 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         await self._rebuild()
 
         self.assertNotIn(0, self._overrides())
-        self.assertNotIn(0, self.controller._auto_match_seen,
-                         "an outage must not count as having considered the spool")
+        self.assertIn(0, self.controller._spoolman_failed_at,
+                      "an outage must be retried, not count as having considered the spool")
 
         self.spoolman.http_client.fail = False
+        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
         await self._rebuild()
 
         self.assertEqual(self._overrides().get(0), 24)
@@ -3176,12 +3177,37 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.spoolman.http_client.spool_status = 500
         await self._rebuild()
 
-        self.assertNotIn(0, self.controller._auto_match_seen)
+        self.assertIn(0, self.controller._spoolman_failed_at)
+        self.assertNotIn(0, self.controller._tag_refused_at)
 
         self.spoolman.http_client.spool_status = None
+        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
         await self._rebuild()
 
         self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_an_outage_is_not_retried_on_every_rebuild(self):
+        self.spoolman.http_client.fail = True
+        with self.assertLogs(level="INFO") as logs:
+            for _ in range(4):
+                await self._rebuild()
+
+        self.assertEqual(len(self._by_id_requests()), 1,
+                         "each retry is a timed-out request; wait SPOOLMAN_RETRY_S")
+        self.assertEqual(len([m for m in logs.output if "could not reach Spoolman" in m]), 1)
+
+    async def test_no_spoolman_section_is_logged_once_and_nothing_is_attempted(self):
+        self.server._components.pop("spoolman", None)
+        with self.assertLogs(level="INFO") as logs:
+            for _ in range(3):
+                await self._rebuild()
+
+        self.assertNotIn(0, self._overrides())
+        self.assertEqual(len([m for m in logs.output if "not configured" in m]), 1)
+        self.assertFalse([m for m in logs.output if "could not reach" in m])
+        # A config state, not an outage: no attempt, so nothing to retry.
+        self.assertEqual(self.controller._auto_match_seen, {})
+        self.assertEqual(self.controller._spoolman_failed_at, {})
 
     async def test_get_spool_raises_on_an_outage_and_returns_none_on_404(self):
         matcher = self.controller._matcher
@@ -3218,9 +3244,8 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         await self._rebuild()
         self.assertEqual(self._overrides().get(0), 24)
 
-        # The swap is noticed on one rebuild and the new tag read on the next.
-        for _ in range(2):
-            await self._rebuild(self._hub(sku="OS-25"))
+        # One rebuild: an idle printer may not send a second.
+        await self._rebuild(self._hub(sku="OS-25"))
 
         self.assertEqual(self._overrides().get(0), 25)
         self.assertEqual(self.controller._spool_store.entries[0]["sku"], "OS-25")
@@ -3363,6 +3388,130 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.assertEqual(self._overrides().get(other), 24)
         self.assertNotIn(bound[0], self._overrides())
+
+    async def test_a_tag_that_changes_during_the_lookup_binds_the_new_tag(self):
+        # Gate 0 reads OS-24; a hub update with OS-25 lands while Spoolman is asked
+        # about 24. Binding 24 then would pair spool 24 with SKU OS-25 for good.
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None),
+                                    (25, "PETG", "FCF6F6", None))
+        matcher = self.controller._matcher
+        original = matcher.spool_from_sku
+        calls = []
+
+        async def swap_mid_lookup(gate, gate_index):
+            calls.append(gate.sku)
+            if len(calls) == 1:
+                self.controller._set_ace_status(self._hub(sku="OS-25"))
+            return await original(gate, gate_index)
+
+        matcher.spool_from_sku = swap_mid_lookup
+        await self._rebuild()
+
+        self.assertEqual(calls, ["OS-24", "OS-25"], "the new tag is looked up at once")
+        self.assertEqual(self._overrides().get(0), 25)
+        self.assertEqual(self.controller._spool_store.entries[0],
+                         {"spool_id": 25, "sku": "OS-25"})
+
+    async def test_a_tag_taking_the_loaded_gates_spool_warns(self):
+        self.controller.set_manual_spool_id(1, 24)
+        hub = self._two_gate_hub("OS-24", None)
+        hub["current_filament"] = "0-1"   # hub 0, gate 1 is in the toolhead
+
+        with self.assertLogs(level="INFO") as logs:
+            await self._rebuild(hub)
+
+        self.assertEqual(self._overrides().get(0), 24)
+        self.assertTrue([m for m in logs.output
+                         if m.startswith("WARNING") and "while gate 1 is loaded" in m], logs.output)
+
+    async def test_a_missed_read_on_the_bound_gate_does_not_hand_its_spool_over(self):
+        # Two rolls carry the same tag (a hand-written duplicate). One failed RFID
+        # read on the bound gate is not evidence its roll left: the store waits
+        # SKU_LOST_GRACE_S before believing a lost SKU, and so must a recheck.
+        hub = self._two_gate_hub("OS-24", "OS-24")
+        await self._rebuild(hub)
+        await self._rebuild(hub)
+        bound = next(g for g in (0, 1) if self._overrides().get(g) == 24)
+        other = 1 - bound
+
+        missed = self._two_gate_hub(*(("", "OS-24") if bound == 0 else ("OS-24", "")))
+        self.controller._tag_refused_at[other] -= self.controller.TAG_RECHECK_S
+        await self._rebuild(missed)
+
+        self.assertEqual(self._overrides().get(bound), 24, "the bound gate keeps its spool")
+        self.assertNotIn(other, self._overrides())
+
+    async def test_a_tag_lost_past_the_grace_lets_the_duplicate_take_over(self):
+        hub = self._two_gate_hub("OS-24", "OS-24")
+        await self._rebuild(hub)
+        await self._rebuild(hub)
+        bound = next(g for g in (0, 1) if self._overrides().get(g) == 24)
+        other = 1 - bound
+        store = self.controller._spool_store
+
+        missed = self._two_gate_hub(*(("", "OS-24") if bound == 0 else ("OS-24", "")))
+        await self._rebuild(missed)
+        store._sku_lost_since[bound] -= store.SKU_LOST_GRACE_S
+        # No TAG_RECHECK_S wait: the spool is free the moment the grace ends, so
+        # the gate refused because of it is offered again on that same rebuild.
+        await self._rebuild(missed)
+
+        self.assertEqual(self._overrides().get(other), 24)
+        self.assertNotIn(bound, self._overrides())
+
+    async def test_a_tag_takes_over_a_spool_assigned_by_hand_to_an_untagged_gate(self):
+        # Nothing was recorded for the untagged gate to "lose", so no grace applies.
+        await self._rebuild(self._two_gate_hub(None, ""))
+        self.controller.set_manual_spool_id(1, 24)
+
+        await self._rebuild(self._two_gate_hub("OS-24", ""))
+
+        self.assertEqual(self._overrides().get(0), 24)
+        self.assertNotIn(1, self._overrides())
+
+    async def test_a_freed_spool_is_not_offered_to_a_gate_the_user_cleared(self):
+        await self._rebuild(self._two_gate_hub("OS-24", None))
+        self.controller.clear_manual_spool_id(0)
+        hub = self._two_gate_hub("OS-24", "OS-24")
+        await self._rebuild(hub)
+        self.assertEqual(self._overrides().get(1), 24)
+        store = self.controller._spool_store
+
+        missed = self._two_gate_hub("OS-24", "")
+        await self._rebuild(missed)
+        store._sku_lost_since[1] -= store.SKU_LOST_GRACE_S
+        await self._rebuild(missed)
+
+        self.assertNotIn(0, self._overrides(), "the user's clear still stands")
+
+    async def test_an_outage_is_not_reported_over_by_a_gate_that_asked_nothing(self):
+        self.spoolman.http_client.fail = True
+        await self._rebuild()
+        # Same gate, new tag on a roll with no material: refused before any request.
+        with self.assertLogs(level="INFO") as logs:
+            await self._rebuild(self._hub(material="unknown", sku="OS-25"))
+
+        self.assertFalse([m for m in logs.output if "reachable again" in m], logs.output)
+
+    async def test_a_restore_after_a_mid_lookup_change_is_shown_at_once(self):
+        # A remembered assignment for the tag that arrives mid-lookup is restored
+        # by the re-sync, which runs outside a rebuild, so it must update the gate.
+        self.controller._spool_store.entries[0] = {"spool_id": 25, "sku": "OS-25"}
+        self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None),
+                                    (25, "PETG", "FCF6F6", None))
+        matcher = self.controller._matcher
+        original = matcher.spool_from_sku
+
+        async def swap_mid_lookup(gate, gate_index):
+            matcher.spool_from_sku = original
+            self.controller._set_ace_status(self._hub(sku="OS-25"))
+            return await original(gate, gate_index)
+
+        matcher.spool_from_sku = swap_mid_lookup
+        await self._rebuild()
+
+        self.assertEqual(self._overrides().get(0), 25)
+        self.assertEqual(self.controller._get_gate_by_index(0)[1].spool_id, 25)
 
     async def test_a_refused_tag_does_not_match_when_the_matcher_is_off(self):
         self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))
@@ -3913,7 +4062,7 @@ class MmuAceReviewRegressionTests(MatcherTestBase):
 
     # --- 3: a Spoolman outage must not disable auto-match permanently --------
 
-    async def test_a_failed_lookup_is_retried_on_the_next_rebuild(self):
+    async def test_a_failed_lookup_is_retried_once_the_retry_is_due(self):
         self.controller._matcher.mode = "unique"
         self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None))
         self.spoolman.http_client.fail = True
@@ -3921,6 +4070,7 @@ class MmuAceReviewRegressionTests(MatcherTestBase):
         self.assertNotIn(0, self.controller._manual_spool_overrides)
 
         self.spoolman.http_client.fail = False
+        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
         await self._rebuild()
 
         self.assertEqual(self.controller._manual_spool_overrides.get(0), 24,
