@@ -1,6 +1,7 @@
 import importlib.util
 import re
 import sys
+import time
 import types
 import unittest
 import urllib.parse
@@ -692,14 +693,13 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
         status = patcher.patch_status({}, is_subscription_update=False)
 
-        self.assertEqual(status, {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
+        expected = {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1},
+                    **self.module.MMU_SOFTWARE_VARS_STATUS}
+        self.assertEqual(status, expected)
         # A query answers one client, so it must not mark the values as
         # pushed to the subscribers (#125). The next push sends them.
         self.assertEqual(patcher._last_pushed_mmu_status, {})
-        self.assertEqual(
-            patcher.patch_status({}, is_subscription_update=True),
-            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
-        )
+        self.assertEqual(patcher.patch_status({}, is_subscription_update=True), expected)
 
     def test_query_keeps_cache_entries_that_already_match(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
@@ -711,14 +711,16 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
     def test_subscription_suppresses_unchanged_and_emits_changed(self):
         patcher = self._make_patcher({"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}})
-        patcher._last_pushed_mmu_status = {"mmu": {"gate": 0}, "mmu_machine": {"num_units": 1}}
+        patcher._last_pushed_mmu_status = {"mmu": {"gate": 0}, "mmu_machine": {"num_units": 1},
+                                           **self.module.MMU_SOFTWARE_VARS_STATUS}
 
         status = patcher.patch_status({}, is_subscription_update=True)
 
         self.assertEqual(status, {"mmu": {"gate": 1}})
         self.assertEqual(
             patcher._last_pushed_mmu_status,
-            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1}},
+            {"mmu": {"gate": 1}, "mmu_machine": {"num_units": 1},
+             **self.module.MMU_SOFTWARE_VARS_STATUS},
         )
 
     def test_query_between_subscription_pushes_does_not_leave_stale_cache(self):
@@ -789,6 +791,42 @@ class MmuAcePatchStatusTests(unittest.TestCase):
 
         status = patcher.patch_status({}, is_subscription_update=True)
         self.assertEqual(status, {"mmu": {"gate": 1}})
+
+    SOFTWARE_VARS = "gcode_macro _MMU_SOFTWARE_VARS"
+
+    def test_query_adds_mmu_software_vars_for_mainsail(self):
+        # Mainsail's Tool Mapping dialog throws without this object (#239).
+        # Rinkhals never automaps, so the strategy is "none".
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+
+        self.assertEqual(status, {self.SOFTWARE_VARS: {"automap_strategy": "none"}})
+
+    def test_query_without_requested_adds_mmu_software_vars(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, is_subscription_update=False)
+
+        self.assertEqual(status[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+
+    def test_mmu_software_vars_are_a_fresh_copy_each_time(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        status = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+        status[self.SOFTWARE_VARS]["automap_strategy"] = "changed"
+
+        again = patcher.patch_status({}, False, {self.SOFTWARE_VARS})
+        self.assertEqual(again[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+
+    def test_mmu_software_vars_pushed_once_to_subscribers(self):
+        patcher = self._make_patcher({"mmu": {"gate": 1}})
+
+        first = patcher.patch_status({}, is_subscription_update=True)
+        second = patcher.patch_status({}, is_subscription_update=True)
+
+        self.assertEqual(first[self.SOFTWARE_VARS], {"automap_strategy": "none"})
+        self.assertNotIn(self.SOFTWARE_VARS, second)
 
     def test_reinit_resets_mmu_status_cache(self):
         patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
@@ -3418,10 +3456,8 @@ class MmuAceAutoFeedSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["FEED_FILAMENT ID=0 INDEX=3 LENGTH=80 SPEED=25"])
 
 
-class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
-    """MMU_TTG_MAP must keep the map the same length as the tool list, reject
-    gates that don't exist, and say when a change can't reach the running print
-    (issue #131)."""
+class _TtgMapPatcherBase(unittest.IsolatedAsyncioTestCase):
+    """A patcher with a four-gate ACE and recorded map updates and responses."""
 
     @classmethod
     def setUpClass(cls):
@@ -3454,6 +3490,13 @@ class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
         patcher._send_gcode_response = send_response
         return patcher, updates, responses
 
+
+
+class MmuAceTtgMapCommandTests(_TtgMapPatcherBase):
+    """MMU_TTG_MAP must keep the map the same length as the tool list, reject
+    gates that don't exist, and say when a change can't reach the running print
+    (issue #131)."""
+
     async def _ttg(self, patcher, args):
         return await self.module.MmuAcePatcher._on_gcode_mmu_ttg_map(patcher, args, None)
 
@@ -3479,3 +3522,170 @@ class MmuAceTtgMapCommandTests(unittest.IsolatedAsyncioTestCase):
         patcher, _, responses = self._patcher(state="standby")
         await self._ttg(patcher, {"MAP": "0,2,2,3"})
         self.assertEqual(responses, [])
+
+
+class MmuAceRemapTtgCommandTests(_TtgMapPatcherBase):
+    """MMU_REMAP_TTG is what Mainsail's Tool Mapping dialog sends when a gate
+    is picked for a tool (#239). Rinkhals had no handler, so the pick was
+    forwarded to GoKlipper and lost."""
+
+    async def _remap(self, patcher, args):
+        return await self.module.MmuAcePatcher._on_gcode_mmu_remap_ttg(patcher, args, None)
+
+    async def test_picking_a_gate_maps_only_that_tool(self):
+        # Exactly what Mainsail sends.
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "1", "GATE": "3", "QUIET": "1"})
+        self.assertEqual(updates, [[0, 3, 2, 3]])
+        self.assertEqual(responses, [])
+
+    async def test_a_gate_that_does_not_exist_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "1", "GATE": "7"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("does not exist" in r for r in responses))
+
+    async def test_a_tool_that_does_not_exist_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "4", "GATE": "0"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("does not exist" in r for r in responses))
+
+    async def test_a_non_number_is_rejected(self):
+        patcher, updates, responses = self._patcher()
+        await self._remap(patcher, {"TOOL": "x", "GATE": "0"})
+        self.assertEqual(updates, [])
+        self.assertTrue(responses)
+
+    async def test_a_pick_right_after_a_reset_still_applies(self):
+        # The reset cooldown is there for Fluidd re-sending its old MAP, not
+        # for a gate the user just picked.
+        patcher, updates, _ = self._patcher()
+        patcher._last_ttg_reset_time = time.time()
+        await self._remap(patcher, {"TOOL": "0", "GATE": "2"})
+        self.assertEqual(updates, [[2, 1, 2, 3]])
+
+    async def test_remapping_mid_print_says_it_applies_next_print(self):
+        patcher, updates, responses = self._patcher(state="printing")
+        await self._remap(patcher, {"TOOL": "1", "GATE": "3"})
+        self.assertEqual(updates, [[0, 3, 2, 3]])
+        self.assertTrue(any("next print" in r for r in responses))
+
+    async def test_unknown_tool_map_says_so(self):
+        patcher, updates, responses = self._patcher()
+        patcher.ace.ttg_map = []
+        await self._remap(patcher, {"TOOL": "0", "GATE": "1"})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("not known yet" in r for r in responses))
+
+    async def test_bare_command_shows_the_map_instead_of_throwing(self):
+        patcher, updates, responses = self._patcher()
+        patcher.ace.ttg_map = [0, 3, 2, 1]
+        await self._remap(patcher, {})
+        self.assertEqual(updates, [])
+        self.assertTrue(any("T1" in r and "3" in r for r in responses))
+
+    async def test_reset_and_map_behave_like_mmu_ttg_map(self):
+        # In Happy Hare MMU_TTG_MAP is an alias of MMU_REMAP_TTG.
+        patcher, updates, _ = self._patcher()
+        patcher.ace.ttg_map = [3, 2, 1, 0]
+        await self._remap(patcher, {"RESET": "1"})
+        self.assertEqual(updates, [[0, 1, 2, 3]])
+
+        patcher._last_ttg_reset_time = 0.0
+        await self._remap(patcher, {"MAP": "1,0"})
+        self.assertEqual(updates[-1], [1, 0, 2, 3])
+
+
+class MmuSoftwareVarsNameTests(unittest.TestCase):
+    """kobra.py lists and strips the object, mmu_ace.py fills it in. If the
+    names drift, Mainsail subscribes to an object nobody fills (#239)."""
+
+    def test_kobra_and_mmu_ace_use_the_same_object_name(self):
+        try:
+            from test_kobra import load_kobra_module
+        except ImportError:
+            from tests.test_kobra import load_kobra_module
+        kobra = load_kobra_module()
+        mmu_ace = load_mmu_ace_module()
+
+        self.assertEqual(kobra.MMU_SOFTWARE_VARS_OBJECT, "gcode_macro _MMU_SOFTWARE_VARS")
+        self.assertEqual(mmu_ace.MMU_SOFTWARE_VARS_OBJECT, kobra.MMU_SOFTWARE_VARS_OBJECT)
+        self.assertEqual(list(mmu_ace.MMU_SOFTWARE_VARS_STATUS), [kobra.MMU_SOFTWARE_VARS_OBJECT])
+
+
+class MmuAceGcodeHandlerTableTests(unittest.TestCase):
+    """The commands the web UIs send must be registered, or they go to
+    GoKlipper and are lost (#239: MMU_REMAP_TTG had no handler)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def test_tool_mapping_commands_are_registered(self):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        handlers = patcher._gcode_handlers()
+
+        self.assertEqual(handlers["MMU_REMAP_TTG"], patcher._on_gcode_mmu_remap_ttg)
+        self.assertEqual(handlers["MMU_TTG_MAP"], patcher._on_gcode_mmu_ttg_map)
+        self.assertEqual(handlers["MMU_ENDLESS_SPOOL"], patcher._on_gcode_mmu_endless_spool)
+        self.assertEqual(handlers["MMU_GATE_MAP"], patcher._on_gcode_mmu_gate_map)
+
+
+class MmuAceEndlessSpoolCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Mainsail's Reset in the Tool Mapping dialog sends MMU_ENDLESS_SPOOL
+    RESET=1, which used to throw because GROUPS was required (#239)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_mmu_ace_module()
+
+    def _patcher(self, groups):
+        patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        patcher.ace = types.SimpleNamespace(
+            units=[types.SimpleNamespace(gates=[object()] * 4)],
+            endless_spool_groups=list(groups),
+        )
+        pushes, responses = [], []
+        patcher.ace_controller = types.SimpleNamespace(
+            _handle_status_update=lambda force=False: pushes.append(force),
+        )
+
+        async def send_response(message):
+            responses.append(message)
+
+        patcher._send_gcode_response = send_response
+        return patcher, pushes, responses
+
+    async def _endless(self, patcher, args):
+        return await self.module.MmuAcePatcher._on_gcode_mmu_endless_spool(patcher, args, None)
+
+    async def test_reset_puts_every_gate_back_in_one_group(self):
+        patcher, pushes, _ = self._patcher([0, 1, 2, 3])
+        await self._endless(patcher, {"RESET": "1", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 0, 0, 0])
+        self.assertTrue(pushes)
+
+    async def test_groups_still_set_the_groups(self):
+        patcher, _, _ = self._patcher([0, 0, 0, 0])
+        await self._endless(patcher, {"GROUPS": "0,0,2,2", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 0, 2, 2])
+
+    async def test_wrong_length_groups_say_so(self):
+        # Fluidd sends GROUPS="" when no groups are set.
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {"GROUPS": "", "QUIET": "1"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(any("4" in r for r in responses))
+
+    async def test_non_number_groups_say_so_instead_of_throwing(self):
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {"GROUPS": "a,0,0,0"})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(responses)
+
+    async def test_no_groups_and_no_reset_explains_instead_of_throwing(self):
+        patcher, _, responses = self._patcher([0, 1, 0, 1])
+        await self._endless(patcher, {})
+        self.assertEqual(patcher.ace.endless_spool_groups, [0, 1, 0, 1])
+        self.assertTrue(any("GROUPS" in r for r in responses))

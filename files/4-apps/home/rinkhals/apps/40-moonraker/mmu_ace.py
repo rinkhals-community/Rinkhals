@@ -181,6 +181,17 @@ class MmuAceStatus:
     mmu: MmuStatus
     mmu_machine: MmuMachineStatus
 
+# Happy Hare's settings macro. Mainsail's Tool Mapping dialog reads
+# automap_strategy from it with no fallback, so without it the dialog throws
+# and never opens (#239). Rinkhals never automaps (MMU_SLICER_TOOL_MAP
+# SKIP_AUTOMAP is a no-op), so the strategy is "none", which also hides the
+# dialog's skip-automap toggle.
+# kobra.py lists the object under the same name (tests check both match).
+MMU_SOFTWARE_VARS_OBJECT = "gcode_macro _MMU_SOFTWARE_VARS"
+MMU_SOFTWARE_VARS_STATUS = {
+    MMU_SOFTWARE_VARS_OBJECT: {"automap_strategy": "none"},
+}
+
 GATE_UNKNOWN = -1
 GATE_EMPTY = 0
 GATE_AVAILABLE = 1 # Available to load from either buffer or spool
@@ -2033,23 +2044,8 @@ class MmuAcePatcher:
         self.server.register_notification("mmu_ace:status_update", "mmu_ace_status_update")
 
         # gcode handlers
-        self.register_gcode_handler("MMU_GATE_MAP", self._on_gcode_mmu_gate_map)
-        self.register_gcode_handler("MMU_SET_SPOOL", self._on_gcode_mmu_set_spool)
-        self.register_gcode_handler("MMU_TTG_MAP", self._on_gcode_mmu_ttg_map)
-        self.register_gcode_handler("MMU_ENDLESS_SPOOL", self._on_gcode_mmu_endless_spool)
-        self.register_gcode_handler("MMU_SELECT", self._on_gcode_mmu_select)
-        self.register_gcode_handler("MMU_SLICER_TOOL_MAP", self._on_gcode_mmu_slicer_tool_map)
-        self.register_gcode_handler("MMU_LOAD", self._on_gcode_mmu_load)
-        self.register_gcode_handler("MMU_UNLOAD", self._on_gcode_mmu_unload)
-        self.register_gcode_handler("MMU_EJECT", self._on_gcode_mmu_eject)
-        self.register_gcode_handler("MMU_HOME", self._on_gcode_mmu_home)
-        self.register_gcode_handler("MMU_CHECK_GATE", self._on_gcode_mmu_check_gate)
-        self.register_gcode_handler("MMU_CHECK_GATES", self._on_gcode_mmu_check_gates)
-        self.register_gcode_handler("MMU_GATE_SKUS", self._on_gcode_mmu_gate_skus)
-        self.register_gcode_handler("MMU_RECOVER", self._on_gcode_mmu_recover)
-        self.register_gcode_handler("MMU_DRYER_START", self._on_gcode_dryer_start)
-        self.register_gcode_handler("MMU_DRYER_STOP", self._on_gcode_dryer_stop)
-        self.register_gcode_handler("MMU_DRYER_FAN_SPEED", self._on_gcode_dryer_fan_speed)
+        for cmd, handler in self._gcode_handlers().items():
+            self.register_gcode_handler(cmd, handler)
 
         self.kobra.register_status_patcher(self.patch_status)
 
@@ -2076,6 +2072,29 @@ class MmuAcePatcher:
 
         # Add AnycubicSlicerNext to supported slicers
         self.setup_anycubic_slicer()
+
+    def _gcode_handlers(self) -> Dict[str, FlexCallback]:
+        """Commands handled here instead of being forwarded to GoKlipper."""
+        return {
+            "MMU_GATE_MAP": self._on_gcode_mmu_gate_map,
+            "MMU_SET_SPOOL": self._on_gcode_mmu_set_spool,
+            "MMU_TTG_MAP": self._on_gcode_mmu_ttg_map,
+            "MMU_REMAP_TTG": self._on_gcode_mmu_remap_ttg,
+            "MMU_ENDLESS_SPOOL": self._on_gcode_mmu_endless_spool,
+            "MMU_SELECT": self._on_gcode_mmu_select,
+            "MMU_SLICER_TOOL_MAP": self._on_gcode_mmu_slicer_tool_map,
+            "MMU_LOAD": self._on_gcode_mmu_load,
+            "MMU_UNLOAD": self._on_gcode_mmu_unload,
+            "MMU_EJECT": self._on_gcode_mmu_eject,
+            "MMU_HOME": self._on_gcode_mmu_home,
+            "MMU_CHECK_GATE": self._on_gcode_mmu_check_gate,
+            "MMU_CHECK_GATES": self._on_gcode_mmu_check_gates,
+            "MMU_GATE_SKUS": self._on_gcode_mmu_gate_skus,
+            "MMU_RECOVER": self._on_gcode_mmu_recover,
+            "MMU_DRYER_START": self._on_gcode_dryer_start,
+            "MMU_DRYER_STOP": self._on_gcode_dryer_stop,
+            "MMU_DRYER_FAN_SPEED": self._on_gcode_dryer_fan_speed,
+        }
 
     def register_gcode_handler(self, cmd, callback: FlexCallback):
         self.kobra.register_gcode_handler(cmd, callback)
@@ -2713,6 +2732,13 @@ class MmuAcePatcher:
             await self._note_ttg_map_applies_next_print()
             return None
 
+        # No MAP: show the current map, as Happy Hare does, instead of failing
+        # on the missing argument.
+        if "MAP" not in args:
+            mapping = ", ".join(f"T{tool}>G{gate}" for tool, gate in enumerate(self.ace.ttg_map))
+            await self._send_gcode_response(f"MMU_TTG_MAP: {mapping or 'tool map not known yet'}")
+            return None
+
         # Check if we're within cooldown period after a reset
         cooldown_period = 2.0  # seconds
         time_since_reset = time.time() - self._last_ttg_reset_time
@@ -2750,6 +2776,50 @@ class MmuAcePatcher:
         self.ace_controller.update_ttg_map(ttg_map)
         await self._note_ttg_map_applies_next_print()
 
+    # Triggered when a gate is picked in Mainsail's Tool Mapping dialog (#239)
+    async def _on_gcode_mmu_remap_ttg(self, args: dict[str, str | None], delegate):
+        """MMU_REMAP_TTG TOOL=<t> GATE=<g> maps one tool. In Happy Hare,
+        MMU_TTG_MAP is an alias of this command, so without TOOL/GATE it takes
+        RESET and MAP the same way."""
+        if "TOOL" not in args and "GATE" not in args:
+            return await self._on_gcode_mmu_ttg_map(args, delegate)
+
+        try:
+            tool = self._get_gcode_arg_int("TOOL", args)
+            gate = self._get_gcode_arg_int("GATE", args)
+        except ValueError as e:
+            await self._send_gcode_response(f"MMU_REMAP_TTG: {e}. The tool map was not changed.")
+            return None
+
+        num_gates = sum(len(unit.gates) for unit in self.ace.units)
+        ttg_map = list(self.ace.ttg_map)
+        if not ttg_map:
+            await self._send_gcode_response(
+                "MMU_REMAP_TTG: the tool map is not known yet (waiting for the ACE). "
+                "The tool map was not changed."
+            )
+            return None
+        if not 0 <= tool < len(ttg_map):
+            await self._send_gcode_response(
+                f"MMU_REMAP_TTG: tool {tool} does not exist (tools are 0 to {len(ttg_map) - 1}). "
+                f"The tool map was not changed."
+            )
+            return None
+        if not 0 <= gate < num_gates:
+            await self._send_gcode_response(
+                f"MMU_REMAP_TTG: gate {gate} does not exist (gates are 0 to {num_gates - 1}). "
+                f"The tool map was not changed."
+            )
+            return None
+
+        # No reset cooldown here: it guards against Fluidd re-sending its old
+        # MAP after a RESET, not against a gate the user just picked.
+        ttg_map[tool] = gate
+        logging.info(f"MMU_REMAP_TTG: tool {tool} -> gate {gate}, map {ttg_map}")
+        self.ace_controller.update_ttg_map(ttg_map)
+        await self._note_ttg_map_applies_next_print()
+        return None
+
     async def _note_ttg_map_applies_next_print(self):
         """The tool-to-gate map reaches GoKlipper once, at print start (see
         patch_print_data). Changing it while a print is running only changes
@@ -2771,18 +2841,43 @@ class MmuAcePatcher:
     async def _on_gcode_mmu_endless_spool(self, args: dict[str, str | None], delegate):
         """Configure endless spool groups (Happy Hare compatible)"""
         logging.debug(f"handle _on_gcode_mmu_endless_spool: {json.dumps(args)}")
-        groups_str = self._get_gcode_arg_str("GROUPS", args)
+        num_gates = sum(len(unit.gates) for unit in self.ace.units)
+
+        # Mainsail's Tool Mapping Reset sends this alongside MMU_TTG_MAP RESET=1
+        # (#239). Every gate in one group is what Rinkhals reports by default.
+        if self._get_gcode_arg_int("RESET", args, default=0) == 1:
+            self.ace.endless_spool_groups = [0] * num_gates
+            self.ace_controller._handle_status_update(force=False)
+            logging.info(f"Endless spool groups reset: {self.ace.endless_spool_groups}")
+            return None
+
+        if "GROUPS" not in args:
+            await self._send_gcode_response(
+                'MMU_ENDLESS_SPOOL: give GROUPS="g0,g1,..." (one group per gate) or RESET=1.'
+            )
+            return None
+
+        groups_str = self._get_gcode_arg_str("GROUPS", args) or ""
         logging.debug(f"handle _on_gcode_mmu_endless_spool groups_str: {groups_str}")
 
         # Parse groups: "0,0,1,1" means gate 0+1 are group 0, gate 2+3 are group 1
         # Handle empty strings (e.g., ",,0" becomes [0, 0, 0])
-        groups = [int(g) if g.strip() else 0 for g in groups_str.split(",")]
+        try:
+            groups = [int(g) if g.strip() else 0 for g in groups_str.split(",")]
+        except ValueError:
+            await self._send_gcode_response(
+                f"MMU_ENDLESS_SPOOL: GROUPS={groups_str} is not a list of group numbers. "
+                f"The groups were not changed."
+            )
+            return None
 
-        # Validate
-        num_gates = sum(len(unit.gates) for unit in self.ace.units)
         if len(groups) != num_gates:
             logging.error(f"GROUPS length {len(groups)} != num_gates {num_gates}")
-            return
+            await self._send_gcode_response(
+                f"MMU_ENDLESS_SPOOL: GROUPS needs {num_gates} entries, one per gate, "
+                f"got {len(groups)}. The groups were not changed."
+            )
+            return None
 
         self.ace.endless_spool_groups = groups
         self.ace_controller._handle_status_update(force=False)  # Debounce
@@ -3102,7 +3197,9 @@ class MmuAcePatcher:
         the clients that are subscribed to mmu (issues #140, #125).
         """
 
-        mmu_status = self.get_status()
+        # Fresh copies: status values can end up in caches that update in place.
+        mmu_status = {**self.get_status(),
+                      **{name: dict(value) for name, value in MMU_SOFTWARE_VARS_STATUS.items()}}
 
         # return the full, current status
         if not is_subscription_update:
