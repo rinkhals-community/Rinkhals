@@ -214,6 +214,12 @@ LIVE_BED_MESH_VERIFIED = (
 )
 
 
+# Happy Hare settings macro Mainsail's Tool Mapping dialog reads with no
+# fallback (#239). Listed and kept away from GoKlipper here; mmu_ace.py fills it
+# in under the same name (tests check both match).
+MMU_SOFTWARE_VARS_OBJECT = "gcode_macro _MMU_SOFTWARE_VARS"
+
+
 class Kobra:
     # Environment
     KOBRA_MODEL_ID = None
@@ -558,6 +564,9 @@ class Kobra:
         prefix = '/useremain/app/gk/gcodes/'
         if file_path.startswith(prefix):
             file_path = file_path.replace(prefix, '', 1)
+        elif file_path == prefix.rstrip('/'):
+            # GoKlipper sends the directory without the trailing slash
+            file_path = ''
 
         # After a print, virtual_sdcard.file_path can be just the gcodes directory
         # while print_stats.filename still names the file. Switching to '' and back
@@ -1755,7 +1764,8 @@ class Kobra:
                         "bed_mesh \"default\"",
                         "idle_timeout",
                         "mmu",
-                        "mmu_machine"
+                        "mmu_machine",
+                        MMU_SOFTWARE_VARS_OBJECT
                     ]
 
                     # For KS1M: Do not expose motion_report to avoid GoKlipper panic:
@@ -1767,7 +1777,8 @@ class Kobra:
                     web_request.endpoint = 'gcode/help'
                     result = await original_request(me, web_request)
                     for gcode in result:
-                        objects.append(f"gcode_macro {gcode}")
+                        if f"gcode_macro {gcode}" not in objects:
+                            objects.append(f"gcode_macro {gcode}")
                     
                     if self.KOBRA_MODEL_CODE == 'KS1' or self.KOBRA_MODEL_CODE == 'KS1M':
                         objects.append("fan_generic air_filter_fan")
@@ -1828,6 +1839,7 @@ class Kobra:
                         web_request.get_endpoint() in ('objects/query', 'objects/subscribe')):
                     args['objects'].pop('mmu', None)
                     args['objects'].pop('mmu_machine', None)
+                    args['objects'].pop(MMU_SOFTWARE_VARS_OBJECT, None)
 
                 return await original__request_standard(me, web_request, timeout)
             return _request_standard
@@ -2274,6 +2286,16 @@ class Kobra:
         setattr(KlippyConnection, 'request', wrap_request(KlippyConnection.request))
 
 
+# A shell power command that hangs must not hang Moonraker with it
+SHELL_POWER_TIMEOUT = 10
+
+
+def run_shell_power_command(command: str, timeout: float = SHELL_POWER_TIMEOUT) -> str:
+    # Raises subprocess.TimeoutExpired when the command runs longer than timeout seconds
+    result = subprocess.check_output(['sh', '-c', command], timeout=timeout)
+    return result.decode('utf-8').strip()
+
+
 class ShellPowerDevice(PowerDevice):
     def __init__(self, config):
         super().__init__(config)
@@ -2295,8 +2317,7 @@ class ShellPowerDevice(PowerDevice):
 
         try:
             command = self.get_state_command
-            result = subprocess.check_output(['sh', '-c', command])
-            result = result.decode('utf-8').strip()
+            result = run_shell_power_command(command)
             logging.debug(f'ShellPowerDevice "{command}" => "{result}"')
 
             previous_state = self.state
@@ -2320,8 +2341,7 @@ class ShellPowerDevice(PowerDevice):
 
         try:
             command = self.power_on_command if state else self.power_off_command
-            result = subprocess.check_output(['sh', '-c', command])
-            result = result.decode('utf-8').strip()
+            result = run_shell_power_command(command)
             logging.debug(f'ShellPowerDevice "{command}" => "{result}"')
         except:
             logging.exception(f"ShellPowerDevice error: {self.name}")

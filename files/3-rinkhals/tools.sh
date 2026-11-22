@@ -83,8 +83,14 @@ quit() {
     exit 1
 }
 
+# Prints the free (Available) space of the filesystem holding $1, in KB. -P keeps it on one line
+free_space_kb() {
+    df -kP $1 | tail -1 | awk '{print $4}'
+}
+
 check_compatibility() {
-    if [ "$KOBRA_MODEL_CODE" != "K2P" ] && [ "$KOBRA_MODEL_CODE" == "K3" ] && [ "$KOBRA_MODEL_CODE" == "KS1" ] && [ "$KOBRA_MODEL_CODE" == "K3M" ]; then
+    # KOBRA_MODEL_CODE is only set for the model ids tools.sh knows
+    if [ -z "$KOBRA_MODEL_CODE" ]; then
         log "Your printer's model is not recognized, exiting"
         quit
     fi
