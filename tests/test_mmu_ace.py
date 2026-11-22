@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import re
 import sys
 import types
@@ -2871,6 +2872,15 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.assertEqual(self._overrides().get(0), 24)
 
+    async def test_a_reset_rebinds_from_the_tag_without_a_hub_change(self):
+        await self._rebuild()
+        self.controller.clear_all_manual_spool_ids()
+        self.assertNotIn(0, self._overrides())
+
+        await self.loop.drain()
+
+        self.assertEqual(self._overrides().get(0), 24)
+
     async def test_the_binding_is_remembered_with_the_sku(self):
         await self._rebuild()
 
@@ -2883,6 +2893,53 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.assertNotIn(0, self._overrides())
         self.assertEqual(self._urls(), [])
+
+    async def _unread_lines(self, sku):
+        with self.assertLogs(level="INFO") as captured:
+            await self._rebuild(self._hub(material="PETG", sku=sku))
+        return [r for r in captured.output if "Gate 0" in r and "carries no spool ID" in r]
+
+    async def _unread_lines_unasserted(self, sku):
+        """Like _unread_lines, but fine with nothing logged at all."""
+        records = []
+        handler = logging.Handler(level=logging.INFO)
+        handler.emit = records.append
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            await self._rebuild(self._hub(material="PETG", sku=sku))
+        finally:
+            root.removeHandler(handler)
+        return [r.getMessage() for r in records
+                if "Gate 0" in r.getMessage() and "carries no spool ID" in r.getMessage()]
+
+    async def test_an_openspool_sku_without_an_id_says_why(self):
+        lines = await self._unread_lines("OPENSPOOL")
+
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("firmware", lines[0])
+        self.assertNotIn(0, self._overrides())
+
+    async def test_a_chip_uid_sku_says_why(self):
+        lines = await self._unread_lines("OS-04A1B2C3D4E5F6")
+
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("no numeric spool_id", lines[0])
+
+    async def test_the_reason_is_logged_once_per_spool(self):
+        await self._unread_lines("OPENSPOOL")
+
+        self.assertEqual(await self._unread_lines_unasserted("OPENSPOOL"), [])
+
+    async def test_a_readable_sku_logs_no_reason(self):
+        lines = await self._unread_lines("OS-24")
+
+        self.assertEqual(lines, [])
+
+    async def test_no_reason_is_logged_when_reading_ids_is_off(self):
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("off")
+
+        self.assertEqual(await self._unread_lines_unasserted("OPENSPOOL"), [])
 
     async def test_a_chip_uid_is_not_an_id(self):
         await self._rebuild(self._hub(sku="OS-04A1B2C3D4E5F6"))
@@ -3386,6 +3443,28 @@ class MmuAceClearedGateTests(MatcherTestBase):
         self.controller.clear_all_manual_spool_ids()
 
         await self._rebuild()
+
+        self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
+
+    async def test_a_full_reset_rematches_without_a_hub_change(self):
+        # An idle printer sends no status changes, so the reset itself has to
+        # offer the gates to the matcher again; seen on hardware, where the gates
+        # stayed unassigned until Moonraker was restarted.
+        await self._rebuild()
+        self.controller.clear_all_manual_spool_ids()
+
+        await self.loop.drain()
+
+        self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
+
+    async def test_a_reset_with_nothing_assigned_still_matches(self):
+        self.controller._matcher.mode = "off"
+        await self._rebuild()
+        self.assertNotIn(0, self.controller._manual_spool_overrides)
+        self.controller._matcher.mode = "unique"
+
+        self.controller.clear_all_manual_spool_ids()
+        await self.loop.drain()
 
         self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
 

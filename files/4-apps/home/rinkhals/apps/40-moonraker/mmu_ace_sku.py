@@ -331,6 +331,34 @@ class SkuFormat:
             return None
         return identified[1]
 
+    def unread_reason(self, sku: str, formats) -> Optional[str]:
+        """Why a tag's SKU gives no spool ID under these formats, or None.
+
+        None when there is nothing to explain: no format is enabled, the gate has
+        no tag, or the SKU does carry an enabled format's ID. Otherwise a short
+        reason for the log, so a tag that is read but never bound says why
+        instead of leaving the log silent.
+        """
+        if not isinstance(formats, frozenset):
+            formats = parse_sku_id_formats(formats)
+        sku = (sku or "").strip()
+        if not formats or not sku:
+            return None
+        upper = sku.upper()
+        if upper in NON_IDENTIFYING_SKUS:
+            return ("this ACE firmware drops the tag's spool_id and reports only "
+                    "OPENSPOOL (OpenCubic v1.0.3 or newer reports OS-<spool_id>)")
+        identified = self.identify(upper)
+        if identified is not None:
+            if identified[0] in formats:
+                return None
+            return (f"{identified[0]} format, which sku_spool_id does not include "
+                    f"(enabled: {', '.join(sorted(formats))})")
+        if upper.startswith("OS-"):
+            return ("not OS-<digits>: the tag has no numeric spool_id, so the hub "
+                    "reports the chip UID instead")
+        return "not a sku_spool_id format (a stock Anycubic SKU, or a format Rinkhals does not read)"
+
     @staticmethod
     def identify(sku: str) -> Optional[tuple]:
         """(format name, spool ID) for a SKU in one of SKU_ID_FORMATS, or None.

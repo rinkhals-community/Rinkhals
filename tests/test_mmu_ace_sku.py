@@ -416,5 +416,46 @@ class MmuAceSkuStoreDataTests(unittest.TestCase):
                 self.assertIsNone(SKU.SkuFormat().spool_id(sku, "all"))
 
 
+class MmuAceSkuUnreadReasonTests(unittest.TestCase):
+    """SkuFormat.unread_reason: why a tag that is read gives no spool ID.
+
+    The log has to say something for a tag the hub reads but never binds, or the
+    only symptom is a silent log (a user report on #233).
+    """
+
+    def reason(self, sku, formats="openspool"):
+        return SKU.SkuFormat().unread_reason(sku, formats)
+
+    def test_nothing_to_say_when_the_id_is_read(self):
+        self.assertIsNone(self.reason("OS-24"))
+
+    def test_nothing_to_say_when_reading_ids_is_off(self):
+        self.assertIsNone(self.reason("OPENSPOOL", "off"))
+
+    def test_nothing_to_say_for_an_untagged_gate(self):
+        self.assertIsNone(self.reason(""))
+        self.assertIsNone(self.reason(None))
+
+    def test_openspool_names_the_firmware(self):
+        reason = self.reason("OPENSPOOL")
+        self.assertIn("firmware", reason)
+        self.assertIn("OS-<spool_id>", reason)
+
+    def test_a_chip_uid_says_the_tag_has_no_numeric_spool_id(self):
+        self.assertIn("no numeric spool_id", self.reason("OS-04A1B2C3D4E5F6"))
+
+    def test_an_all_digit_chip_uid_too_large_for_an_id_says_the_same(self):
+        self.assertIn("no numeric spool_id", self.reason("OS-04123456789012"))
+
+    def test_a_format_that_is_not_enabled_is_named(self):
+        reason = self.reason("SM8", "openspool")
+        self.assertIn("spoolkid_ac", reason)
+        self.assertIn("enabled: openspool", reason)
+
+    def test_a_stock_anycubic_sku_says_it_carries_no_id(self):
+        self.assertIn("stock Anycubic", self.reason("AHPLBK-105", "all"))
+        self.assertNotIn("spool ID", self.reason("AHPLBK-105", "all"))
+
+
 if __name__ == "__main__":
     unittest.main()

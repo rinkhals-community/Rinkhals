@@ -1827,6 +1827,12 @@ class MmuAceController:
                 # the assignment with it.
                 self.set_manual_spool_id(gate_index, spool_id)
                 return
+            # Reading tag IDs is on but this SKU gives none: say why, or a tag the
+            # hub reads but never binds leaves nothing in the log to go on.
+            # Logged once per spool, like every other outcome here.
+            unread = self._matcher.sku_unread_reason(gate.sku)
+            if unread:
+                logging.info(f"Gate {gate_index}: SKU {gate.sku} carries no spool ID - {unread}")
             spool_id = await self._matcher.match(gate, gate_index) if self._matcher.enabled else None
             if not spool_id:
                 return
@@ -2041,9 +2047,13 @@ class MmuAceController:
         """
         # A reset is "start over", so gates become matchable again.
         self._auto_match_seen.clear()
+        self._tag_refused_at.clear()
         gates = set(self._manual_spool_overrides) | set(self._spool_store.entries)
-        if not gates:
-            return
+        if gates:
+            self._forget_all_assignments(gates)
+        self._rematch_all_gates()
+
+    def _forget_all_assignments(self, gates):
         for gate_index in sorted(gates):
             self._forget_spool_assignment(gate_index)
             # The loaded gate's spool is still active in Spoolman and nothing
@@ -2057,6 +2067,24 @@ class MmuAceController:
             if gate_lookup:
                 gate_lookup[1].spool_id = 0
         self._handle_status_update(force=True)
+
+    def _rematch_all_gates(self):
+        """Offer every gate to the matcher again, now rather than on the next hub change.
+
+        Matching normally runs from the ACE status rebuild, and an idle printer
+        sends no status changes, so after a reset the gates stayed unassigned
+        until a spool was moved or Moonraker restarted. This runs the same
+        per-gate sync the rebuild does, on the gates as last reported.
+        """
+        if not self.ace.enabled:
+            # No hub report yet, so the gates are placeholders; the first
+            # rebuild will offer them to the matcher anyway.
+            return
+        global_index = 0
+        for unit in self.ace.units:
+            for gate in unit.gates:
+                self._sync_spool_store(global_index, gate, gate.sku)
+                global_index += 1
 
     def set_manual_spool_id(self, gate_index: int, spool_id: int) -> bool:
         """Assign a Spoolman database ID to a gate, effective immediately.
@@ -2127,6 +2155,10 @@ class MmuAcePatcher:
         # Vendor codes for anycubic_style SKUs you wrote yourself, e.g. "AT=Atomic,
         # T=Tinmorry". Only those SKUs carry a user vendor code; no other format uses it.
         vendor_prefixes = SkuFormat.parse_prefixes(config.get("sku_vendor_prefixes", ""))
+        # One line saying what was actually loaded: the first thing to check when
+        # tags are not being bound is whether the setting reached Moonraker at all.
+        logging.info(f"[mmu_ace] sku_spool_id: {', '.join(sorted(sku_spool_id)) or 'off'}, "
+                     f"spool_auto_match: {auto_match_mode}")
 
         self.ace_controller = MmuAceController(self.server, host, spool_forget_after=spool_forget_after,
                                                auto_match_mode=auto_match_mode,

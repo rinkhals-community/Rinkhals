@@ -96,6 +96,10 @@ class MmuAceSpoolMatcher:
         """
         return self.sku_format.spool_id(sku, self.sku_spool_id)
 
+    def sku_unread_reason(self, sku: str) -> Optional[str]:
+        """Why a SKU gives no spool ID under sku_spool_id, or None (see SkuFormat.unread_reason)."""
+        return self.sku_format.unread_reason(sku, self.sku_spool_id)
+
     async def spool_from_sku(self, gate, gate_index: int) -> Optional[int]:
         """The spool a tag names for this gate, once Spoolman agrees, or None.
 

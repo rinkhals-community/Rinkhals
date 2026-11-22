@@ -166,7 +166,7 @@ because the SKU is absent or uninformative more often than not:
 - OpenSpool tags are only readable on custom ACE firmware such as
   [OpenCubic](https://github.com/Jupsi/OpenCubic); stock firmware reads Anycubic tags only, and
   reports any other spool as untagged. What the hub reports as the SKU depends on the version:
-    - **ACE 1 Pro CFW v1.1.2 / ACE 2 Pro CFW v1.0.7 or newer** (OpenCubic v1.0.3-beta.2 or
+    - **ACE 1 Pro CFW v1.1.2 / ACE 2 Pro CFW v1.0.7 or newer** (OpenCubic v1.0.3 or
       newer): `OS-<spool_id>` when the tag's payload has a `spool_id` of 1 to 16 characters from
       `A-Z a-z 0-9 . _ -`; otherwise `OS-<chip UID>` in upper-case hex, for example
       `OS-04A1B2C3D4E5F6`; otherwise the literal `OPENSPOOL`. The SKU field holds at most 19
@@ -436,6 +436,7 @@ is replaced as soon as the printer loads a gate.
 | Assignment disappears after a spool swap | Expected on untagged or same-product spools — see the limitation above. |
 | Auto-match does not reassign a gate I cleared | Working as intended — a deliberate clear is remembered. Take the spool out and back in, assign it yourself, or `MMU_GATE_MAP RESET=1`. |
 | Auto-match never assigns a gate | Check `spool_auto_match` is set, then run `grep -i auto-match app-moonraker.log` — every outcome says which it was. Nothing at all means it was never attempted: the gate is already assigned, you cleared it deliberately, or the spool has not changed since the last attempt. |
+| A tag's spool ID is never bound | Check the startup line `[mmu_ace] sku_spool_id: ...` lists the format you set; if it says `off`, the setting is not in `moonraker.custom.conf`. Run `MMU_GATE_SKUS` to see what SKU the hub reports, then `grep "Gate N:" moonraker.log`: a read tag logs either "names Spoolman spool" (with why it was or was not bound) or "carries no spool ID" (with why the SKU holds none, such as `OPENSPOOL` from older firmware or `OS-<chip UID>` from a tag without a numeric `spool_id`). |
 | Auto-match logs "found several spools [a, b] ... leaving it unassigned" | Several rolls share that article number, or that material and colour — often one filament with several spools. Pick one yourself, or set `spool_auto_match: latest`. |
 | Auto-match logs "found no Spoolman spool" | Nothing in the library matches. Check the filament's `article_number`, or its material and colour against what the MMU panel shows for that gate. |
 | Usage debited to the wrong spool | Check the gate's mapped spool in the UI; `grep -i spoolman` in `app-moonraker.log` shows every activation. |
