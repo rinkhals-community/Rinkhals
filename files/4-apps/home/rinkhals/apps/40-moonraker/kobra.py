@@ -558,6 +558,9 @@ class Kobra:
         prefix = '/useremain/app/gk/gcodes/'
         if file_path.startswith(prefix):
             file_path = file_path.replace(prefix, '', 1)
+        elif file_path == prefix.rstrip('/'):
+            # GoKlipper sends the directory without the trailing slash
+            file_path = ''
 
         # After a print, virtual_sdcard.file_path can be just the gcodes directory
         # while print_stats.filename still names the file. Switching to '' and back
