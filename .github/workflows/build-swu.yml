@@ -2,6 +2,11 @@ name: Build SWU
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build as (default: the commit SHA)"
+        required: false
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -32,7 +37,7 @@ jobs:
       with:
         push: false
         context: .
-        build-args: version=${{ github.sha }}
+        build-args: version=${{ inputs.version || github.sha }}
         outputs: type=local,dest=./build/dist
         cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/rinkhals:buildcache
         cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/rinkhals:buildcache,mode=max
