@@ -690,6 +690,40 @@ class KobraExcludeObjectScanTests(unittest.TestCase):
         self.assertEqual(self.kobra._exclude_object_current_file, self.FILE)
         self.assertEqual(self.kobra._exclude_object_objects, [])
 
+    def test_gcodes_directory_without_trailing_slash_does_not_replace_the_tracked_file(self):
+        # GoKlipper reports virtual_sdcard.file_path as the bare directory, with
+        # no trailing slash, once a print ends or is cancelled
+        self._objects(self.HEADER + [';LAYER_CHANGE\n'])
+
+        self.kobra._set_exclude_object_file('/useremain/app/gk/gcodes')
+
+        self.assertEqual(self.kobra._exclude_object_current_file, self.FILE)
+        self.assertEqual(self.kobra._exclude_object_objects, [])
+
+    def test_status_updates_after_a_print_without_trailing_slash_read_the_file_once(self):
+        # Same as the #111 reconnect loop, with the path exactly as GoKlipper
+        # sends it. Without the fix the tracked file flips between the gcode and
+        # the directory on every update and the header is re-read each time
+        updates = [
+            {
+                'print_stats': {'filename': self.FILE},
+                'virtual_sdcard': {'file_path': '/useremain/app/gk/gcodes'},
+                'exclude_object': {'objects': [], 'excluded_objects': [], 'current_object': None},
+            },
+            {
+                'print_stats': {'filename': self.FILE},
+                'exclude_object': {'objects': [], 'excluded_objects': [], 'current_object': None},
+            },
+        ]
+
+        isfile, opener = self._scan(self.HEADER + [';LAYER_CHANGE\n'] + self.BODY)
+        with isfile, opener:
+            for _ in range(5):
+                for status in copy.deepcopy(updates):
+                    self.kobra.patch_status(status, is_subscription_update=True)
+
+        self.assertEqual(len(self.opened), 1)
+
     def test_mainsail_reconnects_after_a_print_read_the_file_once(self):
         # Every reconnect in the #111 log: print_stats still names the last file
         # while virtual_sdcard.file_path is just the gcodes directory
