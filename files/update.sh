@@ -134,7 +134,7 @@ check_compatibility
 
 
 # Check if we have enough space
-FREE_SPACE=$(df -k /useremain | tail -1 | awk '{print $3}')
+FREE_SPACE=$(free_space_kb /useremain)
 if [ "$FREE_SPACE" != "" ] && [ "$FREE_SPACE" -lt "500000" ]; then
     log "Not enough free space in /useremain"
     quit
