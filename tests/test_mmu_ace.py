@@ -3155,7 +3155,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         await self._rebuild()
         self.assertNotIn(0, self._overrides(), "not before the recheck interval")
 
-        self.controller._tag_refused_at[0] -= self.controller.TAG_RECHECK_S
+        self.controller._parked[0].until = 0
         await self._rebuild()
         self.assertEqual(self._overrides().get(0), 24)
 
@@ -3164,11 +3164,11 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         await self._rebuild()
 
         self.assertNotIn(0, self._overrides())
-        self.assertIn(0, self.controller._spoolman_failed_at,
-                      "an outage must be retried, not count as having considered the spool")
+        self.assertEqual(self.controller._parked[0].reason, "unreachable",
+                         "an outage must be retried, not count as having considered the spool")
 
         self.spoolman.http_client.fail = False
-        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
+        self.controller._parked[0].until = 0
         await self._rebuild()
 
         self.assertEqual(self._overrides().get(0), 24)
@@ -3177,11 +3177,11 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.spoolman.http_client.spool_status = 500
         await self._rebuild()
 
-        self.assertIn(0, self.controller._spoolman_failed_at)
-        self.assertNotIn(0, self.controller._tag_refused_at)
+        self.assertEqual(self.controller._parked[0].reason, "unreachable",
+                         "a 500 is no answer, not a refusal")
 
         self.spoolman.http_client.spool_status = None
-        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
+        self.controller._parked[0].until = 0
         await self._rebuild()
 
         self.assertEqual(self._overrides().get(0), 24)
@@ -3207,7 +3207,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertFalse([m for m in logs.output if "could not reach" in m])
         # A config state, not an outage: no attempt, so nothing to retry.
         self.assertEqual(self.controller._auto_match_seen, {})
-        self.assertEqual(self.controller._spoolman_failed_at, {})
+        self.assertEqual(self.controller._parked, {})
 
     async def test_get_spool_raises_on_an_outage_and_returns_none_on_404(self):
         matcher = self.controller._matcher
@@ -3309,7 +3309,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.assertNotIn(0, self._overrides())
         self.assertFalse([u for u in self._urls() if "material=PETG" in u])
-        self.assertIn(0, self.controller._tag_refused_at)
+        self.assertEqual(self.controller._parked[0].reason, "refused")
 
     async def test_a_refused_tag_binds_once_spoolman_is_fixed_with_matching_on(self):
         self._refused_tag_setup()
@@ -3318,7 +3318,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None), (25, "PETG", "FCF6F6", None))
         self.controller._matcher._cache.clear()
-        self.controller._tag_refused_at[0] -= self.controller.TAG_RECHECK_S
+        self.controller._parked[0].until = 0
         await self._rebuild(self._hub(colour=(252, 246, 246)))
 
         self.assertEqual(self._overrides().get(0), 24)
@@ -3378,12 +3378,10 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         other = 1 - bound[0] if len(bound) == 1 else None
         self.assertEqual(len(bound), 1, "one roll cannot be in two gates")
         self.assertNotIn(other, self._overrides())
-        self.assertIn(other, self.controller._tag_refused_at)
+        self.assertEqual(self.controller._parked[other].blocker, 1 - other)
 
-        # The bound gate is emptied; once the recheck is due the other one binds.
+        # The bound gate is emptied, and the other one binds on that rebuild.
         empty_bound = self._two_gate_hub(*(("OS-24", None) if bound[0] == 1 else (None, "OS-24")))
-        await self._rebuild(empty_bound)
-        self.controller._tag_refused_at[other] -= self.controller.TAG_RECHECK_S
         await self._rebuild(empty_bound)
 
         self.assertEqual(self._overrides().get(other), 24)
@@ -3435,7 +3433,7 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         other = 1 - bound
 
         missed = self._two_gate_hub(*(("", "OS-24") if bound == 0 else ("OS-24", "")))
-        self.controller._tag_refused_at[other] -= self.controller.TAG_RECHECK_S
+        self.controller._parked[other].until = 0
         await self._rebuild(missed)
 
         self.assertEqual(self._overrides().get(bound), 24, "the bound gate keeps its spool")
@@ -3512,6 +3510,49 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
 
         self.assertEqual(self._overrides().get(0), 25)
         self.assertEqual(self.controller._get_gate_by_index(0)[1].spool_id, 25)
+
+    async def _bound_duplicate(self):
+        """Gates 0 and 1 both read OS-24: (bound gate, refused gate)."""
+        hub = self._two_gate_hub("OS-24", "OS-24")
+        await self._rebuild(hub)
+        await self._rebuild(hub)
+        bound = next(g for g in (0, 1) if self._overrides().get(g) == 24)
+        return bound, 1 - bound
+
+    async def test_pulling_the_blocking_roll_frees_the_spool_on_that_rebuild(self):
+        bound, other = await self._bound_duplicate()
+
+        await self._rebuild(self._two_gate_hub(*(("OS-24", None) if bound == 1 else (None, "OS-24"))))
+
+        self.assertEqual(self._overrides().get(other), 24, "no TAG_RECHECK_S wait")
+        self.assertNotIn(bound, self._overrides())
+
+    async def test_clearing_the_blocking_gate_frees_the_spool_at_once(self):
+        bound, other = await self._bound_duplicate()
+
+        self.controller.clear_manual_spool_id(bound)
+        await self.loop.drain()
+
+        self.assertEqual(self._overrides().get(other), 24)
+
+    async def test_a_blocked_gate_is_not_asked_again_while_the_blocker_holds(self):
+        bound, other = await self._bound_duplicate()
+        self.spoolman.http_client.requested.clear()
+
+        for _ in range(3):
+            await self._rebuild(self._two_gate_hub("OS-24", "OS-24"))
+
+        self.assertNotIn(other, self._overrides())
+        self.assertEqual(self._by_id_requests(), [], "nothing changed, so nothing to ask")
+
+    async def test_a_blocked_gate_assigned_by_hand_stops_waiting(self):
+        bound, other = await self._bound_duplicate()
+
+        self.controller.set_manual_spool_id(other, 7)
+        await self._rebuild(self._two_gate_hub("OS-24", "OS-24"))
+
+        self.assertNotIn(other, self.controller._parked)
+        self.assertEqual(self._overrides().get(other), 7)
 
     async def test_a_refused_tag_does_not_match_when_the_matcher_is_off(self):
         self.spoolman.set_catalogue((25, "PETG", "FCF6F6", None))
@@ -4070,7 +4111,7 @@ class MmuAceReviewRegressionTests(MatcherTestBase):
         self.assertNotIn(0, self.controller._manual_spool_overrides)
 
         self.spoolman.http_client.fail = False
-        self.controller._spoolman_failed_at[0] -= self.controller.SPOOLMAN_RETRY_S
+        self.controller._parked[0].until = 0
         await self._rebuild()
 
         self.assertEqual(self.controller._manual_spool_overrides.get(0), 24,

@@ -526,6 +526,22 @@ def get_material_temperature(material: str) -> int:
     }
     return temps.get(material.upper(), 210)
 
+@dataclass
+class _ParkedGate:
+    """A gate auto-match is leaving alone for now, and why.
+
+    reason is "refused" (Spoolman answered no: missing, archived, wrong
+    material, or another gate holds the spool) or "unreachable" (no answer).
+    When another gate holding the spool is the reason, blocker and spool_id
+    name it, so the gate is let go as soon as that claim ends rather than when
+    the timer runs out - see _release_unblocked_gates.
+    """
+    until: float
+    reason: str
+    blocker: Optional[int] = None
+    spool_id: Optional[int] = None
+
+
 class MmuAceController:
     ace: MmuAce
     server: Any
@@ -569,15 +585,13 @@ class MmuAceController:
         # The spool each gate was last matched against, so a gate is only asked
         # about when what is in it changes. See _maybe_auto_match.
         self._auto_match_seen: dict = {}
-        # When a tag's own Spoolman ID was last refused, by gate. The tag cannot
-        # change without the identity changing, but the Spoolman record it was
-        # checked against can (material corrected, spool unarchived or created),
-        # so a refusal is looked at again after TAG_RECHECK_S.
-        self._tag_refused_at: dict = {}
-        # When an auto-match attempt last failed to get an answer from Spoolman,
-        # by gate. Retried after SPOOLMAN_RETRY_S rather than on every rebuild, or
-        # an outage costs a timed-out request and a log line per gate per hub poll.
-        self._spoolman_failed_at: dict = {}
+        # Gates auto-match is leaving alone until a deadline, by gate. The tag
+        # cannot change without the identity changing, but the Spoolman record it
+        # was checked against can (material corrected, spool unarchived or
+        # created), so a refusal is looked at again after TAG_RECHECK_S; an
+        # outage after SPOOLMAN_RETRY_S, not on every rebuild, or it costs a
+        # timed-out request and a log line per gate per hub poll.
+        self._parked: dict[int, _ParkedGate] = {}
         # Whether the last auto-match attempt reached Spoolman, so an outage is
         # logged when it starts rather than on every retry.
         self._spoolman_reachable = True
@@ -1350,6 +1364,9 @@ class MmuAceController:
         current_filament = filament_hub.get("current_filament")
         self._sync_loaded_gate_from_current_filament(current_filament)
 
+        # Every gate is in place now, so claims that ended this rebuild can be seen.
+        self._release_unblocked_gates()
+
         gates = [g for u in self.ace.units for g in u.gates]
         fingerprint = str([
             (g.index, g.spool_id, g.status, g.material, g.color)
@@ -1731,37 +1748,42 @@ class MmuAceController:
                 logging.info(f"Gate {gate_index}: spool changed "
                              f"({previous or 'no tag'} -> {sku or 'no tag'}), "
                              "forgetting its Spoolman ID")
-                freed = self._manual_spool_overrides.pop(gate_index, None)
+                self._manual_spool_overrides.pop(gate_index, None)
                 store.forget(gate_index)
                 self._deactivate_if_loaded(gate_index)
                 # Offer the new roll now. Waiting for the next rebuild can mean
                 # waiting indefinitely: an idle printer sends no hub updates.
                 self._maybe_auto_match(gate_index, gate, sku)
-                if freed:
-                    # As a task: this runs mid-rebuild, before the new gates are
-                    # in self.ace.units, so the other gates cannot be read yet.
-                    self._spawn(self._offer_gates_naming(freed, gate_index))
         except Exception as e:
             logging.warning(f"[mmu_ace] Spoolman assignment sync failed on gate {gate_index}: {e}")
 
-    async def _offer_gates_naming(self, spool_id: int, freed_from: int):
-        """Offer the matcher every unbound gate whose tag names a spool just freed.
+    def _release_unblocked_gates(self):
+        """Let go of every gate parked behind another gate's claim that has ended.
 
-        Such a gate was refused because another gate held the spool, and went on
-        the TAG_RECHECK_S timer. The usual way to get here is a tag that stopped
-        reading for longer than SKU_LOST_GRACE_S while a duplicate sat in another
-        gate: the spool is free now, so there is no reason to wait out the rest
-        of the recheck for it.
+        A gate refused because another gate holds its spool (two rolls with one
+        tag) would otherwise wait out TAG_RECHECK_S after that roll is pulled,
+        cleared or its tag lost. Pulled, not pushed: the claim is checked here,
+        after a rebuild and after a clear, rather than at every place a claim can
+        end. Asks nothing of Spoolman; a released gate goes through the per-gate
+        sync, which honours a user's clear and a lost tag's grace.
         """
-        for gate_index, gate in self._iter_gates():
-            if (gate_index != freed_from
-                    and gate_index not in self._manual_spool_overrides
-                    and self._matcher.spool_id_from_sku(gate.sku) == spool_id):
-                self._tag_refused_at.pop(gate_index, None)
-                self._auto_match_seen.pop(gate_index, None)
-                # Through the per-gate sync, not straight to the matcher: it is
-                # what honours a user's clear and a lost tag's grace.
-                self._sync_spool_store(gate_index, gate, gate.sku)
+        for gate_index, parked in list(self._parked.items()):
+            if parked.blocker is None:
+                continue
+            if gate_index in self._manual_spool_overrides:
+                # Assigned since (by hand, or restored): nothing left to wait for.
+                del self._parked[gate_index]
+                continue
+            gate_lookup = self._get_gate_by_index(gate_index)
+            if not gate_lookup:
+                continue
+            gate = gate_lookup[1]
+            if (self._manual_spool_overrides.get(parked.blocker) == parked.spool_id
+                    and self._still_holds_its_spool(parked.blocker, gate.sku)):
+                continue
+            del self._parked[gate_index]
+            self._auto_match_seen.pop(gate_index, None)
+            self._sync_spool_store(gate_index, gate, gate.sku)
 
     def _iter_gates(self):
         """Every gate as last reported, with its global index."""
@@ -1810,10 +1832,9 @@ class MmuAceController:
         if gate_index in self._auto_match_inflight:
             return
         identity = self._matcher.identity(gate, sku)
-        if self._auto_match_seen.get(gate_index) == identity and not self._tag_recheck_due(gate_index):
+        if self._auto_match_seen.get(gate_index) == identity and not self._recheck_due(gate_index):
             return
-        self._tag_refused_at.pop(gate_index, None)
-        self._spoolman_failed_at.pop(gate_index, None)
+        self._parked.pop(gate_index, None)
         self._auto_match_seen[gate_index] = identity
         self._auto_match_inflight.add(gate_index)
         self._spawn(self._auto_match_gate(gate_index))
@@ -1824,13 +1845,14 @@ class MmuAceController:
     # again. Shorter than TAG_RECHECK_S: an outage at boot usually ends in seconds.
     SPOOLMAN_RETRY_S = 60.0
 
-    def _tag_recheck_due(self, gate_index: int) -> bool:
-        now = time.monotonic()
-        refused_at = self._tag_refused_at.get(gate_index)
-        if refused_at is not None and now - refused_at >= self.TAG_RECHECK_S:
-            return True
-        failed_at = self._spoolman_failed_at.get(gate_index)
-        return failed_at is not None and now - failed_at >= self.SPOOLMAN_RETRY_S
+    def _park(self, gate_index: int, reason: str, wait_s: float,
+              blocker: Optional[int] = None, spool_id: Optional[int] = None):
+        self._parked[gate_index] = _ParkedGate(time.monotonic() + wait_s, reason,
+                                               blocker, spool_id)
+
+    def _recheck_due(self, gate_index: int) -> bool:
+        parked = self._parked.get(gate_index)
+        return parked is not None and time.monotonic() >= parked.until
 
     def _note_spoolman_answered(self):
         # Only what a request showed: a lookup can return without asking anything
@@ -1843,7 +1865,7 @@ class MmuAceController:
 
     def _note_spoolman_unavailable(self, gate_index: int, error: Exception):
         """Park a gate whose lookup got no answer, logging the outage once."""
-        self._spoolman_failed_at[gate_index] = time.monotonic()
+        self._park(gate_index, "unreachable", self.SPOOLMAN_RETRY_S)
         if self._spoolman_reachable:
             self._spoolman_reachable = False
             logging.info(f"Gate {gate_index}: auto-match could not reach Spoolman ({error}); "
@@ -1928,14 +1950,16 @@ class MmuAceController:
                     stale = True
                     return
                 if not spool_id:
-                    self._tag_refused_at[gate_index] = time.monotonic()
+                    self._park(gate_index, "refused", self.TAG_RECHECK_S)
                     return
-                claimants = [g for g, s in self._manual_spool_overrides.items()
-                             if s == spool_id and g != gate_index]
-                if any(self._still_holds_its_spool(g, gate.sku) for g in claimants):
+                holder = next((g for g, s in self._manual_spool_overrides.items()
+                               if s == spool_id and g != gate_index
+                               and self._still_holds_its_spool(g, gate.sku)), None)
+                if holder is not None:
                     logging.warning(f"Gate {gate_index}: tag names spool {spool_id}, "
-                                    "but another gate still holds it - leaving unassigned")
-                    self._tag_refused_at[gate_index] = time.monotonic()
+                                    f"but gate {holder} still holds it - leaving unassigned")
+                    self._park(gate_index, "refused", self.TAG_RECHECK_S,
+                               blocker=holder, spool_id=spool_id)
                     return
                 # Otherwise the roll was moved here, and set_manual_spool_id moves
                 # the assignment with it.
@@ -2162,6 +2186,8 @@ class MmuAceController:
         # "start over", not "leave these gates alone".
         self._spool_store.suppress(gate_index, getattr(gate, "sku", "") or "")
         gate.spool_id = 0
+        # A gate waiting behind this one's claim need not wait out its timer.
+        self._release_unblocked_gates()
 
         self._handle_status_update(force=True)
 
@@ -2182,8 +2208,7 @@ class MmuAceController:
         """
         # A reset is "start over", so gates become matchable again.
         self._auto_match_seen.clear()
-        self._tag_refused_at.clear()
-        self._spoolman_failed_at.clear()
+        self._parked.clear()
         gates = set(self._manual_spool_overrides) | set(self._spool_store.entries)
         if gates:
             self._forget_all_assignments(gates)
