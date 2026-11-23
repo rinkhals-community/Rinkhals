@@ -275,10 +275,6 @@ export LD_LIBRARY_PATH=/userdata/app/gk:$LD_LIBRARY_PATH
 #TARGETS="gklib gkapi gkcam K3SysUi"
 TARGETS="gkapi K3SysUi"
 
-file_md5() {
-    md5sum $1 2> /dev/null | awk '{print $1}'
-}
-
 for TARGET in $TARGETS; do
     TARGET_PATCH=/opt/rinkhals/patches/${TARGET}.${KOBRA_MODEL_CODE}_${KOBRA_VERSION}.sh
 
@@ -292,18 +288,15 @@ for TARGET in $TARGETS; do
         # the stock binary is only ever moved, never deleted, and the patched copy is synced and checked
         # before it takes the stock path, so after a reboot the path holds a complete binary or nothing,
         # and a missing or damaged one is recovered from $TARGET.original below
+        # (start-rinkhals.sh does the same recovery earlier, even when Rinkhals is disabled)
 
-        STOCK_MD5=$(sed -n 's/^# Before MD5: //p' $TARGET_PATCH)
+        STOCK_MD5=$(stock_md5_of $TARGET_PATCH)
         PATCHED_MD5=$(sed -n 's/^# After MD5: //p' $TARGET_PATCH)
 
         # A previous boot didn't get to put the stock binary back
-        if [ -f $TARGET.original ] && [ "$(file_md5 $TARGET)" != "$STOCK_MD5" ] && [ "$(file_md5 $TARGET.original)" = "$STOCK_MD5" ]; then
-            log "/!\ Restoring stock $TARGET left over from an interrupted startup"
-            mv -f $TARGET.original $TARGET
-            sync
-        fi
+        restore_stock_binary /userdata/app/gk $TARGET $STOCK_MD5
 
-        if [ "$(file_md5 $TARGET)" != "$STOCK_MD5" ]; then
+        if [ "$(stock_binary_md5 $TARGET)" != "$STOCK_MD5" ]; then
             log "/!\ $TARGET doesn't match the stock firmware, starting it as it is"
             continue
         fi
@@ -314,16 +307,13 @@ for TARGET in $TARGETS; do
         chmod +x $TARGET.tmp
         sync
 
-        if [ "$(file_md5 $TARGET.tmp)" != "$PATCHED_MD5" ]; then
+        if [ "$(stock_binary_md5 $TARGET.tmp)" != "$PATCHED_MD5" ]; then
             log "/!\ Failed to patch $TARGET, starting it without the Rinkhals patch"
             rm -f $TARGET.tmp
             continue
         fi
 
-        rm -f $TARGET.original
-        mv $TARGET $TARGET.original
-        mv $TARGET.tmp $TARGET
-        sync
+        swap_in_patched_binary /userdata/app/gk $TARGET
     fi
 done
 
@@ -346,12 +336,7 @@ fi
 ./gkcam >> $RINKHALS_LOGS/gkcam.log 2>&1 &
 
 for TARGET in $TARGETS; do
-    if [ -f $TARGET.original ]; then
-        rm -rf $TARGET.patch 2> /dev/null
-        mv $TARGET $TARGET.patch
-        mv $TARGET.original $TARGET
-        sync
-    fi
+    swap_back_stock_binary /userdata/app/gk $TARGET
 done
 
 # gklib configures the MCUs when it starts. If another Klipper host configured them last and they have
