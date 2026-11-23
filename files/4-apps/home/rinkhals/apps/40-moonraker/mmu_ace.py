@@ -596,6 +596,12 @@ class MmuAceController:
         # logged when it starts rather than on every retry.
         self._spoolman_reachable = True
         self._spoolman_missing_logged = False
+        # The one timer that wakes for the earliest _parked deadline, and that
+        # deadline; see _recheck_parked. _sleep is asyncio.sleep, held here so
+        # tests can stand in for the wait.
+        self._recheck_task = None
+        self._recheck_at: Optional[float] = None
+        self._sleep = asyncio.sleep
 
         # What Spoolman says about each spool a gate is bound to, by spool ID:
         # vendor and filament name, which fill in what the SKU parse could not name
@@ -1849,6 +1855,51 @@ class MmuAceController:
               blocker: Optional[int] = None, spool_id: Optional[int] = None):
         self._parked[gate_index] = _ParkedGate(time.monotonic() + wait_s, reason,
                                                blocker, spool_id)
+        self._schedule_recheck()
+
+    def _schedule_recheck(self):
+        """Have one timer wake for the earliest parked deadline.
+
+        The rebuild re-offers a parked gate once it is due, but an idle printer
+        sends no hub updates: a refusal fixed in Spoolman, or an outage over -
+        most likely at boot - would leave the gate unassigned until something on
+        the hub changed. A later deadline leaves the timer alone; an earlier one
+        replaces it.
+        """
+        if not self._parked:
+            return
+        due = min(parked.until for parked in self._parked.values())
+        if self._recheck_task is not None and self._recheck_at is not None \
+                and self._recheck_at <= due:
+            return
+        if self._recheck_task is not None:
+            self._recheck_task.cancel()
+        self._recheck_at = due
+        self._recheck_task = self._spawn(self._recheck_parked(due))
+
+    async def _recheck_parked(self, due: float):
+        """Wait for `due`, then re-offer every gate parked until then."""
+        try:
+            await self._sleep(max(0.0, due - time.monotonic()))
+        except asyncio.CancelledError:
+            return
+        if self._recheck_at != due:
+            return   # superseded by an earlier deadline
+        self._recheck_task = None
+        self._recheck_at = None
+        for gate_index, parked in list(self._parked.items()):
+            if parked.until > due:
+                continue
+            # Out of the table before it is offered: an attempt that fails parks
+            # it again with a new deadline, and one the sync never makes (gate
+            # emptied, cleared by the user) must not leave a past deadline for
+            # the timer to wake for again at once.
+            del self._parked[gate_index]
+            self._auto_match_seen.pop(gate_index, None)
+            gate_lookup = self._get_gate_by_index(gate_index)
+            if gate_lookup:
+                self._sync_spool_store(gate_index, gate_lookup[1], gate_lookup[1].sku)
+        self._schedule_recheck()
 
     def _recheck_due(self, gate_index: int) -> bool:
         parked = self._parked.get(gate_index)

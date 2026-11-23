@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import logging
 import re
@@ -2402,6 +2403,12 @@ class MatcherTestBase(AsyncControllerTestBase):
         if self.MODE is not None:
             self.controller._matcher.mode = self.MODE
 
+        # The recheck timer: never wakes unless a test says otherwise. Draining
+        # it would otherwise retry at once, without the time passing.
+        async def never_wakes(_seconds):
+            raise asyncio.CancelledError
+        self.controller._sleep = never_wakes
+
     def _hub(self, gate=0, material=None, colour=None, sku=None, status="ready"):
         hub = build_mixed_hub()
         slot = hub["filament_hubs"][0]["slots"][gate]
@@ -3185,6 +3192,95 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         await self._rebuild()
 
         self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_an_outage_is_retried_without_a_hub_update(self):
+        # An idle printer sends no hub updates, so the retry cannot wait for one.
+        self.spoolman.http_client.fail = True
+        waits = []
+
+        async def spoolman_back_after(seconds):
+            waits.append(seconds)
+            self.spoolman.http_client.fail = False
+            for parked in self.controller._parked.values():
+                parked.until = 0
+
+        self.controller._sleep = spoolman_back_after
+        await self._rebuild()   # the only hub update
+
+        self.assertEqual(len(waits), 1)
+        self.assertAlmostEqual(waits[0], self.controller.SPOOLMAN_RETRY_S, delta=1)
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_one_retry_timer_however_many_gates_fail(self):
+        self.spoolman.http_client.fail = True
+        waits = []
+
+        async def count(seconds):
+            waits.append(seconds)
+            raise asyncio.CancelledError
+
+        self.controller._sleep = count
+        await self._rebuild(self._two_gate_hub("OS-24", "OS-25"))
+
+        self.assertEqual(len(waits), 1)
+
+    async def test_a_refused_tag_is_rechecked_without_a_hub_update(self):
+        # Fixing the Spoolman record is enough, even on an idle printer.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        waits = []
+
+        async def fixed_meanwhile(seconds):
+            waits.append(seconds)
+            self.spoolman.set_catalogue((24, "PETG", "FCF6F6", None))
+            for parked in self.controller._parked.values():
+                parked.until = 0
+
+        self.controller._sleep = fixed_meanwhile
+        await self._rebuild()   # the only hub update
+
+        self.assertAlmostEqual(waits[0], self.controller.TAG_RECHECK_S, delta=1)
+        self.assertEqual(self._overrides().get(0), 24)
+
+    async def test_the_timer_does_not_spin_on_a_gate_that_cannot_be_offered(self):
+        # Refused, then emptied: the wake finds nothing to offer, and must not
+        # leave a past deadline behind to wake for again at once.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        await self._rebuild()
+        self.assertIn(0, self.controller._parked)
+        wakes = []
+
+        async def wake_twice_at_most(seconds):
+            wakes.append(seconds)
+            if len(wakes) > 2:
+                raise asyncio.CancelledError
+            for parked in self.controller._parked.values():
+                parked.until = 0
+
+        self.controller._sleep = wake_twice_at_most
+        await self._rebuild(self._hub(status="empty"))
+        # The setUp timer never woke; start the one this test drives.
+        self.controller._recheck_task = None
+        self.controller._schedule_recheck()
+        await self.loop.drain()
+
+        self.assertNotIn(0, self.controller._parked)
+        self.assertLessEqual(len(wakes), 1, "woke again for a deadline already handled")
+
+    async def test_an_earlier_deadline_reschedules_the_timer(self):
+        # A refusal (300 s) then an outage on another gate (60 s): wake at 60 s.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        waits = []
+
+        async def count(seconds):
+            waits.append(seconds)
+            raise asyncio.CancelledError
+
+        self.controller._sleep = count
+        await self._rebuild()
+        self.spoolman.http_client.fail = True
+        await self._rebuild(self._two_gate_hub("OS-24", "OS-25"))
+
+        self.assertAlmostEqual(waits[-1], self.controller.SPOOLMAN_RETRY_S, delta=1)
 
     async def test_an_outage_is_not_retried_on_every_rebuild(self):
         self.spoolman.http_client.fail = True
