@@ -9,6 +9,7 @@ cp -rf kobra.py moonraker/moonraker/components/kobra.py
 cp -rf memory_manager.py moonraker/moonraker/components/memory_manager.py
 cp -rf mmu_ace.py moonraker/moonraker/components/mmu_ace.py
 cp -rf mmu_ace_spool_store.py moonraker/moonraker/components/mmu_ace_spool_store.py
+cp -rf mmu_ace_sku.py moonraker/moonraker/components/mmu_ace_sku.py
 cp -rf mmu_ace_spool_matcher.py moonraker/moonraker/components/mmu_ace_spool_matcher.py
 cp -rf mmu_ace_metadata.py moonraker/moonraker/components/mmu_ace_metadata.py
 

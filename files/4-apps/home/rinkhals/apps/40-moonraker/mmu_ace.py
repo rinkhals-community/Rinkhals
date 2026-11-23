@@ -10,7 +10,6 @@ import ast
 import logging
 import inspect
 import os
-import re
 import asyncio
 import shutil
 import sys
@@ -41,6 +40,7 @@ from typing import (
 # Import at runtime for actual use
 from ..common import WebRequest, APITransport, RequestType
 from .mmu_ace_spool_store import MmuAceSpoolStore
+from .mmu_ace_sku import SkuFormat, parse_sku_id_formats
 from .mmu_ace_spool_matcher import MmuAceSpoolMatcher, SpoolmanUnavailable
 
 if TYPE_CHECKING:
@@ -537,85 +537,21 @@ def get_material_temperature(material: str) -> int:
     }
     return temps.get(material.upper(), 210)
 
-def parse_anycubic_sku(sku: str) -> dict:
-    """Parse Anycubic SKU code like AHPLBW-107
+@dataclass
+class _ParkedGate:
+    """A gate auto-match is leaving alone for now, and why.
 
-    Returns dict with:
-    - vendor: "Anycubic" or ""
-    - material_type: "PLA", "PETG", etc.
-    - series: "Highspeed", "Basic", etc.
-    - color_code: "BW", "BK", etc.
-    - color_name: "White", "Black", etc.
-    - serial: "107", "106", etc.
+    reason is "refused" (Spoolman answered no: missing, archived, wrong
+    material, or another gate holds the spool) or "unreachable" (no answer).
+    When another gate holding the spool is the reason, blocker and spool_id
+    name it, so the gate is let go as soon as that claim ends rather than when
+    the timer runs out - see _release_unblocked_gates.
     """
-    if not sku or len(sku) < 8:
-        return {"vendor": "", "material_type": "", "series": "", "color_code": "", "color_name": "", "serial": ""}
+    until: float
+    reason: str
+    blocker: Optional[int] = None
+    spool_id: Optional[int] = None
 
-    # Check if it starts with 'A' (Anycubic)
-    vendor = "Anycubic" if sku.startswith("A") else ""
-
-    # Extract parts: A-HPL-BW-107 or AHPLBW-107
-    parts = sku.split("-")
-    if len(parts) == 2:
-        # Format: AHPLBW-107
-        code_part = parts[0][1:]  # Remove 'A'
-        serial = parts[1]
-    else:
-        return {"vendor": vendor, "material_type": "", "series": "", "color_code": "", "color_name": "", "serial": ""}
-
-    # Material type mapping
-    material_map = {
-        "HPL": ("PLA", "Highspeed"),
-        "PLA": ("PLA", "Basic"),
-        "HPETG": ("PETG", "Highspeed"),
-        "PETG": ("PETG", "Basic"),
-        "HABS": ("ABS", "Highspeed"),
-        "ABS": ("ABS", "Basic"),
-        "TPU": ("TPU", "Basic"),
-    }
-
-    # Color code mapping
-    color_map = {
-        "BW": "White",
-        "BK": "Black",
-        "RD": "Red",
-        "BL": "Blue",
-        "GR": "Green",
-        "YL": "Yellow",
-        "OR": "Orange",
-        "PK": "Pink",
-        "GY": "Gray",
-        "PR": "Purple",
-        "BR": "Brown",
-    }
-
-    # Try to extract material and color
-    material_type = ""
-    series = ""
-    color_code = ""
-    color_name = ""
-
-    # Try longest material codes first
-    for mat_code, (mat_type, mat_series) in sorted(material_map.items(), key=lambda x: -len(x[0])):
-        if code_part.startswith(mat_code):
-            material_type = mat_type
-            series = mat_series
-            remaining = code_part[len(mat_code):]
-
-            # Check if remaining part is a color code
-            if remaining in color_map:
-                color_code = remaining
-                color_name = color_map[remaining]
-            break
-
-    return {
-        "vendor": vendor,
-        "material_type": material_type,
-        "series": series,
-        "color_code": color_code,
-        "color_name": color_name,
-        "serial": serial
-    }
 
 class MmuAceController:
     ace: MmuAce
@@ -626,7 +562,9 @@ class MmuAceController:
 
     def __init__(self, server: Server, host: str | None,
                  spool_forget_after: float = MmuAceSpoolStore.DEFAULT_FORGET_AFTER_S,
-                 auto_match_mode: str = "off"):
+                 auto_match_mode: str = "off",
+                 sku_spool_id="off",
+                 vendor_prefixes: Optional[dict] = None):
         self.server = server
         self.eventloop = self.server.get_event_loop()
         self._last_status_update = 0.0
@@ -648,11 +586,41 @@ class MmuAceController:
         self._spool_store = MmuAceSpoolStore(self.server, forget_after=spool_forget_after)
 
         # Off unless asked for; see MmuAceSpoolMatcher for how a gate is matched.
-        self._matcher = MmuAceSpoolMatcher(server, auto_match_mode)
+        # The SKU format, with the user's vendor codes; shared with the matcher so
+        # the gate display and the spool ID read agree on what a SKU is.
+        self.sku_format = SkuFormat(vendor_prefixes)
+        self._matcher = MmuAceSpoolMatcher(server, auto_match_mode, sku_spool_id,
+                                           self.sku_format)
+        self._matcher.on_spool = self._note_spoolman_spool
         self._auto_match_inflight: set = set()
         # The spool each gate was last matched against, so a gate is only asked
         # about when what is in it changes. See _maybe_auto_match.
         self._auto_match_seen: dict = {}
+        # Gates auto-match is leaving alone until a deadline, by gate. The tag
+        # cannot change without the identity changing, but the Spoolman record it
+        # was checked against can (material corrected, spool unarchived or
+        # created), so a refusal is looked at again after TAG_RECHECK_S; an
+        # outage after SPOOLMAN_RETRY_S, not on every rebuild, or it costs a
+        # timed-out request and a log line per gate per hub poll.
+        self._parked: dict[int, _ParkedGate] = {}
+        # Whether the last auto-match attempt reached Spoolman, so an outage is
+        # logged when it starts rather than on every retry.
+        self._spoolman_reachable = True
+        self._spoolman_missing_logged = False
+        # The one timer that wakes for the earliest _parked deadline, and that
+        # deadline; see _recheck_parked. _sleep is asyncio.sleep, held here so
+        # tests can stand in for the wait.
+        self._recheck_task = None
+        self._recheck_at: Optional[float] = None
+        self._sleep = asyncio.sleep
+
+        # What Spoolman says about each spool a gate is bound to, by spool ID:
+        # vendor and filament name, which fill in what the SKU parse could not name
+        # (see _apply_spoolman_info). _spool_info_failed_at rate-limits a lookup
+        # that failed or found nothing, so a gate cannot cost a request per poll.
+        self._spool_info: dict = {}
+        self._spool_info_inflight: set = set()
+        self._spool_info_failed_at: dict = {}
 
         # Strong references to fire-and-forget tasks: asyncio keeps only a weak
         # one, so a task nobody holds can be collected part-way through. That bit
@@ -1353,7 +1321,7 @@ class MmuAceController:
                 # Parse SKU for additional information
                 gate.sku = sku
                 if sku:
-                    sku_info = parse_anycubic_sku(sku)
+                    sku_info = self.sku_format.parse(sku)
                     gate.vendor = sku_info["vendor"]
                     gate.series = sku_info["series"]
                     gate.color_name = sku_info["color_name"]
@@ -1375,6 +1343,9 @@ class MmuAceController:
                     # user assigned; this branch used to zero it on every poll, which
                     # is what untagged third-party spools always take.
                     gate.spool_id = self._manual_spool_overrides.get(global_gate_index, 0)
+
+                # The tag parse names the gate; Spoolman only fills what it could not.
+                self._apply_spoolman_info(gate)
 
                 unit.gates.append(gate)
 
@@ -1409,6 +1380,9 @@ class MmuAceController:
         # had just set, roughly every 20s during a print.
         current_filament = filament_hub.get("current_filament")
         self._sync_loaded_gate_from_current_filament(current_filament)
+
+        # Every gate is in place now, so claims that ended this rebuild can be seen.
+        self._release_unblocked_gates()
 
         gates = [g for u in self.ace.units for g in u.gates]
         fingerprint = str([
@@ -1794,8 +1768,47 @@ class MmuAceController:
                 self._manual_spool_overrides.pop(gate_index, None)
                 store.forget(gate_index)
                 self._deactivate_if_loaded(gate_index)
+                # Offer the new roll now. Waiting for the next rebuild can mean
+                # waiting indefinitely: an idle printer sends no hub updates.
+                self._maybe_auto_match(gate_index, gate, sku)
         except Exception as e:
             logging.warning(f"[mmu_ace] Spoolman assignment sync failed on gate {gate_index}: {e}")
+
+    def _release_unblocked_gates(self):
+        """Let go of every gate parked behind another gate's claim that has ended.
+
+        A gate refused because another gate holds its spool (two rolls with one
+        tag) would otherwise wait out TAG_RECHECK_S after that roll is pulled,
+        cleared or its tag lost. Pulled, not pushed: the claim is checked here,
+        after a rebuild and after a clear, rather than at every place a claim can
+        end. Asks nothing of Spoolman; a released gate goes through the per-gate
+        sync, which honours a user's clear and a lost tag's grace.
+        """
+        for gate_index, parked in list(self._parked.items()):
+            if parked.blocker is None:
+                continue
+            if gate_index in self._manual_spool_overrides:
+                # Assigned since (by hand, or restored): nothing left to wait for.
+                del self._parked[gate_index]
+                continue
+            gate_lookup = self._get_gate_by_index(gate_index)
+            if not gate_lookup:
+                continue
+            gate = gate_lookup[1]
+            if (self._manual_spool_overrides.get(parked.blocker) == parked.spool_id
+                    and self._still_holds_its_spool(parked.blocker, gate.sku)):
+                continue
+            del self._parked[gate_index]
+            self._auto_match_seen.pop(gate_index, None)
+            self._sync_spool_store(gate_index, gate, gate.sku)
+
+    def _iter_gates(self):
+        """Every gate as last reported, with its global index."""
+        global_index = 0
+        for unit in self.ace.units:
+            for gate in unit.gates:
+                yield global_index, gate
+                global_index += 1
 
     def _spawn(self, coro):
         """Run a coroutine in the background, keeping a reference until it ends."""
@@ -1807,6 +1820,12 @@ class MmuAceController:
     def _maybe_auto_match(self, gate_index: int, gate, sku: str):
         """Queue an unmapped gate for auto-assignment, if that is switched on.
 
+        Either feature qualifies: spool_auto_match (matching against the Spoolman
+        inventory) or sku_spool_id (reading the ID off the tag). They are
+        independent, so the tag can be trusted without opting in to guessing. A tag
+        that carries an ID decides alone: it is never guessed for, even with
+        spool_auto_match on; the inventory is only searched when the tag has none.
+
         Clamped to the spool actually changing. The rebuild runs constantly during
         a print, and the answer for a given spool cannot change between rebuilds,
         so asking again only costs a Spoolman round trip to be told the same thing
@@ -1815,14 +1834,150 @@ class MmuAceController:
         Called from the status rebuild, which is synchronous, so the work itself
         runs as a task. _auto_match_inflight keeps one attempt per gate in flight.
         """
-        if not self._matcher.enabled or gate_index in self._auto_match_inflight:
+        if not (self._matcher.enabled or self._matcher.sku_spool_id_enabled):
+            return
+        if self.server.lookup_component("spoolman", None) is None:
+            # Auto-match is set in [mmu_ace], Spoolman in its own section, and
+            # nothing ties them: matching on with no [spoolman] (or one that
+            # failed to load) is a config state, not an outage. Say so once and
+            # attempt nothing - there is no request to make and nothing to retry.
+            if not self._spoolman_missing_logged:
+                self._spoolman_missing_logged = True
+                logging.info("[mmu_ace] auto-match is on but Spoolman is not configured "
+                             "(no [spoolman] component loaded); no gate can be matched")
+            return
+        if gate_index in self._auto_match_inflight:
             return
         identity = self._matcher.identity(gate, sku)
-        if self._auto_match_seen.get(gate_index) == identity:
+        if self._auto_match_seen.get(gate_index) == identity and not self._recheck_due(gate_index):
             return
+        self._parked.pop(gate_index, None)
         self._auto_match_seen[gate_index] = identity
         self._auto_match_inflight.add(gate_index)
         self._spawn(self._auto_match_gate(gate_index))
+
+    # How long a refused tag ID is left before Spoolman is asked about it again.
+    TAG_RECHECK_S = 300.0
+    # How long a gate whose lookup could not reach Spoolman is left before trying
+    # again. Shorter than TAG_RECHECK_S: an outage at boot usually ends in seconds.
+    SPOOLMAN_RETRY_S = 60.0
+
+    def _park(self, gate_index: int, reason: str, wait_s: float,
+              blocker: Optional[int] = None, spool_id: Optional[int] = None):
+        self._parked[gate_index] = _ParkedGate(time.monotonic() + wait_s, reason,
+                                               blocker, spool_id)
+        self._schedule_recheck()
+
+    def _schedule_recheck(self):
+        """Have one timer wake for the earliest parked deadline.
+
+        The rebuild re-offers a parked gate once it is due, but an idle printer
+        sends no hub updates: a refusal fixed in Spoolman, or an outage over -
+        most likely at boot - would leave the gate unassigned until something on
+        the hub changed. A later deadline leaves the timer alone; an earlier one
+        replaces it.
+        """
+        if not self._parked:
+            return
+        due = min(parked.until for parked in self._parked.values())
+        if self._recheck_task is not None and self._recheck_at is not None \
+                and self._recheck_at <= due:
+            return
+        if self._recheck_task is not None:
+            self._recheck_task.cancel()
+        self._recheck_at = due
+        self._recheck_task = self._spawn(self._recheck_parked(due))
+
+    async def _recheck_parked(self, due: float):
+        """Wait for `due`, then re-offer every gate parked until then."""
+        try:
+            await self._sleep(max(0.0, due - time.monotonic()))
+        except asyncio.CancelledError:
+            return
+        if self._recheck_at != due:
+            return   # superseded by an earlier deadline
+        self._recheck_task = None
+        self._recheck_at = None
+        for gate_index, parked in list(self._parked.items()):
+            if parked.until > due:
+                continue
+            # Out of the table before it is offered: an attempt that fails parks
+            # it again with a new deadline, and one the sync never makes (gate
+            # emptied, cleared by the user) must not leave a past deadline for
+            # the timer to wake for again at once.
+            del self._parked[gate_index]
+            self._auto_match_seen.pop(gate_index, None)
+            gate_lookup = self._get_gate_by_index(gate_index)
+            if gate_lookup:
+                self._sync_spool_store(gate_index, gate_lookup[1], gate_lookup[1].sku)
+        self._schedule_recheck()
+
+    def _recheck_due(self, gate_index: int) -> bool:
+        parked = self._parked.get(gate_index)
+        return parked is not None and time.monotonic() >= parked.until
+
+    def _note_spoolman_answered(self):
+        # Only what a request showed: a lookup can return without asking anything
+        # (no material, a cached answer), which says nothing about an outage.
+        if not self._matcher.reachable:
+            return
+        if not self._spoolman_reachable:
+            logging.info("[mmu_ace] auto-match: Spoolman is reachable again")
+        self._spoolman_reachable = True
+
+    def _note_spoolman_unavailable(self, gate_index: int, error: Exception):
+        """Park a gate whose lookup got no answer, logging the outage once."""
+        self._park(gate_index, "unreachable", self.SPOOLMAN_RETRY_S)
+        if self._spoolman_reachable:
+            self._spoolman_reachable = False
+            logging.info(f"Gate {gate_index}: auto-match could not reach Spoolman ({error}); "
+                         f"retrying every {self.SPOOLMAN_RETRY_S:.0f}s")
+
+    def _gate_still_holding(self, gate_index: int, identity: tuple):
+        """The gate as it is now if it still holds what `identity` describes, else None.
+
+        An auto-match awaits Spoolman, and a hub update can land meanwhile. Binding
+        the answer to a gate that now holds another roll would attach the old
+        tag's spool to the new roll's SKU, and that sticks: the store then agrees
+        with the gate, so nothing ever looks swapped.
+        """
+        gate_lookup = self._get_gate_by_index(gate_index)
+        if not gate_lookup:
+            return None
+        gate = gate_lookup[1]
+        if (gate.status == GATE_EMPTY
+                or gate_index in self._manual_spool_overrides
+                or self._matcher.identity(gate, gate.sku) != identity):
+            return None
+        return gate
+
+    def _still_holds_its_spool(self, gate_index: int, fallback_sku: str) -> bool:
+        """Whether a gate still holds the roll its assignment was made for.
+
+        An empty gate, or one now reading a different SKU than it was bound with,
+        has had that roll taken out, so its claim on the spool is stale. The SKU it
+        was bound with is compared (fallback_sku if none was recorded), not just
+        emptiness: a roll swapped for another leaves the gate full but the old spool
+        gone.
+        """
+        gate_lookup = self._get_gate_by_index(gate_index)
+        if not gate_lookup:
+            return False
+        gate = gate_lookup[1]
+        if gate.status == GATE_EMPTY:
+            return False
+        entry = self._spool_store.entries.get(gate_index) or {}
+        recorded_sku = entry.get("sku")
+        if gate.sku == (recorded_sku or fallback_sku):
+            return True
+        if not gate.sku and recorded_sku:
+            # A tag that stopped reading is most often a failed RFID read, not a
+            # roll taken out. Give it the store's SKU_LOST_GRACE_S, as the gate's
+            # own sync does, or one missed read hands the spool to another gate
+            # carrying a duplicate tag. Only for a tag the gate was bound with: an
+            # untagged gate assigned by hand has nothing to lose, and the tag wins.
+            return not self._spool_store.spool_swapped(gate_index, gate.sku)
+        return False
 
     async def _auto_match_gate(self, gate_index: int):
         """Apply whatever the matcher picks for an unmapped gate.
@@ -1830,6 +1985,7 @@ class MmuAceController:
         Everything here is about the gate still being a candidate by the time the
         task runs; which spool it should get is the matcher's decision.
         """
+        stale = False
         try:
             if gate_index in self._manual_spool_overrides:
                 return
@@ -1839,8 +1995,51 @@ class MmuAceController:
             _, gate = gate_lookup
             if gate.status == GATE_EMPTY:
                 return
+            # What the gate held when the question was asked; checked again after
+            # every await, since the answer is only about this.
+            identity = self._matcher.identity(gate, gate.sku)
 
+            # A tag that names its own spool decides alone: the roll says which
+            # spool it is, so a refused ID (missing, archived, wrong material) is
+            # not second-guessed by picking something similar from the inventory.
+            # Refusals are looked at again after TAG_RECHECK_S, since Spoolman may
+            # have been fixed meanwhile. The matcher only runs for a tag with no ID.
+            if self._matcher.spool_id_from_sku(gate.sku) is not None:
+                spool_id = await self._matcher.spool_from_sku(gate, gate_index)
+                self._note_spoolman_answered()
+                gate = self._gate_still_holding(gate_index, identity)
+                if gate is None:
+                    stale = True
+                    return
+                if not spool_id:
+                    self._park(gate_index, "refused", self.TAG_RECHECK_S)
+                    return
+                holder = next((g for g, s in self._manual_spool_overrides.items()
+                               if s == spool_id and g != gate_index
+                               and self._still_holds_its_spool(g, gate.sku)), None)
+                if holder is not None:
+                    logging.warning(f"Gate {gate_index}: tag names spool {spool_id}, "
+                                    f"but gate {holder} still holds it - leaving unassigned")
+                    self._park(gate_index, "refused", self.TAG_RECHECK_S,
+                               blocker=holder, spool_id=spool_id)
+                    return
+                # Otherwise the roll was moved here, and set_manual_spool_id moves
+                # the assignment with it.
+                self.set_manual_spool_id(gate_index, spool_id)
+                return
+            # Reading tag IDs is on but this SKU gives none: say why, or a tag the
+            # hub reads but never binds leaves nothing in the log to go on.
+            # Logged once per spool, like every other outcome here.
+            unread = self._matcher.sku_unread_reason(gate.sku)
+            if unread:
+                logging.info(f"Gate {gate_index}: SKU {gate.sku} carries no spool ID - {unread}")
+            if not self._matcher.enabled:
+                return
             spool_id = await self._matcher.match(gate, gate_index)
+            self._note_spoolman_answered()
+            if self._gate_still_holding(gate_index, identity) is None:
+                stale = True
+                return
             if not spool_id:
                 return
             if spool_id in self._manual_spool_overrides.values():
@@ -1852,18 +2051,135 @@ class MmuAceController:
                 return
             self.set_manual_spool_id(gate_index, spool_id)
         except SpoolmanUnavailable as e:
-            # Not an answer, so it must not count as one: forget that this spool
-            # was considered, or an outage - most likely at boot - would leave the
-            # gate unmatched until it is physically changed or Moonraker restarts.
-            self._auto_match_seen.pop(gate_index, None)
-            logging.info(f"Gate {gate_index}: auto-match could not reach Spoolman "
-                         f"({e}); will retry")
+            # Not an answer, so it must not count as one: retry after
+            # SPOOLMAN_RETRY_S, or an outage - most likely at boot - would leave
+            # the gate unmatched until it is physically changed or Moonraker
+            # restarts. Not on every rebuild, which would be a timed-out request
+            # and a log line per gate per hub poll for as long as it lasts.
+            self._note_spoolman_unavailable(gate_index, e)
         except Exception as e:
             logging.warning(f"[mmu_ace] Auto-match failed on gate {gate_index}: {e}")
             self._auto_match_seen.pop(gate_index, None)
         finally:
             self._auto_match_inflight.discard(gate_index)
+            if stale:
+                # The gate changed while Spoolman was asked. The rebuild that
+                # brought the change skipped this gate (an attempt was in flight),
+                # and an idle printer may not send another, so look at it now.
+                # _sync_spool_store never raises.
+                gate_lookup = self._get_gate_by_index(gate_index)
+                if gate_lookup:
+                    self._sync_spool_store(gate_index, gate_lookup[1], gate_lookup[1].sku)
 
+
+    # How long what Spoolman said about a spool is trusted before it is asked again
+    # (a rename or recolour there reaches the gate within this), and how long a
+    # lookup that failed or found no such spool is left alone.
+    SPOOL_INFO_TTL_S = 600.0
+    SPOOL_INFO_RETRY_S = 60.0
+
+    @staticmethod
+    def _read_spoolman_info(spool: dict) -> dict:
+        """The naming fields of a Spoolman spool; empty ones are None."""
+        filament = spool.get("filament") or {}
+        vendor = ((filament.get("vendor") or {}).get("name") or "").strip()
+        name = (filament.get("name") or "").strip()
+        return {"vendor": vendor or None, "name": name or None,
+                "fetched": time.monotonic()}
+
+    @staticmethod
+    def _spoolman_filament_name(vendor: str, name: str) -> str:
+        """Vendor and Spoolman's filament name, without repeating the vendor."""
+        if vendor and not name.casefold().startswith(vendor.casefold()):
+            return f"{vendor} {name}"
+        return name
+
+    def _note_spoolman_spool(self, spool: dict):
+        """Keep what a spool fetched for any reason says about itself."""
+        spool_id = spool.get("id")
+        if isinstance(spool_id, int) and spool_id > 0:
+            self._spool_info[spool_id] = self._read_spoolman_info(spool)
+            self._spool_info_failed_at.pop(spool_id, None)
+
+    def _apply_spoolman_info(self, gate):
+        """Fill in what the SKU parse could not name from the bound Spoolman spool.
+
+        The parse comes first: a tag that parses to a vendor and series keeps that
+        name. Spoolman supplies the vendor when the parse found none, and the name
+        when the parse could not build one - an untagged spool, a third-party tag,
+        a vendor code that is not configured. The colour is always the tag's.
+        Called on every rebuild, since each one starts the gate over from the hub's
+        data, and it also queues the lookup if that is due.
+        """
+        spool_id = gate.spool_id
+        if spool_id <= 0:
+            return
+        info = self._spool_info.get(spool_id)
+        if info:
+            named_by_parse = bool(gate.vendor and gate.series)
+            if not gate.vendor and info["vendor"]:
+                gate.vendor = info["vendor"]
+            if not named_by_parse and info["name"]:
+                gate.filament_name = self._spoolman_filament_name(gate.vendor, info["name"])
+        self._ensure_spoolman_info(spool_id)
+
+    def _ensure_spoolman_info(self, spool_id: int):
+        if self.server.lookup_component("spoolman", None) is None:
+            return
+        now = time.monotonic()
+        info = self._spool_info.get(spool_id)
+        if info and now - info["fetched"] < self.SPOOL_INFO_TTL_S:
+            return
+        if spool_id in self._spool_info_inflight:
+            return
+        failed_at = self._spool_info_failed_at.get(spool_id)
+        if failed_at is not None and now - failed_at < self.SPOOL_INFO_RETRY_S:
+            return
+        self._spool_info_inflight.add(spool_id)
+        self._spawn(self._fetch_spoolman_info(spool_id))
+
+    async def _fetch_spoolman_info(self, spool_id: int):
+        """Ask Spoolman about one spool, then redraw every gate holding it."""
+        try:
+            spool = await self._matcher.get_spool(spool_id)
+            if spool is None:
+                # Gone from Spoolman: back to the parse, and do not ask every poll.
+                self._spool_info.pop(spool_id, None)
+                self._spool_info_failed_at[spool_id] = time.monotonic()
+        except SpoolmanUnavailable as e:
+            self._spool_info_failed_at[spool_id] = time.monotonic()
+            logging.info(f"Spoolman spool {spool_id}: details unavailable ({e}); "
+                         "showing what the tag says")
+        except Exception as e:
+            self._spool_info_failed_at[spool_id] = time.monotonic()
+            logging.warning(f"[mmu_ace] Spoolman details for spool {spool_id} failed: {e}")
+        finally:
+            self._spool_info_inflight.discard(spool_id)
+
+        if spool_id in self._spool_info:
+            for unit in self.ace.units:
+                for gate in unit.gates:
+                    if gate.spool_id == spool_id:
+                        self._apply_spoolman_info(gate)
+            self._handle_status_update(force=True)
+
+    def spool_display(self, gate) -> tuple:
+        """(vendor, filament name) the Spoolman proxy reports for a gate's spool."""
+        sku_info = self.sku_format.parse(gate.sku) if gate.sku else {}
+        vendor = sku_info.get("vendor", "Unknown")
+        parts = [vendor, sku_info.get("series", ""), gate.material]
+        if sku_info.get("color_name"):
+            parts.append(sku_info.get("color_name"))
+        name = " ".join([p for p in parts if p])
+
+        info = self._spool_info.get(gate.spool_id) if gate.spool_id > 0 else None
+        if info:
+            named_by_parse = bool(sku_info.get("vendor") and sku_info.get("series"))
+            if vendor in ("", "Unknown") and info["vendor"]:
+                vendor = info["vendor"]
+            if not named_by_parse and info["name"]:
+                name = self._spoolman_filament_name(vendor, info["name"])
+        return vendor, name
 
     def _deactivate_if_loaded(self, gate_index: int):
         """Stop tracking against a gate's spool once we no longer believe it is there.
@@ -1886,11 +2202,23 @@ class MmuAceController:
         """
         for other in [g for g, s in self._manual_spool_overrides.items()
                       if s == spool_id and g != gate_index]:
-            logging.info(f"Gate {other}: spool {spool_id} moved to gate {gate_index}, "
-                         "clearing the old assignment")
+            if other == self.ace.loaded_gate:
+                # The filament in the toolhead came from that gate, so the roll is
+                # most likely still there: Spoolman stops debiting it from here on.
+                logging.warning(f"Gate {other}: spool {spool_id} moved to gate {gate_index} "
+                                f"while gate {other} is loaded - Spoolman stops tracking "
+                                "the loaded filament")
+            else:
+                logging.info(f"Gate {other}: spool {spool_id} moved to gate {gate_index}, "
+                             "clearing the old assignment")
             self._manual_spool_overrides.pop(other, None)
             self._spool_store.forget(other)
             self._deactivate_if_loaded(other)
+            # Stop reporting it there too. Nothing rebuilds the gates while the
+            # printer is idle, so the old gate would go on showing the spool.
+            other_lookup = self._get_gate_by_index(other)
+            if other_lookup:
+                other_lookup[1].spool_id = 0
 
         self._manual_spool_overrides[gate_index] = spool_id
         self._spool_store.remember(gate_index, spool_id, sku)
@@ -1920,6 +2248,8 @@ class MmuAceController:
         # "start over", not "leave these gates alone".
         self._spool_store.suppress(gate_index, getattr(gate, "sku", "") or "")
         gate.spool_id = 0
+        # A gate waiting behind this one's claim need not wait out its timer.
+        self._release_unblocked_gates()
 
         self._handle_status_update(force=True)
 
@@ -1940,9 +2270,13 @@ class MmuAceController:
         """
         # A reset is "start over", so gates become matchable again.
         self._auto_match_seen.clear()
+        self._parked.clear()
         gates = set(self._manual_spool_overrides) | set(self._spool_store.entries)
-        if not gates:
-            return
+        if gates:
+            self._forget_all_assignments(gates)
+        self._rematch_all_gates()
+
+    def _forget_all_assignments(self, gates):
         for gate_index in sorted(gates):
             self._forget_spool_assignment(gate_index)
             # The loaded gate's spool is still active in Spoolman and nothing
@@ -1956,6 +2290,21 @@ class MmuAceController:
             if gate_lookup:
                 gate_lookup[1].spool_id = 0
         self._handle_status_update(force=True)
+
+    def _rematch_all_gates(self):
+        """Offer every gate to the matcher again, now rather than on the next hub change.
+
+        Matching normally runs from the ACE status rebuild, and an idle printer
+        sends no status changes, so after a reset the gates stayed unassigned
+        until a spool was moved or Moonraker restarted. This runs the same
+        per-gate sync the rebuild does, on the gates as last reported.
+        """
+        if not self.ace.enabled:
+            # No hub report yet, so the gates are placeholders; the first
+            # rebuild will offer them to the matcher anyway.
+            return
+        for gate_index, gate in self._iter_gates():
+            self._sync_spool_store(gate_index, gate, gate.sku)
 
     def set_manual_spool_id(self, gate_index: int, spool_id: int) -> bool:
         """Assign a Spoolman database ID to a gate, effective immediately.
@@ -1973,6 +2322,7 @@ class MmuAceController:
         _, gate = gate_lookup
         self._remember_spool_assignment(gate_index, spool_id, gate.sku)
         gate.spool_id = spool_id
+        self._apply_spoolman_info(gate)
 
         self._handle_status_update(force=True)
 
@@ -2014,8 +2364,26 @@ class MmuAcePatcher:
                             f"Valid: {', '.join(MmuAceSpoolMatcher.MODES)}")
             auto_match_mode = "off"
 
+        # Read the Spoolman ID off the tag: a comma-separated list of SKU formats
+        # - openspool (OS-<id>, OpenCubic firmware), spoolkid_ac (SM<id>, SpoolKid's
+        # Anycubic ACE format), anycubic_style (<vendor>H<filament>-<id> on tags you
+        # wrote yourself) - or all, or off (default). Unknown names are skipped with
+        # a warning. Stock Anycubic SKUs are never read, as their number is a
+        # product code (#107).
+        sku_spool_id = parse_sku_id_formats(config.get("sku_spool_id", "off"))
+
+        # Vendor codes for anycubic_style SKUs you wrote yourself, e.g. "AT=Atomic,
+        # T=Tinmorry". Only those SKUs carry a user vendor code; no other format uses it.
+        vendor_prefixes = SkuFormat.parse_prefixes(config.get("sku_vendor_prefixes", ""))
+        # One line saying what was actually loaded: the first thing to check when
+        # tags are not being bound is whether the setting reached Moonraker at all.
+        logging.info(f"[mmu_ace] sku_spool_id: {', '.join(sorted(sku_spool_id)) or 'off'}, "
+                     f"spool_auto_match: {auto_match_mode}")
+
         self.ace_controller = MmuAceController(self.server, host, spool_forget_after=spool_forget_after,
-                                               auto_match_mode=auto_match_mode)
+                                               auto_match_mode=auto_match_mode,
+                                               sku_spool_id=sku_spool_id,
+                                               vendor_prefixes=vendor_prefixes)
         self.ace_controller._on_ace_disabled = self._reset_mmu_status_cache
 
         # Tracks the single in-flight auto-feed poller (issue #464). patch_print_data
@@ -3694,14 +4062,7 @@ class MmuAcePatcher:
                 for gate in unit.gates:
                     # Only include gates with RFID data
                     if gate.spool_id > 0 and gate.sku:
-                        sku_info = parse_anycubic_sku(gate.sku)
-                        vendor_name = sku_info.get("vendor", "Unknown")
-
-                        # Build filament name
-                        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-                        if sku_info.get("color_name"):
-                            parts.append(sku_info.get("color_name"))
-                        filament_name = " ".join([p for p in parts if p])
+                        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
                         # Convert color from RGBA to hex
                         color_hex = None
@@ -3771,14 +4132,7 @@ class MmuAcePatcher:
                 for gate in unit.gates:
                     # Only include gates with RFID data
                     if gate.spool_id > 0 and gate.sku:
-                        sku_info = parse_anycubic_sku(gate.sku)
-                        vendor_name = sku_info.get("vendor", "Unknown")
-
-                        # Build filament name
-                        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-                        if sku_info.get("color_name"):
-                            parts.append(sku_info.get("color_name"))
-                        filament_name = " ".join([p for p in parts if p])
+                        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
                         # Convert color from RGBA to hex
                         color_hex = None
@@ -3838,15 +4192,7 @@ class MmuAcePatcher:
         if not gate:
             raise self.server.error(f"Spool ID {spool_id} not found in ACE units")
 
-        # Parse SKU to get vendor info
-        sku_info = parse_anycubic_sku(gate.sku) if gate.sku else {}
-        vendor_name = sku_info.get("vendor", "Unknown")
-
-        # Build filament name
-        parts = [vendor_name, sku_info.get("series", ""), gate.material]
-        if sku_info.get("color_name"):
-            parts.append(sku_info.get("color_name"))
-        filament_name = " ".join([p for p in parts if p])
+        vendor_name, filament_name = self.ace_controller.spool_display(gate)
 
         # Convert color from RGBA to hex (remove alpha for Spoolman)
         color_hex = None
