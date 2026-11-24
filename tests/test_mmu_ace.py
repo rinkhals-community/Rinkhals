@@ -3801,6 +3801,10 @@ class MmuAceShutdownTests(MatcherTestBase):
         for _ in range(10):
             await asyncio.sleep(0)
 
+    def _real_status_updates(self):
+        # The base class stubs this out; these tests need the tasks it starts.
+        del self.controller._handle_status_update
+
     async def _park_on_a_real_loop(self):
         self.controller.eventloop = asyncio.get_running_loop()
         self.controller._sleep = asyncio.sleep
@@ -3831,6 +3835,32 @@ class MmuAceShutdownTests(MatcherTestBase):
 
         self.assertIsNone(self.controller._recheck_task)
         self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_a_status_update_or_reload_after_close_starts_no_task(self):
+        await self._park_on_a_real_loop()
+        self.patcher.close()
+        await self._settle()
+
+        self._real_status_updates()
+        self.controller._handle_status_update()               # debounced
+        self.controller._handle_status_update(throttle=True)
+        self.controller.set_ace(self.controller.ace)          # _plan_load_ace retry loop
+
+        self.assertIsNone(self.controller._status_update_task)
+        self.assertIsNone(self.controller._plan_load_task)
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_close_cancels_a_pending_status_update(self):
+        await self._park_on_a_real_loop()
+        self._real_status_updates()
+        self.controller._handle_status_update()               # debounced, 200 ms
+        pending = self.controller._status_update_task
+        self.assertFalse(pending.done())
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(pending.done())
 
     async def test_close_cancels_a_pending_auto_feed(self):
         async def feed_later():

@@ -726,18 +726,14 @@ class MmuAceController:
 
             # If no task is running, start throttle timer
             if self._status_update_task is None or self._status_update_task.done():
-                self._status_update_task = self.eventloop.create_task(
-                    self._throttled_status_update()
-                )
+                self._status_update_task = self._spawn(self._throttled_status_update())
             # If task is already running, it will pick up the pending flag
         else:
             # Debounce: cancel previous task and schedule new one
             if self._status_update_task is not None and not self._status_update_task.done():
                 self._status_update_task.cancel()
 
-            self._status_update_task = self.eventloop.create_task(
-                self._debounced_status_update()
-            )
+            self._status_update_task = self._spawn(self._debounced_status_update())
 
     async def _throttled_status_update(self):
         """Throttled status update - sends at most every 300ms with cleanup"""
@@ -881,7 +877,7 @@ class MmuAceController:
         if self._plan_load_task is not None and not self._plan_load_task.done():
             logging.info("set_ace: cancelling stale _plan_load_ace task")
             self._plan_load_task.cancel()
-        self._plan_load_task = self.eventloop.create_task(self._plan_load_ace())
+        self._plan_load_task = self._spawn(self._plan_load_ace())
 
     async def _plan_load_ace(self, retry=10, delay=2):
         for _ in range(retry):
@@ -1838,10 +1834,9 @@ class MmuAceController:
         self._parked.clear()
         self._recheck_task = None
         self._recheck_at = None
-        tasks = list(self._background_tasks)
-        tasks += [self._plan_load_task, self._status_update_task,
-                  self._cache_cleanup_task]
-        for task in tasks:
+        # Every task but the cache cleanup is started through _spawn, so is in
+        # _background_tasks; the cleanup loop uses asyncio.create_task.
+        for task in list(self._background_tasks) + [self._cache_cleanup_task]:
             if task is not None and not task.done():
                 task.cancel()
         self._plan_load_task = None
@@ -1980,8 +1975,8 @@ class MmuAceController:
         gate = gate_lookup[1]
         if (gate.status == GATE_EMPTY
                 or gate_index in self._manual_spool_overrides
-                or self._spool_store.cleared_by_user(gate_index, gate.sku)
-                or self._matcher.identity(gate, gate.sku) != identity):
+                or self._matcher.identity(gate, gate.sku) != identity
+                or self._spool_store.cleared_by_user(gate_index, gate.sku)):
             return None
         return gate
 
