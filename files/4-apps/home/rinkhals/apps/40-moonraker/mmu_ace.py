@@ -2888,6 +2888,12 @@ class MmuAcePatcher:
                 self.ace.filament.pos = FILAMENT_POS_UNLOADED
                 self.ace_controller._handle_status_update(force=True)
 
+                # loaded_gate was just cleared here, so the loaded-gate sync will see
+                # no change when the hub reports the empty toolhead and will not
+                # fire. Stop Spoolman debiting the unloaded spool now, as MMU_LOAD
+                # activates its own.
+                await self.ace_controller._activate_spoolman_for_gate(TOOL_GATE_UNKNOWN)
+
                 message = "MMU_UNLOAD: Unloading all filaments completed, MMU status reset"
                 logging.info(message)
                 await self._send_gcode_response(message)
@@ -2922,6 +2928,12 @@ class MmuAcePatcher:
             self.ace.loaded_gate = TOOL_GATE_UNKNOWN  # No gate loaded anymore
             self.ace.filament.pos = FILAMENT_POS_UNLOADED
             self.ace_controller._handle_status_update(force=True)
+
+            # loaded_gate was just cleared here, so the loaded-gate sync will see
+            # no change when the hub reports the empty toolhead and will not
+            # fire. Stop Spoolman debiting the unloaded spool now, as MMU_LOAD
+            # activates its own.
+            await self.ace_controller._activate_spoolman_for_gate(TOOL_GATE_UNKNOWN)
 
             message = f"MMU_UNLOAD: Unloading {length}mm from gate {gate} (index {local_index}) at {speed}mm/s completed, MMU status reset"
             logging.info(message)

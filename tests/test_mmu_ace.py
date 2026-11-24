@@ -1659,6 +1659,51 @@ class MmuLoadActivationTests(AsyncControllerTestBase):
 
         self.assertEqual(spoolman.activated, [None])
 
+    # MMU_UNLOAD clears loaded_gate itself too, so when the hub then reports an
+    # empty toolhead the sync sees no change and never deactivates: Spoolman went
+    # on pointing at the unloaded spool (seen on a Kobra S1).
+
+    async def _loaded_gate_1(self, spoolman):
+        self.controller.set_manual_spool_id(1, 24)
+        await self.module.MmuAcePatcher._on_gcode_mmu_load(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+        spoolman.activated.clear()
+
+    async def test_manual_unload_of_a_gate_deactivates_the_spool(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [None])
+
+    async def test_manual_unload_all_deactivates_the_spool(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+
+        async def hot(_objects):
+            return {"extruder": {"temperature": 250.0, "target": 0.0}}
+
+        self.controller.printer.query_objects = hot
+
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {}, None)
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [None])
+
+    async def test_the_hub_reporting_the_unload_does_not_deactivate_again(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+        spoolman.activated.clear()
+
+        self.controller._sync_loaded_gate_from_current_filament("")
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [])
+
 
 class MmuAceSpoolPersistenceTests(AsyncControllerTestBase):
     """Assignments survive a Moonraker restart, and are dropped when the evidence
