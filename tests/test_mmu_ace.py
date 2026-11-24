@@ -1353,6 +1353,20 @@ class MmuAceGateMapArgsTests(AsyncControllerTestBase):
         self.assertEqual(self._gate(0).material, "PETG")
         self.assertEqual(self._gate(0).filament_name, "Prusament PETG")
 
+    async def test_reassigning_the_loaded_gates_spool_by_hand_warns(self):
+        # Moving a spool off the gate in the toolhead stops Spoolman tracking the
+        # loaded filament; say so, whether a tag or the user did the moving.
+        self.controller.set_manual_spool_id(1, 24)
+        self.controller.ace.loaded_gate = 1
+
+        with self.assertLogs(level="WARNING") as logs:
+            await self._send({"GATE": "0", "SPOOLID": "24", "QUIET": "1"})
+        await self.loop.drain()
+
+        self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
+        self.assertNotIn(1, self.controller._manual_spool_overrides)
+        self.assertTrue([m for m in logs.output if "while gate 1 is loaded" in m], logs.output)
+
     async def test_mainsail_flat_form_works_on_an_rfid_locked_gate(self):
         await self._send({"GATE": "1", "SPOOLID": "24", "NAME": "Some PLA",
                           "MATERIAL": "PLA", "COLOR": "112233", "TEMP": "210", "QUIET": "1"})
