@@ -3779,6 +3779,72 @@ class MmuAceBackgroundTaskTests(ControllerTestBase):
         self.assertEqual(len(self.controller._background_tasks), 0)
 
 
+class MmuAceShutdownTests(MatcherTestBase):
+    """Moonraker calls close() on every component when it shuts down.
+
+    The recheck timer sleeps for minutes, and nothing cancelled it, nor any other
+    task the controller started: they outlived the component, and a wake after
+    shutdown would query a Spoolman that is already gone.
+    """
+    GATE_SKU = "OS-24"
+
+    def setUp(self):
+        super().setUp()
+        # Refused: the tag names a PLA spool, the gate reads PETG. Parks the gate.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("openspool")
+        self.patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        self.patcher.ace_controller = self.controller
+        self.patcher._auto_feed_task = None
+
+    async def _settle(self):
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    async def _park_on_a_real_loop(self):
+        self.controller.eventloop = asyncio.get_running_loop()
+        self.controller._sleep = asyncio.sleep
+        self.controller._set_ace_status(self._hub())
+        await self._settle()
+        self.assertIn(0, self.controller._parked)
+        task = self.controller._recheck_task
+        self.assertIsNotNone(task)
+        self.assertFalse(task.done(), "the recheck timer should be waiting")
+        return task
+
+    async def test_close_cancels_the_recheck_timer(self):
+        task = await self._park_on_a_real_loop()
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(task.done(), "the recheck timer outlived shutdown")
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_nothing_new_is_started_after_close(self):
+        await self._park_on_a_real_loop()
+        self.patcher.close()
+        await self._settle()
+
+        self.controller._park(1, "unreachable", self.controller.SPOOLMAN_RETRY_S)
+        self.controller._spawn(self.controller._load_spool_assignments())
+
+        self.assertIsNone(self.controller._recheck_task)
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_close_cancels_a_pending_auto_feed(self):
+        async def feed_later():
+            await asyncio.sleep(3600)
+
+        feed = asyncio.get_running_loop().create_task(feed_later())
+        self.patcher._auto_feed_task = feed
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(feed.cancelled())
+
+
 class MmuAceClearedGateTests(MatcherTestBase):
     """An explicit clear has to stick, even with auto-match switched on.
 

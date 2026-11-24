@@ -613,6 +613,8 @@ class MmuAceController:
         self._recheck_task = None
         self._recheck_at: Optional[float] = None
         self._sleep = asyncio.sleep
+        # Set by close() at Moonraker shutdown: nothing new is started after it.
+        self._closed = False
 
         # What Spoolman says about each spool a gate is bound to, by spool ID:
         # vendor and filament name, which fill in what the SKU parse could not name
@@ -654,7 +656,7 @@ class MmuAceController:
 
         # Start periodic cache cleanup task (runs every 60 seconds)
         # Removes expired temperature cache entries to prevent slow memory leak
-        asyncio.create_task(self._periodic_cache_cleanup())
+        self._cache_cleanup_task = asyncio.create_task(self._periodic_cache_cleanup())
 
         # Reading the store is async and __init__ is not, so it runs as a task.
         # Assignments land a moment after startup and are picked up by the first
@@ -1811,11 +1813,39 @@ class MmuAceController:
                 global_index += 1
 
     def _spawn(self, coro):
-        """Run a coroutine in the background, keeping a reference until it ends."""
+        """Run a coroutine in the background, keeping a reference until it ends.
+
+        After close() nothing is started: a task cancelled at shutdown can still
+        reach here from its cleanup, and would otherwise re-arm what was stopped.
+        """
+        if self._closed:
+            coro.close()
+            return None
         task = self.eventloop.create_task(coro)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
+
+    def close(self):
+        """Stop every task this controller started (Moonraker shutdown).
+
+        The recheck timer sleeps for minutes and the others loop or wait too;
+        left running they outlive the component, and a wake would ask a Spoolman
+        or Klippy that is already gone. _closed goes first, so a task's cleanup
+        cannot start new work while they are being cancelled.
+        """
+        self._closed = True
+        self._parked.clear()
+        self._recheck_task = None
+        self._recheck_at = None
+        tasks = list(self._background_tasks)
+        tasks += [self._plan_load_task, self._status_update_task,
+                  self._cache_cleanup_task]
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        self._plan_load_task = None
+        self._status_update_task = None
 
     def _maybe_auto_match(self, gate_index: int, gate, sku: str):
         """Queue an unmapped gate for auto-assignment, if that is switched on.
@@ -1877,7 +1907,7 @@ class MmuAceController:
         the hub changed. A later deadline leaves the timer alone; an earlier one
         replaces it.
         """
-        if not self._parked:
+        if not self._parked or self._closed:
             return
         due = min(parked.until for parked in self._parked.values())
         if self._recheck_task is not None and self._recheck_at is not None \
@@ -3544,6 +3574,13 @@ class MmuAcePatcher:
 
     def get_status(self) -> dict:
         return asdict(self.ace_controller.get_status())
+
+    def close(self):
+        """Called by Moonraker on every component at shutdown."""
+        if self._auto_feed_task is not None and not self._auto_feed_task.done():
+            self._auto_feed_task.cancel()
+        self._auto_feed_task = None
+        self.ace_controller.close()
 
     def _reset_mmu_status_cache(self):
         """Clear the subscription diff cache (see patch_status()).
