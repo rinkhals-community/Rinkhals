@@ -1353,6 +1353,20 @@ class MmuAceGateMapArgsTests(AsyncControllerTestBase):
         self.assertEqual(self._gate(0).material, "PETG")
         self.assertEqual(self._gate(0).filament_name, "Prusament PETG")
 
+    async def test_reassigning_the_loaded_gates_spool_by_hand_warns(self):
+        # Moving a spool off the gate in the toolhead stops Spoolman tracking the
+        # loaded filament; say so, whether a tag or the user did the moving.
+        self.controller.set_manual_spool_id(1, 24)
+        self.controller.ace.loaded_gate = 1
+
+        with self.assertLogs(level="WARNING") as logs:
+            await self._send({"GATE": "0", "SPOOLID": "24", "QUIET": "1"})
+        await self.loop.drain()
+
+        self.assertEqual(self.controller._manual_spool_overrides.get(0), 24)
+        self.assertNotIn(1, self.controller._manual_spool_overrides)
+        self.assertTrue([m for m in logs.output if "while gate 1 is loaded" in m], logs.output)
+
     async def test_mainsail_flat_form_works_on_an_rfid_locked_gate(self):
         await self._send({"GATE": "1", "SPOOLID": "24", "NAME": "Some PLA",
                           "MATERIAL": "PLA", "COLOR": "112233", "TEMP": "210", "QUIET": "1"})
@@ -1644,6 +1658,51 @@ class MmuLoadActivationTests(AsyncControllerTestBase):
         await self.loop.drain()
 
         self.assertEqual(spoolman.activated, [None])
+
+    # MMU_UNLOAD clears loaded_gate itself too, so when the hub then reports an
+    # empty toolhead the sync sees no change and never deactivates: Spoolman went
+    # on pointing at the unloaded spool (seen on a Kobra S1).
+
+    async def _loaded_gate_1(self, spoolman):
+        self.controller.set_manual_spool_id(1, 24)
+        await self.module.MmuAcePatcher._on_gcode_mmu_load(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+        spoolman.activated.clear()
+
+    async def test_manual_unload_of_a_gate_deactivates_the_spool(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [None])
+
+    async def test_manual_unload_all_deactivates_the_spool(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+
+        async def hot(_objects):
+            return {"extruder": {"temperature": 250.0, "target": 0.0}}
+
+        self.controller.printer.query_objects = hot
+
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {}, None)
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [None])
+
+    async def test_the_hub_reporting_the_unload_does_not_deactivate_again(self):
+        spoolman = self.server.add_spoolman()
+        await self._loaded_gate_1(spoolman)
+        await self.module.MmuAcePatcher._on_gcode_mmu_unload(self.patcher, {"GATE": "1"}, None)
+        await self.loop.drain()
+        spoolman.activated.clear()
+
+        self.controller._sync_loaded_gate_from_current_filament("")
+        await self.loop.drain()
+
+        self.assertEqual(spoolman.activated, [])
 
 
 class MmuAceSpoolPersistenceTests(AsyncControllerTestBase):
@@ -3570,6 +3629,23 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(self.controller._spool_store.entries[0],
                          {"spool_id": 25, "sku": "OS-25"})
 
+    async def test_a_clear_during_the_lookup_is_not_undone_by_the_answer(self):
+        # SPOOLID=-1 on a gate with nothing assigned yet, while its tag is being
+        # looked up: the answer must not bind the spool the user just cleared.
+        matcher = self.controller._matcher
+        original = matcher.spool_from_sku
+
+        async def clear_mid_lookup(gate, gate_index):
+            self.controller.clear_manual_spool_id(gate_index)
+            return await original(gate, gate_index)
+
+        matcher.spool_from_sku = clear_mid_lookup
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides(), "the lookup undid the user's clear")
+        self.assertTrue(self.controller._spool_store.cleared_by_user(0, "OS-24"))
+        self.assertNotIn(0, self.controller._parked, "nothing to retry for a cleared gate")
+
     async def test_a_tag_taking_the_loaded_gates_spool_warns(self):
         self.controller.set_manual_spool_id(1, 24)
         hub = self._two_gate_hub("OS-24", None)
@@ -3748,6 +3824,102 @@ class MmuAceBackgroundTaskTests(ControllerTestBase):
         self.assertEqual(len(self.controller._background_tasks), 0)
 
 
+class MmuAceShutdownTests(MatcherTestBase):
+    """Moonraker calls close() on every component when it shuts down.
+
+    The recheck timer sleeps for minutes, and nothing cancelled it, nor any other
+    task the controller started: they outlived the component, and a wake after
+    shutdown would query a Spoolman that is already gone.
+    """
+    GATE_SKU = "OS-24"
+
+    def setUp(self):
+        super().setUp()
+        # Refused: the tag names a PLA spool, the gate reads PETG. Parks the gate.
+        self.spoolman.set_catalogue((24, "PLA", "FCF6F6", None))
+        self.controller._matcher.sku_spool_id = self.module.parse_sku_id_formats("openspool")
+        self.patcher = self.module.MmuAcePatcher.__new__(self.module.MmuAcePatcher)
+        self.patcher.ace_controller = self.controller
+        self.patcher._auto_feed_task = None
+
+    async def _settle(self):
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    def _real_status_updates(self):
+        # The base class stubs this out; these tests need the tasks it starts.
+        del self.controller._handle_status_update
+
+    async def _park_on_a_real_loop(self):
+        self.controller.eventloop = asyncio.get_running_loop()
+        self.controller._sleep = asyncio.sleep
+        self.controller._set_ace_status(self._hub())
+        await self._settle()
+        self.assertIn(0, self.controller._parked)
+        task = self.controller._recheck_task
+        self.assertIsNotNone(task)
+        self.assertFalse(task.done(), "the recheck timer should be waiting")
+        return task
+
+    async def test_close_cancels_the_recheck_timer(self):
+        task = await self._park_on_a_real_loop()
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(task.done(), "the recheck timer outlived shutdown")
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_nothing_new_is_started_after_close(self):
+        await self._park_on_a_real_loop()
+        self.patcher.close()
+        await self._settle()
+
+        self.controller._park(1, "unreachable", self.controller.SPOOLMAN_RETRY_S)
+        self.controller._spawn(self.controller._load_spool_assignments())
+
+        self.assertIsNone(self.controller._recheck_task)
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_a_status_update_or_reload_after_close_starts_no_task(self):
+        await self._park_on_a_real_loop()
+        self.patcher.close()
+        await self._settle()
+
+        self._real_status_updates()
+        self.controller._handle_status_update()               # debounced
+        self.controller._handle_status_update(throttle=True)
+        self.controller.set_ace(self.controller.ace)          # _plan_load_ace retry loop
+
+        self.assertIsNone(self.controller._status_update_task)
+        self.assertIsNone(self.controller._plan_load_task)
+        self.assertEqual(self.controller._background_tasks, set())
+
+    async def test_close_cancels_a_pending_status_update(self):
+        await self._park_on_a_real_loop()
+        self._real_status_updates()
+        self.controller._handle_status_update()               # debounced, 200 ms
+        pending = self.controller._status_update_task
+        self.assertFalse(pending.done())
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(pending.done())
+
+    async def test_close_cancels_a_pending_auto_feed(self):
+        async def feed_later():
+            await asyncio.sleep(3600)
+
+        feed = asyncio.get_running_loop().create_task(feed_later())
+        self.patcher._auto_feed_task = feed
+
+        self.patcher.close()
+        await self._settle()
+
+        self.assertTrue(feed.cancelled())
+
+
 class MmuAceClearedGateTests(MatcherTestBase):
     """An explicit clear has to stick, even with auto-match switched on.
 
@@ -3834,6 +4006,23 @@ class MmuAceClearedGateTests(MatcherTestBase):
 
         self.assertTrue(store.cleared_by_user(0, "AHPETK-102"))
         self.assertFalse(store.cleared_by_user(0, "A-DIFFERENT-SKU"))
+
+    async def test_a_clear_during_the_match_is_not_undone_by_the_answer(self):
+        # Same as the tag path: the user clears the gate while the inventory is
+        # being searched, and the match that comes back must not override that.
+        matcher = self.controller._matcher
+        original = matcher.match
+
+        async def clear_mid_match(gate, gate_index):
+            self.controller.clear_manual_spool_id(gate_index)
+            return await original(gate, gate_index)
+
+        matcher.match = clear_mid_match
+        await self._rebuild()
+
+        self.assertNotIn(0, self.controller._manual_spool_overrides,
+                         "the match undid the user's clear")
+        self.assertTrue(self.controller._spool_store.cleared_by_user(0, "AHPETK-102"))
 
     async def test_clearing_a_gate_with_matching_off_is_unaffected(self):
         self.controller._matcher.mode = "off"

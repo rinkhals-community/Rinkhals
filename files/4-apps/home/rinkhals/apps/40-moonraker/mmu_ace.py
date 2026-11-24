@@ -613,6 +613,8 @@ class MmuAceController:
         self._recheck_task = None
         self._recheck_at: Optional[float] = None
         self._sleep = asyncio.sleep
+        # Set by close() at Moonraker shutdown: nothing new is started after it.
+        self._closed = False
 
         # What Spoolman says about each spool a gate is bound to, by spool ID:
         # vendor and filament name, which fill in what the SKU parse could not name
@@ -654,7 +656,7 @@ class MmuAceController:
 
         # Start periodic cache cleanup task (runs every 60 seconds)
         # Removes expired temperature cache entries to prevent slow memory leak
-        asyncio.create_task(self._periodic_cache_cleanup())
+        self._cache_cleanup_task = asyncio.create_task(self._periodic_cache_cleanup())
 
         # Reading the store is async and __init__ is not, so it runs as a task.
         # Assignments land a moment after startup and are picked up by the first
@@ -724,18 +726,14 @@ class MmuAceController:
 
             # If no task is running, start throttle timer
             if self._status_update_task is None or self._status_update_task.done():
-                self._status_update_task = self.eventloop.create_task(
-                    self._throttled_status_update()
-                )
+                self._status_update_task = self._spawn(self._throttled_status_update())
             # If task is already running, it will pick up the pending flag
         else:
             # Debounce: cancel previous task and schedule new one
             if self._status_update_task is not None and not self._status_update_task.done():
                 self._status_update_task.cancel()
 
-            self._status_update_task = self.eventloop.create_task(
-                self._debounced_status_update()
-            )
+            self._status_update_task = self._spawn(self._debounced_status_update())
 
     async def _throttled_status_update(self):
         """Throttled status update - sends at most every 300ms with cleanup"""
@@ -848,28 +846,6 @@ class MmuAceController:
             except Exception as e:
                 logging.error(f"Cache cleanup failed: {e}")
 
-    def _send_fast_update(self):
-        """Send full status update immediately (no throttling for fast path)"""
-        try:
-            # Send complete status for Fluidd compatibility, but immediately
-            status = self.get_status()
-            self.server.send_event("mmu_ace:status_update", asdict(status))
-            self._last_fast_update = time.time()
-            logging.info(f"Fast update sent: gate={self.ace.gate}, tool={self.ace.tool}")
-        except Exception as e:
-            logging.error(f"Error sending fast update: {e}")
-
-    async def _fast_update_cooldown_handler(self):
-        """Wait for cooldown period, then send full status update"""
-        try:
-            await asyncio.sleep(self._fast_update_cooldown)
-            # After cooldown, send full update
-            self._send_status_update()
-            logging.info("Fast path cooldown complete, full status sent")
-        except asyncio.CancelledError:
-            # Another fast update came in, this is fine
-            pass
-
     def set_ace(self, ace: MmuAce):
         self.ace = ace
         self._handle_status_update(force=True)
@@ -879,7 +855,7 @@ class MmuAceController:
         if self._plan_load_task is not None and not self._plan_load_task.done():
             logging.info("set_ace: cancelling stale _plan_load_ace task")
             self._plan_load_task.cancel()
-        self._plan_load_task = self.eventloop.create_task(self._plan_load_ace())
+        self._plan_load_task = self._spawn(self._plan_load_ace())
 
     async def _plan_load_ace(self, retry=10, delay=2):
         for _ in range(retry):
@@ -1811,11 +1787,38 @@ class MmuAceController:
                 global_index += 1
 
     def _spawn(self, coro):
-        """Run a coroutine in the background, keeping a reference until it ends."""
+        """Run a coroutine in the background, keeping a reference until it ends.
+
+        After close() nothing is started: a task cancelled at shutdown can still
+        reach here from its cleanup, and would otherwise re-arm what was stopped.
+        """
+        if self._closed:
+            coro.close()
+            return None
         task = self.eventloop.create_task(coro)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
+
+    def close(self):
+        """Stop every task this controller started (Moonraker shutdown).
+
+        The recheck timer sleeps for minutes and the others loop or wait too;
+        left running they outlive the component, and a wake would ask a Spoolman
+        or Klippy that is already gone. _closed goes first, so a task's cleanup
+        cannot start new work while they are being cancelled.
+        """
+        self._closed = True
+        self._parked.clear()
+        self._recheck_task = None
+        self._recheck_at = None
+        # Every task but the cache cleanup is started through _spawn, so is in
+        # _background_tasks; the cleanup loop uses asyncio.create_task.
+        for task in list(self._background_tasks) + [self._cache_cleanup_task]:
+            if task is not None and not task.done():
+                task.cancel()
+        self._plan_load_task = None
+        self._status_update_task = None
 
     def _maybe_auto_match(self, gate_index: int, gate, sku: str):
         """Queue an unmapped gate for auto-assignment, if that is switched on.
@@ -1877,7 +1880,7 @@ class MmuAceController:
         the hub changed. A later deadline leaves the timer alone; an earlier one
         replaces it.
         """
-        if not self._parked:
+        if not self._parked or self._closed:
             return
         due = min(parked.until for parked in self._parked.values())
         if self._recheck_task is not None and self._recheck_at is not None \
@@ -1940,6 +1943,9 @@ class MmuAceController:
         the answer to a gate that now holds another roll would attach the old
         tag's spool to the new roll's SKU, and that sticks: the store then agrees
         with the gate, so nothing ever looks swapped.
+
+        A clear (SPOOLID=-1) that landed meanwhile also ends the attempt: binding
+        the answer would re-apply exactly the mapping the user just rejected.
         """
         gate_lookup = self._get_gate_by_index(gate_index)
         if not gate_lookup:
@@ -1947,7 +1953,8 @@ class MmuAceController:
         gate = gate_lookup[1]
         if (gate.status == GATE_EMPTY
                 or gate_index in self._manual_spool_overrides
-                or self._matcher.identity(gate, gate.sku) != identity):
+                or self._matcher.identity(gate, gate.sku) != identity
+                or self._spool_store.cleared_by_user(gate_index, gate.sku)):
             return None
         return gate
 
@@ -2881,6 +2888,12 @@ class MmuAcePatcher:
                 self.ace.filament.pos = FILAMENT_POS_UNLOADED
                 self.ace_controller._handle_status_update(force=True)
 
+                # loaded_gate was just cleared here, so the loaded-gate sync will see
+                # no change when the hub reports the empty toolhead and will not
+                # fire. Stop Spoolman debiting the unloaded spool now, as MMU_LOAD
+                # activates its own.
+                await self.ace_controller._activate_spoolman_for_gate(TOOL_GATE_UNKNOWN)
+
                 message = "MMU_UNLOAD: Unloading all filaments completed, MMU status reset"
                 logging.info(message)
                 await self._send_gcode_response(message)
@@ -2915,6 +2928,12 @@ class MmuAcePatcher:
             self.ace.loaded_gate = TOOL_GATE_UNKNOWN  # No gate loaded anymore
             self.ace.filament.pos = FILAMENT_POS_UNLOADED
             self.ace_controller._handle_status_update(force=True)
+
+            # loaded_gate was just cleared here, so the loaded-gate sync will see
+            # no change when the hub reports the empty toolhead and will not
+            # fire. Stop Spoolman debiting the unloaded spool now, as MMU_LOAD
+            # activates its own.
+            await self.ace_controller._activate_spoolman_for_gate(TOOL_GATE_UNKNOWN)
 
             message = f"MMU_UNLOAD: Unloading {length}mm from gate {gate} (index {local_index}) at {speed}mm/s completed, MMU status reset"
             logging.info(message)
@@ -3540,6 +3559,13 @@ class MmuAcePatcher:
 
     def get_status(self) -> dict:
         return asdict(self.ace_controller.get_status())
+
+    def close(self):
+        """Called by Moonraker on every component at shutdown."""
+        if self._auto_feed_task is not None and not self._auto_feed_task.done():
+            self._auto_feed_task.cancel()
+        self._auto_feed_task = None
+        self.ace_controller.close()
 
     def _reset_mmu_status_cache(self):
         """Clear the subscription diff cache (see patch_status()).
