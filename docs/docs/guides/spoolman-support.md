@@ -53,6 +53,20 @@ MMU_SET_SPOOL GATE=1 SPOOLID=7
 Write no space after `=`. `SPOOLID=-1` clears a gate's assignment, and `MMU_GATE_MAP RESET=1`
 clears them all.
 
+### What the gate is called
+
+A gate is named from its RFID tag where the tag allows it: a stock Anycubic tag, or a
+hand-written one with a configured vendor code, parses to a vendor, a series and a colour name
+(see [Tags that carry the Spoolman ID](#tags-that-carry-the-spoolman-id)). Where the tag says
+nothing - an untagged spool, a third-party tag, a vendor code that is not configured - a gate
+with a spool assigned is named from Spoolman instead: the spool's **vendor**, and its
+**filament name** with the vendor put in front unless the name already starts with it. The
+colour and the material always come from the tag.
+
+Rinkhals reads the spool again every ten minutes, so a rename in Spoolman reaches the gate
+without a restart. If Spoolman cannot be reached, or the spool is gone from it, the gate keeps
+the tag's own description and is looked up again a minute later.
+
 ### Gates with no spool assigned
 
 When the printer loads a gate you have not mapped, Spoolman's active spool is
@@ -88,10 +102,16 @@ is not enough:
   SKU at all, so nothing distinguishes one from another. The assignment follows the *gate*. If
   you swap one untagged spool for another, re-pick the spool in the UI.
 - **Stock Anycubic tags** carry a *product* code, not a per-spool serial — every roll of
-  "Highspeed PLA Black" reports the same SKU. Two rolls of the same product are
+  "Basic PLA Black" reports the same SKU. Two rolls of the same product are
   indistinguishable to the ACE.
 
-Nothing in what the ACE reports can resolve either case, so Rinkhals does not guess. The
+OpenSpool tags read by recent [OpenCubic](https://github.com/Jupsi/OpenCubic) firmware are not
+in this group: their `OS-<spool_id>` or `OS-<chip UID>` SKU is unique per roll, so swap
+detection and remembering the assignment work for them (see
+[Tags that carry the Spoolman ID](#tags-that-carry-the-spoolman-id)). Older firmware reports the
+same `OPENSPOOL` for every OpenSpool tag, which does fall under the second case.
+
+Nothing in what the ACE reports can resolve the other cases, so Rinkhals does not guess. The
 mapped spool's name and colour are shown per gate in the UI, so a stale assignment is visible
 rather than silent — check it after swapping a spool. If you write your own RFID tags with a
 unique SKU per physical roll, neither case applies and the default `spool_forget_after: 0` is a good fit.
@@ -128,25 +148,36 @@ The string to paste is the SKU the gate reports. Run `MMU_GATE_SKUS` in the cons
 for every gate, along with the material, colour and assigned spool:
 
 ```
-MMU_GATE_SKUS: Gate #0 (unit 0 gate 0): SKU OPENSPOOL - PLA FFFFFF, spool 3
+MMU_GATE_SKUS: Gate #0 (unit 0 gate 0): SKU OS-24 - PLA FFFFFF, spool 24
 MMU_GATE_SKUS: Gate #1 (unit 0 gate 1): SKU AHPLBR-107 - PLA 6B4226, no spool assigned
 MMU_GATE_SKUS: Gate #2 (unit 0 gate 2): SKU no tag - PETG F8C1B8, spool 7
 MMU_GATE_SKUS: Gate #3 (unit 0 gate 3): SKU AHPETK-102 - PETG 000000, no spool assigned
 ```
 
-`no tag` is an untagged gate, and `OPENSPOOL` (an OpenSpool tag, read by custom ACE firmware)
-is skipped as described below; neither can use this tier.
+`no tag` is an untagged gate, and `OPENSPOOL` (an OpenSpool tag on older custom ACE firmware)
+is skipped as described below; neither can use this tier. An `OS-…` SKU is unique per roll, so
+it is not an article number either: to bind those, see
+[Tags that carry the Spoolman ID](#tags-that-carry-the-spoolman-id).
 
 **2. Material and colour**, when the first tier finds nothing. It has to exist as a fallback,
 because the SKU is absent or uninformative more often than not:
 
 - an untagged gate has no SKU at all
-- OpenSpool tags all report the literal string `OPENSPOOL` — the hub uses the payload's
-  `protocol` field as the SKU and discards its `spool_id`. Rinkhals skips that value rather than
-  matching on it, since it would pair any two OpenSpool rolls regardless of what is on them.
-  This only applies if the ACE runs custom firmware that reads non-Anycubic tags, such as
+- OpenSpool tags are only readable on custom ACE firmware such as
   [OpenCubic](https://github.com/Jupsi/OpenCubic); stock firmware reads Anycubic tags only, and
-  reports any other spool as untagged
+  reports any other spool as untagged. What the hub reports as the SKU depends on the version:
+    - **ACE 1 Pro CFW v1.1.2 / ACE 2 Pro CFW v1.0.7 or newer** (OpenCubic v1.0.3 or
+      newer): `OS-<spool_id>` when the tag's payload has a `spool_id` of 1 to 16 characters from
+      `A-Z a-z 0-9 . _ -`; otherwise `OS-<chip UID>` in upper-case hex, for example
+      `OS-04A1B2C3D4E5F6`; otherwise the literal `OPENSPOOL`. The SKU field holds at most 19
+      characters, so a `spool_id` is only reported when `OS-` plus the ID fits that.
+    - **Older firmware** always reports `OPENSPOOL` — the hub used the payload's `protocol`
+      field as the SKU and discarded its `spool_id`.
+
+  `OPENSPOOL` is skipped rather than matched on, since it would pair any two OpenSpool rolls
+  regardless of what is on them. The `OS-` forms are unique per roll but are not an
+  `article_number` either, so they are not a match for this tier; use
+  [`sku_spool_id`](#tags-that-carry-the-spoolman-id) for those
 - a stock Anycubic SKU is a *product* code, shared by every roll of that product — enough to
   identify the product, not the roll
 
@@ -209,6 +240,159 @@ that is the way to ask for another attempt.
 `MMU_GATE_MAP RESET=1` is the exception — that means start over, so every gate becomes
 matchable again.
 
+### Tags that carry the Spoolman ID
+
+If a tag already states which Spoolman spool it belongs to, Rinkhals can simply read that
+instead of searching for it. This is **off by default**, and independent of `spool_auto_match`:
+you can trust your own tags without also letting Rinkhals guess from the inventory.
+
+`sku_spool_id` is a comma-separated list of the SKU formats your tags use:
+
+```ini
+[mmu_ace]
+sku_spool_id: openspool, spoolkid_ac
+```
+
+| Format | SKU | Example | Written by |
+|---|---|---|---|
+| `openspool` | `OS-<digits>` | `OS-24` is Spoolman spool 24 | OpenCubic firmware on the ACE, for an OpenSpool tag whose `spool_id` is a number. `OS-04A1B2C3D4E5F6` contains letters, so it is a chip UID and is not read as an ID. |
+| `spoolkid_ac` | `SM<digits>` | `SM8` is Spoolman spool 8 | [SpoolKid](#spoolkid-tags), in its Anycubic ACE tag format. Stock ACE firmware is enough. |
+| `anycubic_style` | `<vendor>H<material><colour>-<digits>` | `THPLBK-25` is Spoolman spool 25 | You, with a tag-writing app. See [Writing your own tags](#writing-your-own-tags). |
+
+Two more values stand on their own:
+
+| Value | Meaning |
+|---|---|
+| `off` | Read nothing. **Default.** |
+| `all` | Every format above. This also turns on any format added in a later Rinkhals release, so list the formats by name if you want to choose each new one yourself. |
+
+Names are not case-sensitive, and the order does not matter. A name Rinkhals does not know is
+skipped with a warning in the Moonraker log, and the rest of the list still applies. The formats
+cannot overlap (`OS-` then digits, `SM` then digits, and a SKU with an `H` and a dash), so at most
+one of them reads any SKU. A SKU that starts with `OS-` is only ever read by `openspool`.
+
+Stock Anycubic SKUs — those with an empty or `A` vendor code, such as `AHPLBK-105` or
+`HPL18-105` — are **never** read as an ID, whatever formats are on, including `all`. The number after their dash is a product or batch
+code (101 to 108), not a per-roll serial, and taking it as a spool ID is the behaviour that was
+removed in [#107](https://github.com/rinkhals-community/Rinkhals/issues/107). `OPENSPOOL` carries
+nothing and is ignored.
+
+An ID read off a tag is checked against Spoolman before it is used. Rinkhals binds the gate only
+if **all** of these hold, and otherwise leaves it as it was and says why in the Moonraker log
+(at INFO):
+
+- the spool exists
+- the spool is not archived
+- the spool's filament material is the same as the gate's (ignoring case)
+
+A gate that reports no material, or `unknown`, is never bound this way, as there is nothing to
+check against. If Spoolman cannot be reached, the gate is tried again later. A refusal (spool
+missing, archived, or of another material) is checked again after 5 minutes, on the next ACE
+status change (not while the printer sits idle), so fixing the spool in Spoolman binds the gate
+without reinserting it.
+
+The ID is bound the same way an assignment you make yourself is, so it is remembered with the
+tag's SKU, survives a restart, and is dropped when a different spool is put in the gate. A tag
+with an ID is never guessed for: even with `spool_auto_match` on, a refused tag leaves the gate
+unassigned rather than falling back to the inventory. `spool_auto_match` only runs for gates
+whose tag carries no ID.
+
+A tag moved to another gate takes its spool with it: when the gate that held it now reads empty
+or a different roll, the new gate takes the spool over. Your own choices win over the tag: a gate
+you have assigned is left alone, a gate you have cleared stays cleared until the spool in it
+changes, and if another gate still holds the roll the spool was bound with (a duplicate tag, say),
+this gate is left unassigned, a warning is logged, and it is looked at again after 5 minutes.
+
+#### SpoolKid tags
+
+SpoolKid writes RFID tags from your phone, with the filament data taken
+straight from Spoolman. Of the tag formats it offers, only its Anycubic ACE one sets a SKU, and
+that SKU is `SM` followed by the Spoolman spool ID: spool 8 is `SM8`. The ACE reads these tags
+with its stock firmware. Turn the format on with:
+
+```ini
+[mmu_ace]
+sku_spool_id: spoolkid_ac
+```
+
+- The ID is a plain decimal number straight after `SM`, with no dash: `SM-8` is not read. A
+  leading zero is allowed (`SM08` is spool 8), and `SM0` is not an ID.
+- An `SM` SKU says nothing about the filament, so the gate is named from the Spoolman spool
+  instead (see [What the gate is called](#what-the-gate-is-called)). The spool is checked
+  against the material the ACE reads off the tag.
+- Because every roll gets its own ID, two rolls of the same filament in the ACE bind to their
+  own Spoolman spools. Matching by `article_number` cannot tell those apart.
+- Rinkhals cannot tell a SpoolKid tag from another brand's tag whose SKU happens to look like
+  `SM<digits>`. With `spoolkid_ac` (or `all`) on, such a SKU is read as a spool ID too: the
+  material check refuses most wrong IDs, and a tag with an ID is never auto-matched instead. If
+  you use spools whose own tags have SKUs like that, leave `spoolkid_ac` off.
+
+#### Writing your own tags
+
+This is the `anycubic_style` format. With the Android *ACE RFID* app you can write NTAG215 tags
+with a SKU of your choosing. Use the same layout Anycubic does, with your Spoolman spool ID after
+the dash:
+
+```
+<vendor>H<material><colour>-<Spoolman spool ID>
+```
+
+The first `H` ends the vendor code: everything before it is the vendor, everything after it is
+the filament code. The `H` is required. A SKU without one, such as `ATPLBK-25`, is not this
+format and is not read.
+
+- **Vendor** is 1 to 3 upper-case letters with no `H` in them. Empty or `A` means stock Anycubic
+  (Anycubic sometimes leaves the `A` off, as in `HPL18-105`), and those are never read as an ID,
+  so pick something else.
+- **Material and colour** are the codes Anycubic uses, material first, then colour.
+- **Spoolman spool ID** is a plain decimal number.
+
+For example `THPLBK-25` is vendor `T`, `PL` basic PLA, `BK` black, Spoolman spool 25, and
+`ATHPLBK-25` is the same with the two-letter vendor `AT`. Set `sku_spool_id: anycubic_style` to
+have those read. The filament code is also what Rinkhals uses to name the filament in the UI. The
+material codes are:
+
+| Code | Material |
+|---|---|
+| `PL` | PLA Basic |
+| `HS` | PLA High Speed |
+| `PLP` | PLA Plus |
+| `PE` | PETG |
+| `PET` | PETG Translucent |
+| `AS` | ASA |
+| `YG` | PLA Matte |
+| `SC` | PLA Silk |
+| `TP` | TPU |
+
+The colour codes are Anycubic's too (`BK` black, `BW` white, `RR` red, `DB` blue, and so on). An
+unknown colour code is not an error; the colour is just not named.
+
+The vendor code is your own. Teach Rinkhals the ones you use with `sku_vendor_prefixes`, a
+comma-separated list of `CODE=Name`:
+
+```ini
+[mmu_ace]
+sku_spool_id: anycubic_style
+sku_vendor_prefixes: AT=Atomic, T=Tinmorry, V=Verbantin
+```
+
+With that, `ATHPLBK-25` is shown as Atomic basic PLA black, `THPLBR-1` as Tinmorry basic PLA
+brown, and `VHPLVY-14` as Verbantin basic PLA yellow, bound to Spoolman spools 25, 1 and 14.
+A code is 1 to 3 letters (case does not matter), and a code that contains `H` or is `A` (Anycubic, built in)
+is refused with a warning, as is any entry that is not `CODE=Name`. A vendor code only changes
+the name shown; the ID is read whether or not the code is listed.
+
+`sku_vendor_prefixes` only matters if you write `anycubic_style` tags. OpenSpool and SpoolKid
+SKUs carry no vendor code, and stock Anycubic tags are named without it, so leave it out if
+you don't use hand-written tags.
+
+The material check is what makes this safe to do by hand: a typo in the ID that lands on an
+existing spool of a different material is refused rather than bound.
+
+The `article_number` step of `spool_auto_match` is the wrong tool for these tags. Spoolman's
+article number belongs to a *filament*, shared by all its rolls, whereas a tag like `THPLBR-1`
+names one roll.
+
 ## Per filament from the slicer
 
 For a single active spool driven by the slicer, add to `printer.custom.cfg`:
@@ -252,6 +436,7 @@ is replaced as soon as the printer loads a gate.
 | Assignment disappears after a spool swap | Expected on untagged or same-product spools — see the limitation above. |
 | Auto-match does not reassign a gate I cleared | Working as intended — a deliberate clear is remembered. Take the spool out and back in, assign it yourself, or `MMU_GATE_MAP RESET=1`. |
 | Auto-match never assigns a gate | Check `spool_auto_match` is set, then run `grep -i auto-match app-moonraker.log` — every outcome says which it was. Nothing at all means it was never attempted: the gate is already assigned, you cleared it deliberately, or the spool has not changed since the last attempt. |
+| A tag's spool ID is never bound | Check the startup line `[mmu_ace] sku_spool_id: ...` lists the format you set; if it says `off`, the setting is not in `moonraker.custom.conf`. Run `MMU_GATE_SKUS` to see what SKU the hub reports, then `grep "Gate N:" moonraker.log`: a read tag logs either "names Spoolman spool" (with why it was or was not bound) or "carries no spool ID" (with why the SKU holds none, such as `OPENSPOOL` from older firmware or `OS-<chip UID>` from a tag without a numeric `spool_id`). |
 | Auto-match logs "found several spools [a, b] ... leaving it unassigned" | Several rolls share that article number, or that material and colour — often one filament with several spools. Pick one yourself, or set `spool_auto_match: latest`. |
 | Auto-match logs "found no Spoolman spool" | Nothing in the library matches. Check the filament's `article_number`, or its material and colour against what the MMU panel shows for that gate. |
 | Usage debited to the wrong spool | Check the gate's mapped spool in the UI; `grep -i spoolman` in `app-moonraker.log` shows every activation. |

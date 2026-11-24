@@ -334,6 +334,89 @@ wait_for_socket() {
     done
 }
 
+# Stock binaries patched at startup (gkapi, K3SysUi). Every step has to survive a power cut
+# (https://github.com/rinkhals-community/Rinkhals/issues/198). Each function takes the directory
+# first so it can be tested away from /userdata/app/gk
+
+stock_binary_md5() {
+    md5sum $1 2> /dev/null | awk '{print $1}'
+}
+# Prints "<stock MD5> <result>" for binary $2 on model $3, firmware $4 from patches.txt ($1), nothing
+# if that firmware isn't listed. result is the MD5 rinkhals-patcher must produce, "unpatched" or "unverified"
+known_binary() {
+    awk -v t=$2 -v m=$3 -v v=$4 '$1 == t && $2 == m && $3 == v { print $4 " " $5 }' $1 2> /dev/null
+}
+# Prints the stock MD5 of binary $2 on model $3, firmware $4 from patches.txt ($1), nothing if not listed
+stock_md5_of() {
+    local known=$(known_binary $1 $2 $3 $4)
+    echo ${known% *}
+}
+# Puts $2.original back at $1/$2 when $2 isn't stock and $2.original is. Returns 0 if it did
+restore_stock_binary() {
+    local dir=$1 target=$2 stock_md5=$3
+
+    [ -n "$stock_md5" ] || return 1
+    [ "$(stock_binary_md5 $dir/$target)" = "$stock_md5" ] && return 1
+    [ -e $dir/$target.original ] || return 1
+
+    if [ "$(stock_binary_md5 $dir/$target.original)" != "$stock_md5" ]; then
+        log "/!\ $target doesn't match the stock firmware and neither does $target.original, leaving both as they are"
+        return 1
+    fi
+
+    log "/!\ Restoring stock $target left over from an interrupted startup"
+    # Only report success when the stock binary is really in place (a read-only /userdata fails the mv),
+    # or the caller's reboot would loop
+    if ! mv -f $dir/$target.original $dir/$target || [ "$(stock_binary_md5 $dir/$target)" != "$stock_md5" ]; then
+        log "/!\ Failed to restore stock $target"
+        return 1
+    fi
+    sync
+    return 0
+}
+# Moves $2.tmp to $1/$2 and keeps the stock binary as $2.original. With a hardlink the stock
+# path never is empty; without hardlinks it falls back to two moves
+swap_in_patched_binary() {
+    local dir=$1 target=$2
+
+    rm -f $dir/$target.original
+    if ln -f $dir/$target $dir/$target.original 2> /dev/null; then
+        mv -f $dir/$target.tmp $dir/$target
+    else
+        mv $dir/$target $dir/$target.original
+        mv $dir/$target.tmp $dir/$target
+    fi
+    sync
+}
+# Puts $2.original back at $1/$2 and keeps the patched binary as $2.patch
+swap_back_stock_binary() {
+    local dir=$1 target=$2
+
+    [ -f $dir/$target.original ] || return 1
+
+    rm -f $dir/$target.patch
+    if ln -f $dir/$target $dir/$target.patch 2> /dev/null; then
+        mv -f $dir/$target.original $dir/$target
+    else
+        mv $dir/$target $dir/$target.patch
+        mv $dir/$target.original $dir/$target
+    fi
+    sync
+}
+# Restores the stock binaries in $1, given as pairs of name and stock MD5 ($2 $3 ...). A name without
+# a stock MD5 is skipped. Returns 0 if any was restored
+recover_stock_binaries() {
+    local gk_dir=$1 restored=1
+    shift
+
+    while [ $# -ge 2 ]; do
+        restore_stock_binary $gk_dir $1 "$2" && restored=0
+        shift 2
+    done
+
+    return $restored
+}
+
 export APP_STATUS_STARTED=started
 export APP_STATUS_STOPPED=stopped
 

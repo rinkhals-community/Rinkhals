@@ -275,10 +275,6 @@ export LD_LIBRARY_PATH=/userdata/app/gk:$LD_LIBRARY_PATH
 #TARGETS="gklib gkapi gkcam K3SysUi"
 TARGETS="gkapi K3SysUi"
 
-file_md5() {
-    md5sum $1 2> /dev/null | awk '{print $1}'
-}
-
 # Patch gkapi and K3SysUi
 # The patcher finds what to change in the binaries itself, and never touches the file it is given
 # For a firmware Rinkhals has been checked on, patches.txt has the MD5 of the stock binary and the MD5
@@ -293,17 +289,8 @@ if [ ! -s $PATCHES ]; then
     log "/!\ $PATCHES is missing, the patched binaries can't be verified"
 fi
 
-# A complete, unpatched binary: the stock MD5 when we know it, else what the patcher makes of it
-is_stock() {
-    if [ -n "$STOCK_MD5" ]; then
-        [ "$(file_md5 $1)" = "$STOCK_MD5" ]
-    else
-        $PATCHER --check --binary $1 > /dev/null 2>&1
-    fi
-}
-
 for TARGET in $TARGETS; do
-    KNOWN=$(awk -v t=$TARGET -v m=$KOBRA_MODEL_CODE -v v=$KOBRA_VERSION '$1 == t && $2 == m && $3 == v { print $4 " " $5 }' $PATCHES 2> /dev/null)
+    KNOWN=$(known_binary $PATCHES $TARGET $KOBRA_MODEL_CODE $KOBRA_VERSION)
     STOCK_MD5=${KNOWN% *}
     PATCHED_MD5=${KNOWN#* }
 
@@ -316,9 +303,13 @@ for TARGET in $TARGETS; do
     # the stock binary is only ever moved, never deleted, and the patched copy is synced and checked
     # before it takes the stock path, so after a reboot the path holds a complete binary or nothing,
     # and a missing or damaged one is recovered from $TARGET.original below
+    # (start-rinkhals.sh does the same recovery earlier, even when Rinkhals is disabled)
 
-    # A previous boot didn't get to put the stock binary back
-    if [ -f $TARGET.original ] && ! is_stock $TARGET && is_stock $TARGET.original; then
+    # A previous boot didn't get to put the stock binary back. Without a stock MD5 on record (a firmware
+    # Rinkhals hasn't been checked on), the patcher tells a complete, unpatched binary from a leftover one
+    if [ -n "$STOCK_MD5" ]; then
+        restore_stock_binary /userdata/app/gk $TARGET $STOCK_MD5
+    elif [ -f $TARGET.original ] && ! $PATCHER --check --binary $TARGET > /dev/null 2>&1 && $PATCHER --check --binary $TARGET.original > /dev/null 2>&1; then
         log "/!\ Restoring stock $TARGET left over from an interrupted startup"
         mv -f $TARGET.original $TARGET
         sync
@@ -327,7 +318,7 @@ for TARGET in $TARGETS; do
     if [ "$PATCHED_MD5" = "unpatched" ]; then
         continue
     fi
-    if [ -n "$STOCK_MD5" ] && ! is_stock $TARGET; then
+    if [ -n "$STOCK_MD5" ] && [ "$(stock_binary_md5 $TARGET)" != "$STOCK_MD5" ]; then
         log "/!\ $TARGET doesn't match the stock firmware, starting it as it is"
         continue
     fi
@@ -341,7 +332,7 @@ for TARGET in $TARGETS; do
     chmod +x $TARGET.tmp
     sync
 
-    NEW_MD5=$(file_md5 $TARGET.tmp)
+    NEW_MD5=$(stock_binary_md5 $TARGET.tmp)
     if [ -z "$KNOWN" ]; then
         log "Patched $TARGET for firmware $KOBRA_VERSION, which Rinkhals has not been checked on ($NEW_MD5)"
     elif [ "$PATCHED_MD5" = "unverified" ]; then
@@ -352,10 +343,7 @@ for TARGET in $TARGETS; do
         continue
     fi
 
-    rm -f $TARGET.original
-    mv $TARGET $TARGET.original
-    mv $TARGET.tmp $TARGET
-    sync
+    swap_in_patched_binary /userdata/app/gk $TARGET
 done
 
 # Tweak processes priority to avoid MCU timing and more generally priting errors. (https://github.com/rinkhals-community/Rinkhals/issues/128)
@@ -377,12 +365,7 @@ fi
 ./gkcam >> $RINKHALS_LOGS/gkcam.log 2>&1 &
 
 for TARGET in $TARGETS; do
-    if [ -f $TARGET.original ]; then
-        rm -rf $TARGET.patch 2> /dev/null
-        mv $TARGET $TARGET.patch
-        mv $TARGET.original $TARGET
-        sync
-    fi
+    swap_back_stock_binary /userdata/app/gk $TARGET
 done
 
 # gklib configures the MCUs when it starts. If another Klipper host configured them last and they have
