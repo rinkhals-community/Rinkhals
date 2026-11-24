@@ -846,28 +846,6 @@ class MmuAceController:
             except Exception as e:
                 logging.error(f"Cache cleanup failed: {e}")
 
-    def _send_fast_update(self):
-        """Send full status update immediately (no throttling for fast path)"""
-        try:
-            # Send complete status for Fluidd compatibility, but immediately
-            status = self.get_status()
-            self.server.send_event("mmu_ace:status_update", asdict(status))
-            self._last_fast_update = time.time()
-            logging.info(f"Fast update sent: gate={self.ace.gate}, tool={self.ace.tool}")
-        except Exception as e:
-            logging.error(f"Error sending fast update: {e}")
-
-    async def _fast_update_cooldown_handler(self):
-        """Wait for cooldown period, then send full status update"""
-        try:
-            await asyncio.sleep(self._fast_update_cooldown)
-            # After cooldown, send full update
-            self._send_status_update()
-            logging.info("Fast path cooldown complete, full status sent")
-        except asyncio.CancelledError:
-            # Another fast update came in, this is fine
-            pass
-
     def set_ace(self, ace: MmuAce):
         self.ace = ace
         self._handle_status_update(force=True)
