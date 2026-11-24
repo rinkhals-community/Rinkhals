@@ -3570,6 +3570,23 @@ class MmuAceSkuSpoolIdTests(MatcherTestBase):
         self.assertEqual(self.controller._spool_store.entries[0],
                          {"spool_id": 25, "sku": "OS-25"})
 
+    async def test_a_clear_during_the_lookup_is_not_undone_by_the_answer(self):
+        # SPOOLID=-1 on a gate with nothing assigned yet, while its tag is being
+        # looked up: the answer must not bind the spool the user just cleared.
+        matcher = self.controller._matcher
+        original = matcher.spool_from_sku
+
+        async def clear_mid_lookup(gate, gate_index):
+            self.controller.clear_manual_spool_id(gate_index)
+            return await original(gate, gate_index)
+
+        matcher.spool_from_sku = clear_mid_lookup
+        await self._rebuild()
+
+        self.assertNotIn(0, self._overrides(), "the lookup undid the user's clear")
+        self.assertTrue(self.controller._spool_store.cleared_by_user(0, "OS-24"))
+        self.assertNotIn(0, self.controller._parked, "nothing to retry for a cleared gate")
+
     async def test_a_tag_taking_the_loaded_gates_spool_warns(self):
         self.controller.set_manual_spool_id(1, 24)
         hub = self._two_gate_hub("OS-24", None)
@@ -3834,6 +3851,23 @@ class MmuAceClearedGateTests(MatcherTestBase):
 
         self.assertTrue(store.cleared_by_user(0, "AHPETK-102"))
         self.assertFalse(store.cleared_by_user(0, "A-DIFFERENT-SKU"))
+
+    async def test_a_clear_during_the_match_is_not_undone_by_the_answer(self):
+        # Same as the tag path: the user clears the gate while the inventory is
+        # being searched, and the match that comes back must not override that.
+        matcher = self.controller._matcher
+        original = matcher.match
+
+        async def clear_mid_match(gate, gate_index):
+            self.controller.clear_manual_spool_id(gate_index)
+            return await original(gate, gate_index)
+
+        matcher.match = clear_mid_match
+        await self._rebuild()
+
+        self.assertNotIn(0, self.controller._manual_spool_overrides,
+                         "the match undid the user's clear")
+        self.assertTrue(self.controller._spool_store.cleared_by_user(0, "AHPETK-102"))
 
     async def test_clearing_a_gate_with_matching_off_is_unaffected(self):
         self.controller._matcher.mode = "off"

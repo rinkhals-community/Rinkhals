@@ -1940,6 +1940,9 @@ class MmuAceController:
         the answer to a gate that now holds another roll would attach the old
         tag's spool to the new roll's SKU, and that sticks: the store then agrees
         with the gate, so nothing ever looks swapped.
+
+        A clear (SPOOLID=-1) that landed meanwhile also ends the attempt: binding
+        the answer would re-apply exactly the mapping the user just rejected.
         """
         gate_lookup = self._get_gate_by_index(gate_index)
         if not gate_lookup:
@@ -1947,6 +1950,7 @@ class MmuAceController:
         gate = gate_lookup[1]
         if (gate.status == GATE_EMPTY
                 or gate_index in self._manual_spool_overrides
+                or self._spool_store.cleared_by_user(gate_index, gate.sku)
                 or self._matcher.identity(gate, gate.sku) != identity):
             return None
         return gate
