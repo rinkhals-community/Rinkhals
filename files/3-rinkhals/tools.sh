@@ -338,7 +338,7 @@ wait_for_socket() {
 # (https://github.com/rinkhals-community/Rinkhals/issues/198). Each function takes the directory
 # first so it can be tested away from /userdata/app/gk
 
-stock_binary_md5() {
+file_md5() {
     md5sum $1 2> /dev/null | awk '{print $1}'
 }
 # Prints the stock MD5 a patch script expects ("# Before MD5: "), nothing if it has none
@@ -350,10 +350,10 @@ restore_stock_binary() {
     local dir=$1 target=$2 stock_md5=$3
 
     [ -n "$stock_md5" ] || return 1
-    [ "$(stock_binary_md5 $dir/$target)" = "$stock_md5" ] && return 1
+    [ "$(file_md5 $dir/$target)" = "$stock_md5" ] && return 1
     [ -e $dir/$target.original ] || return 1
 
-    if [ "$(stock_binary_md5 $dir/$target.original)" != "$stock_md5" ]; then
+    if [ "$(file_md5 $dir/$target.original)" != "$stock_md5" ]; then
         log "/!\ $target doesn't match the stock firmware and neither does $target.original, leaving both as they are"
         return 1
     fi
@@ -361,7 +361,7 @@ restore_stock_binary() {
     log "/!\ Restoring stock $target left over from an interrupted startup"
     # Only report success when the stock binary is really in place (a read-only /userdata fails the mv),
     # or the caller's reboot would loop
-    if ! mv -f $dir/$target.original $dir/$target || [ "$(stock_binary_md5 $dir/$target)" != "$stock_md5" ]; then
+    if ! mv -f $dir/$target.original $dir/$target || [ "$(file_md5 $dir/$target)" != "$stock_md5" ]; then
         log "/!\ Failed to restore stock $target"
         return 1
     fi
@@ -426,7 +426,7 @@ cleanup_patched_binaries() {
         rm -f $gk_dir/$target.patch $gk_dir/$target.tmp
         [ -e $gk_dir/$target.original ] || continue
 
-        if [ -n "$stock_md5" ] && [ "$(stock_binary_md5 $gk_dir/$target.original)" = "$stock_md5" ]; then
+        if [ -n "$stock_md5" ] && [ "$(file_md5 $gk_dir/$target.original)" = "$stock_md5" ]; then
             rm -f $gk_dir/$target.original
         else
             log "/!\ Keeping $gk_dir/$target.original, it doesn't match the stock firmware"
