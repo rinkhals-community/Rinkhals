@@ -296,7 +296,7 @@ for TARGET in $TARGETS; do
         # A previous boot didn't get to put the stock binary back
         restore_stock_binary /userdata/app/gk $TARGET $STOCK_MD5
 
-        if [ "$(stock_binary_md5 $TARGET)" != "$STOCK_MD5" ]; then
+        if [ "$(file_md5 $TARGET)" != "$STOCK_MD5" ]; then
             log "/!\ $TARGET doesn't match the stock firmware, starting it as it is"
             continue
         fi
@@ -307,7 +307,7 @@ for TARGET in $TARGETS; do
         chmod +x $TARGET.tmp
         sync
 
-        if [ "$(stock_binary_md5 $TARGET.tmp)" != "$PATCHED_MD5" ]; then
+        if [ "$(file_md5 $TARGET.tmp)" != "$PATCHED_MD5" ]; then
             log "/!\ Failed to patch $TARGET, starting it without the Rinkhals patch"
             rm -f $TARGET.tmp
             continue
