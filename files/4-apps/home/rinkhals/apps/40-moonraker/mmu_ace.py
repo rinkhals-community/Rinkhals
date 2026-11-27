@@ -221,6 +221,7 @@ class MmuAceUnit:
     name: str
     status: str
     temp: int
+    humidity: int
     dryer: dict
     gates: List[MmuAceGate]
 
@@ -1265,6 +1266,7 @@ class MmuAceController:
 
             unit.status = hub["status"] if "status" in hub else None
             unit.temp = hub["temp"] if "temp" in hub else None
+            unit.humidity = hub["humidity"] if "humidity" in hub else None
 
             if "dryer_status" in hub:
                 unit.dryer = hub["dryer_status"]
@@ -1581,10 +1583,21 @@ class MmuAceController:
         # Add dryer status if available
         if hasattr(unit, 'dryer') and unit.dryer:
             status.dryer_status = unit.dryer.get("status", "stop")
-            status.dryer_temp = unit.dryer.get("temp", 0)
+            # GoKlipper reports the ACE temperature and humidity on the hub
+            # itself (filament_hubs[i].temp / .humidity) and the remaining
+            # time as dryer_status.remain_time, in seconds (duration is in
+            # minutes). dryer_remaining is in minutes. Older keys kept as
+            # fallback.
+            temp = getattr(unit, 'temp', None)
+            humidity = getattr(unit, 'humidity', None)
+            status.dryer_temp = temp if temp is not None else unit.dryer.get("temp", 0)
             status.dryer_target_temp = unit.dryer.get("target_temp", 0)
-            status.dryer_remaining = unit.dryer.get("remaining_time", 0)
-            status.dryer_humidity = unit.dryer.get("humidity", 0)
+            remain_seconds = unit.dryer.get("remain_time")
+            status.dryer_remaining = (
+                -(-int(remain_seconds) // 60) if remain_seconds is not None
+                else unit.dryer.get("remaining_time", 0)
+            )
+            status.dryer_humidity = humidity if humidity is not None else unit.dryer.get("humidity", 0)
 
         return status
 

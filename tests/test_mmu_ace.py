@@ -412,6 +412,26 @@ class MmuAceControllerSyncTests(unittest.TestCase):
         self.assertEqual(status.mmu.filament_pos, self.module.FILAMENT_POS_LOADED)
         self.assertFalse(status.mmu.active_filament.empty)
 
+    def test_unit_status_reports_dryer_values_from_the_hub(self):
+        # Shape reported by GoKlipper on a Kobra S1 + ACE Pro (read while
+        # drying, 50 °C for 4 h): temperature and humidity live on the hub,
+        # remain_time counts down in seconds while duration is in minutes.
+        hub = self._build_filament_hub("")
+        hub["filament_hubs"][0]["temp"] = 45
+        hub["filament_hubs"][0]["humidity"] = 31
+        hub["filament_hubs"][0]["dryer_status"] = {
+            "status": "drying", "target_temp": 50, "duration": 240, "remain_time": 14385,
+        }
+
+        self.controller._set_ace_status(hub)
+        unit = self.controller.get_unit_status(self.controller.ace.units[0], 0)
+
+        self.assertEqual(unit.dryer_status, "drying")
+        self.assertEqual(unit.dryer_temp, 45)
+        self.assertEqual(unit.dryer_target_temp, 50)
+        self.assertEqual(unit.dryer_remaining, 240)  # 14385 s, rounded up to minutes
+        self.assertEqual(unit.dryer_humidity, 31)
+
     def test_refresh_handles_missing_or_empty_color_without_crashing(self):
         hub = self._build_filament_hub("")
         hub["filament_hubs"][0]["slots"][0]["color"] = []
