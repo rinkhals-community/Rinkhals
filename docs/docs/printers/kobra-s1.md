@@ -19,6 +19,10 @@ title: Anycubic Kobra S1
     back), please open a pull request or share them on
     [Discord](https://discord.gg/bQcrsteFGU).
 
+## Community resources
+
+- [Anycubic Kobra S1 + Rinkhals tuning](https://github.com/IponeRacing/anycubic-kobra-s1-rinkhals-tuning): a start G-code without `G9111` (time to first layer measured from 7:19 to 4:04 with Moonraker), OrcaSlicer presets, `printer.custom.cfg` examples (bed mesh, probing, ACE speeds, macros) and known pitfalls such as `TEMPERATURE_WAIT` in G-code files and `SET_GCODE_OFFSET` being ignored in print files.
+
 ## Firmware history
 
 Check https://github.com/rinkhals-community/Rinkhals.Firmwares/blob/main/manifests-anycubic/manifest-ks1.json
